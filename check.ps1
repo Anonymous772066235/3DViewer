@@ -145,6 +145,65 @@ foreach ($c in $cases) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $prof
 }
 
+
+# ---------- 5b. cull parity: 剔除不得改变画面 ----------
+function Get-Sample([string]$path, [int]$step)
+{
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+    $bmp = [System.Drawing.Bitmap]::new($path)
+    $vals = New-Object System.Collections.Generic.List[int]
+    for ($y = 0; $y -lt $bmp.Height; $y += $step)
+    {
+        for ($x = 0; $x -lt $bmp.Width; $x += $step)
+        {
+            $c = $bmp.GetPixel($x, $y)
+            $vals.Add($c.R); $vals.Add($c.G); $vals.Add($c.B)
+        }
+    }
+    $bmp.Dispose()
+    return ,$vals.ToArray()
+}
+
+$pngOn = Join-Path $outDir 'cull_on.png'
+$pngOff = Join-Path $outDir 'cull_off.png'
+$pair = @(
+    @{ q = 'url=_t/m.stl&slot=B&single=1'; o = $pngOn },
+    @{ q = 'url=_t/m.stl&slot=B&single=1&cull=0'; o = $pngOff }
+)
+foreach ($p in $pair)
+{
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $prof
+    $shotPng = $p.o
+    $pageUrl = $BaseUrl + '/index.html?' + $p.q
+    $pargs = @(
+        '--headless=new', "--user-data-dir=$prof", '--disable-gpu', '--enable-unsafe-swiftshader',
+        '--no-first-run', '--window-size=1400,900', '--virtual-time-budget=30000000',
+        "--screenshot=$shotPng", $pageUrl
+    )
+    Write-Host ("  parity shot: " + $shotPng)
+    Start-Process -FilePath $Chrome -ArgumentList $pargs -Wait -NoNewWindow | Out-Null
+    if (Test-Path $shotPng) { Write-Host ("  parity shot ok: " + (Get-Item $shotPng).Length + " B") }
+    else { Write-Host "  parity shot FAILED" }
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $prof
+}
+
+$parityStatus = 'SKIP'
+if ((Test-Path $pngOn) -and (Test-Path $pngOff))
+{
+    $sa = Get-Sample $pngOn 5
+    $sb = Get-Sample $pngOff 5
+    $n = [math]::Min($sa.Count, $sb.Count)
+    $diff = 0
+    for ($i = 0; $i -lt $n; $i++)
+    {
+        if ([math]::Abs($sa[$i] - $sb[$i]) -gt 8) { $diff++ }
+    }
+    $ratio = if ($n -gt 0) { $diff / $n } else { 1 }
+    if ($ratio -lt 0.01) { $parityStatus = 'PASS' }
+    else { $parityStatus = 'FAIL(diff=' + [math]::Round($ratio * 100, 2) + '%)' }
+}
+$results += New-Object psobject -Property @{ Case = 'cull-parity'; Result = $parityStatus }
+
 # ---------- 6. report ----------
 Write-Host ''
 $results | Format-Table -AutoSize | Out-String -Width 80 | Write-Host

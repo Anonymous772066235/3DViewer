@@ -265,6 +265,84 @@
         return out;
     }
 
+    /* 空间分块：按三角形质心分配到 N×N×N 格，重排索引让同格三角形连续
+     * 与「按顺序切块」相比，每块 AABB 只覆盖局部区域，视锥剔除率高得多 */
+    function buildSpaceChunks(ix, tri)
+    {
+        var N = Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3));
+
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+        var i;
+        for (i = 0; i < ix.vcount; i++)
+        {
+            var vx = ix.verts[i * 3], vy = ix.verts[i * 3 + 1], vz = ix.verts[i * 3 + 2];
+            if (vx < mnx) { mnx = vx; } if (vx > mxx) { mxx = vx; }
+            if (vy < mny) { mny = vy; } if (vy > mxy) { mxy = vy; }
+            if (vz < mnz) { mnz = vz; } if (vz > mxz) { mxz = vz; }
+        }
+
+        var sx = ((mxx - mnx) / N) || 1;
+        var sy = ((mxy - mny) / N) || 1;
+        var sz = ((mxz - mnz) / N) || 1;
+        var grid = new Array(N * N * N);
+
+        for (var t = 0; t < tri; t++)
+        {
+            var o = t * 9;
+            var a0 = ix.idx[o] * 3, a1 = ix.idx[o + 3] * 3, a2 = ix.idx[o + 6] * 3;
+            var cx = (ix.verts[a0] + ix.verts[a1] + ix.verts[a2]) / 3;
+            var cy = (ix.verts[a0 + 1] + ix.verts[a1 + 1] + ix.verts[a2 + 1]) / 3;
+            var cz = (ix.verts[a0 + 2] + ix.verts[a1 + 2] + ix.verts[a2 + 2]) / 3;
+
+            var gi = Math.min(N - 1, Math.max(0, Math.floor((cx - mnx) / sx)));
+            var gj = Math.min(N - 1, Math.max(0, Math.floor((cy - mny) / sy)));
+            var gk = Math.min(N - 1, Math.max(0, Math.floor((cz - mnz) / sz)));
+            var key = (gi * N + gj) * N + gk;
+
+            if (!grid[key]) { grid[key] = []; }
+            grid[key].push(t);
+        }
+
+        var newIdx = new Uint32Array(tri * 3);
+        var chunks = [];
+        var w = 0;
+
+        for (var ck = 0; ck < grid.length; ck++)
+        {
+            var list = grid[ck];
+            if (!list) { continue; }
+
+            var start = w;
+            var cmnx = Infinity, cmny = Infinity, cmnz = Infinity;
+            var cmxx = -Infinity, cmxy = -Infinity, cmxz = -Infinity;
+
+            for (var q = 0; q < list.length; q++)
+            {
+                var o2 = list[q] * 9;
+                for (var k = 0; k < 3; k++)
+                {
+                    var id = ix.idx[o2 + k];
+                    newIdx[w++] = id;
+                    var vo = id * 3;
+                    var qx = ix.verts[vo], qy = ix.verts[vo + 1], qz = ix.verts[vo + 2];
+                    if (qx < cmnx) { cmnx = qx; } if (qx > cmxx) { cmxx = qx; }
+                    if (qy < cmny) { cmny = qy; } if (qy > cmxy) { cmxy = qy; }
+                    if (qz < cmnz) { cmnz = qz; } if (qz > cmxz) { cmxz = qz; }
+                }
+            }
+
+            chunks.push({
+                count: w - start,
+                offset: start * 4,
+                mnx: cmnx, mny: cmny, mnz: cmnz,
+                mxx: cmxx, mxy: cmxy, mxz: cmxz
+            });
+        }
+
+        return { idx: newIdx, chunks: chunks, n: N };
+    }
+
     /* 从 MVP 提取 6 个视锥平面（Gribb–Hartmann，列主序：m 的前 4 个是第 1 列） */
     function frustumFromMVP(m)
     {
@@ -455,6 +533,9 @@
             // 索引化：顶点去重后上传 + 索引缓冲（显存约降 50%，顶点着色器调用大减）
             var ix = buildIndexed(d.positions);
 
+            // 空间分块：按质心分格 + 重排索引（同格三角形连续，AABB 更紧凑）
+            var sc = buildSpaceChunks(ix, d.count);
+
             var vao = gl.createVertexArray();
             gl.bindVertexArray(vao);
             var pb = gl.createBuffer();
@@ -465,35 +546,8 @@
 
             var ib = gl.createBuffer();
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix.idx, gl.STATIC_DRAW);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, sc.idx, gl.STATIC_DRAW);
             gl.bindVertexArray(null);
-
-            // 分块：每块约 count/32 个三角形，索引连续 → 共用同一个 IBO，只换 byteOffset
-            var CHUNK_TRIS = Math.max(2048, Math.ceil(d.count / 32 / 1024) * 1024);
-            var chunks = [];
-            for (var ct0 = 0; ct0 < d.count; ct0 += CHUNK_TRIS)
-            {
-                var ct1 = Math.min(d.count, ct0 + CHUNK_TRIS);
-                var cmnx = Infinity, cmny = Infinity, cmnz = Infinity;
-                var cmxx = -Infinity, cmxy = -Infinity, cmxz = -Infinity;
-
-                for (var vt = ct0 * 3; vt < ct1 * 3; vt++)
-                {
-                    // 注意：verts 是去重顶点，必须用 idx[vt] 映射，不能直接用 vt
-                    var vo = ix.idx[vt] * 3;
-                    var vx = ix.verts[vo], vy = ix.verts[vo + 1], vz = ix.verts[vo + 2];
-                    if (vx < cmnx) { cmnx = vx; } if (vx > cmxx) { cmxx = vx; }
-                    if (vy < cmny) { cmny = vy; } if (vy > cmxy) { cmxy = vy; }
-                    if (vz < cmnz) { cmnz = vz; } if (vz > cmxz) { cmxz = vz; }
-                }
-
-                chunks.push({
-                    count: (ct1 - ct0) * 3,
-                    offset: ct0 * 3 * 4,
-                    mnx: cmnx, mny: cmny, mnz: cmnz,
-                    mxx: cmxx, mxy: cmxy, mxz: cmxz
-                });
-            }
 
             layer.gpu = {
                 refs: 1,
@@ -504,7 +558,7 @@
                 indexed: true,
                 vertCount: ix.vcount,
                 triCount: d.count,
-                chunks: chunks,
+                chunks: sc.chunks,
                 normalVao: null,
                 normalBuffer: null,
                 normalCount: 0
