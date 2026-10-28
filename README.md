@@ -488,6 +488,7 @@ serve.bat
 | `js/io.js` | **L2 IO**：格式解析（STL/OBJ/PLY/点云）+ 孔位优化调用 + 载入前规模估算 | 渲染、界面布局 |
 | `js/algo.js` | **L3 算法**：三维裁剪、拾取与测量 | GL、DOM（App 方法由 app 启动时注入） |
 | `js/render.js` | **L4 渲染**：WebGL 管线 + 视角器 | 图层管理、业务规则 |
+| `js/gizmo.js` | **L4.5 视角器**：削角六面体 26 面、X/Y/Z 方向箭头、点击切换视角 | render 的 GL 状态、图层数据 |
 | `js/ui.js` | **L5 界面**：场景树 / 属性面板 / 视图设置 / 弹窗 / 全局拖放 | GL 细节、算法实现 |
 | `js/app.js` | **L6 编排**：状态、图层、视图调度、输入分派、渲染循环、URL 参数（`MV.config`） | 具体算法与 DOM 细节 |
 | `server/` | 本地服务（静态 + `/optimize`）、独立桥接、端到端自测 | 任何前端代码 |
@@ -517,7 +518,7 @@ serve.bat
 | 约定 | 说明 |
 | --- | --- |
 | 文件名 | 小写 + 语义（`segment` ✅ / `utils2` ❌） |
-| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → ui → app` |
+| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → gizmo → ui → app` |
 | 入口唯一 | 对外只暴露 `serve.bat`；`server/start_bridge.bat` 仅作 `file://` 兜底 |
 | 不使用 ESM / 构建工具 | 保证 `file://` 双击可用（ESM 会被 CORS 拦截），保持零依赖零构建 |
 | URL 参数 | 统一在 `app.init()` 解析成 `MV.config`，其它模块只读配置 |

@@ -280,6 +280,15 @@
 - 实测：全景 `24/24`（不误杀）、拉近 6.7× `16/24`（剔除 33%）
 - **已知局限**：按三角形「顺序」切块，块内三角形空间分散、AABB 偏大 → 剔除率有限。改成**空间分块**（按质心分配到 8×8×8，重排索引后仍连续）可把剔除率提到 80%+，列为下一步
 
+
+**1.0.0.3** — 拆出 gizmo.js（render.js 2114 → 1683 行）
+
+- 视角器（削角六面体 26 面几何 + 绘制 + 命中 + XYZ 箭头，482 行）从 `render.js` 移到 `js/gizmo.js`
+- 新增 `gizmoHooks.notify`（由 `app.js` 注入 `MV.ui.setInfo`），不再借用 render 的 hooks
+- `MV.gizmoGeo` → `MV.gizmo.geo`；`MV.render.installAppMethods` → `MV.gizmo.installAppMethods`
+- `index.html` 加载顺序：`core → io → algo → render → gizmo → ui → app`
+- 验证：`check.ps1` 7 项全 PASS（含 `cull-parity`），截图确认视角器与 XYZ 箭头正常
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）
