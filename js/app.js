@@ -132,7 +132,8 @@
             menu: params.get('menu') === '1',
             colors: params.get('colors') === '1',
             noconfirm: params.get('noconfirm') === '1',
-            debug: params.get('debug') === '1'
+            debug: params.get('debug') === '1',
+            cull: params.get('cull') !== '0'
         };
         var wireParam = params.get('wire');
         this.urlWire = wireParam === '1' || wireParam === '2';
@@ -1244,6 +1245,7 @@
                 ' wc=' + (g0.wireCount || 0) +
                 ' vc=' + (g0.vertCount || 0) +
                 ' nc=' + (g0.normalCount || 0) +
+                ' blocks=' + (this.lastStats.chunksDrawn || 0) + '/' + (this.lastStats.chunksTotal || 0) +
                 ' calls=' + this.lastStats.meshCalls + '/' + this.lastStats.wireCalls + '/' +
                 this.lastStats.vertCalls + '/' + this.lastStats.normalCalls + '/' +
                 (this.lastStats.boundaryCalls || 0) +

@@ -265,6 +265,51 @@
         return out;
     }
 
+    /* 从 MVP 提取 6 个视锥平面（Gribb–Hartmann，列主序：m 的前 4 个是第 1 列） */
+    function frustumFromMVP(m)
+    {
+        var r0 = [m[0], m[4], m[8], m[12]];
+        var r1 = [m[1], m[5], m[9], m[13]];
+        var r2 = [m[2], m[6], m[10], m[14]];
+        var r3 = [m[3], m[7], m[11], m[15]];
+
+        function nrm(a)
+        {
+            var l = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) || 1;
+            return [a[0] / l, a[1] / l, a[2] / l, a[3] / l];
+        }
+
+        return [
+            nrm([r3[0] + r0[0], r3[1] + r0[1], r3[2] + r0[2], r3[3] + r0[3]]),
+            nrm([r3[0] - r0[0], r3[1] - r0[1], r3[2] - r0[2], r3[3] - r0[3]]),
+            nrm([r3[0] + r1[0], r3[1] + r1[1], r3[2] + r1[2], r3[3] + r1[3]]),
+            nrm([r3[0] - r1[0], r3[1] - r1[1], r3[2] - r1[2], r3[3] - r1[3]]),
+            nrm([r3[0] + r2[0], r3[1] + r2[1], r3[2] + r2[2], r3[3] + r2[3]]),
+            nrm([r3[0] - r2[0], r3[1] - r2[1], r3[2] - r2[2], r3[3] - r2[3]])
+        ];
+    }
+
+    /* AABB 是否与 6 个平面相交（保守：假阳性可以，绝不漏画） */
+    function aabbVisible(c, planes)
+    {
+        if (!isFinite(c.mnx) || !isFinite(c.mxx))
+        {
+            return true;                 // 包围盒无效时一律画，宁可多画也不漏
+        }
+        for (var i = 0; i < 6; i++)
+        {
+            var p = planes[i];
+            var x = p[0] > 0 ? c.mxx : c.mnx;
+            var y = p[1] > 0 ? c.mxy : c.mny;
+            var z = p[2] > 0 ? c.mxz : c.mnz;
+            if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /* 顶点去重 + 索引化：非索引三角面（9 float/三角）→ (verts, idx)
      * 量化键 Q=1e4（mm 级坐标 = 0.1 μm 精度），只用于判重，顶点坐标保留原值 */
     function buildIndexed(positions)
@@ -329,7 +374,7 @@
         this.canvas = canvas;
         this.gl = null;
         this.ready = false;
-        this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0 };
+        this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0, chunksDrawn: 0, chunksTotal: 0 };
 
         // 编辑选区预览
         this.previewGeo = null;
@@ -423,6 +468,33 @@
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix.idx, gl.STATIC_DRAW);
             gl.bindVertexArray(null);
 
+            // 分块：每块约 count/32 个三角形，索引连续 → 共用同一个 IBO，只换 byteOffset
+            var CHUNK_TRIS = Math.max(2048, Math.ceil(d.count / 32 / 1024) * 1024);
+            var chunks = [];
+            for (var ct0 = 0; ct0 < d.count; ct0 += CHUNK_TRIS)
+            {
+                var ct1 = Math.min(d.count, ct0 + CHUNK_TRIS);
+                var cmnx = Infinity, cmny = Infinity, cmnz = Infinity;
+                var cmxx = -Infinity, cmxy = -Infinity, cmxz = -Infinity;
+
+                for (var vt = ct0 * 3; vt < ct1 * 3; vt++)
+                {
+                    // 注意：verts 是去重顶点，必须用 idx[vt] 映射，不能直接用 vt
+                    var vo = ix.idx[vt] * 3;
+                    var vx = ix.verts[vo], vy = ix.verts[vo + 1], vz = ix.verts[vo + 2];
+                    if (vx < cmnx) { cmnx = vx; } if (vx > cmxx) { cmxx = vx; }
+                    if (vy < cmny) { cmny = vy; } if (vy > cmxy) { cmxy = vy; }
+                    if (vz < cmnz) { cmnz = vz; } if (vz > cmxz) { cmxz = vz; }
+                }
+
+                chunks.push({
+                    count: (ct1 - ct0) * 3,
+                    offset: ct0 * 3 * 4,
+                    mnx: cmnx, mny: cmny, mnz: cmnz,
+                    mxx: cmxx, mxy: cmxy, mxz: cmxz
+                });
+            }
+
             layer.gpu = {
                 refs: 1,
                 vao: vao,
@@ -432,6 +504,7 @@
                 indexed: true,
                 vertCount: ix.vcount,
                 triCount: d.count,
+                chunks: chunks,
                 normalVao: null,
                 normalBuffer: null,
                 normalCount: 0
@@ -853,7 +926,32 @@
         gl.uniform1i(this.meshU.uShade, shade);
 
         gl.bindVertexArray(g.vao);
-        gl.drawElements(gl.TRIANGLES, g.triCount * 3, gl.UNSIGNED_INT, 0);
+
+        // 分块 + 视锥剔除（?cull=0 可关闭以便对比）
+        var cullOn = !(global.MV.config && global.MV.config.cull === false);
+        if (cullOn && g.chunks && g.chunks.length > 1)
+        {
+            var planes = frustumFromMVP(mvp);
+            var drawn = 0;
+            for (var ci3 = 0; ci3 < g.chunks.length; ci3++)
+            {
+                var ch = g.chunks[ci3];
+                if (!aabbVisible(ch, planes))
+                {
+                    continue;
+                }
+                gl.drawElements(gl.TRIANGLES, ch.count, gl.UNSIGNED_INT, ch.offset);
+                drawn++;
+            }
+            this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + drawn;
+            this.stats.chunksTotal = (this.stats.chunksTotal || 0) + g.chunks.length;
+        }
+        else
+        {
+            gl.drawElements(gl.TRIANGLES, g.triCount * 3, gl.UNSIGNED_INT, 0);
+            this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + 1;
+            this.stats.chunksTotal = (this.stats.chunksTotal || 0) + 1;
+        }
         gl.bindVertexArray(null);
 
         if (pushBack)
@@ -1522,6 +1620,8 @@
         this.stats.vertCalls = 0;
         this.stats.normalCalls = 0;
         this.stats.boundaryCalls = 0;
+        this.stats.chunksDrawn = 0;
+        this.stats.chunksTotal = 0;
 
         gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0, 0, W, H);
