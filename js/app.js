@@ -1606,7 +1606,16 @@
                     A.undoSelection();
                     return;
                 }
-                A.onKey(ev);
+
+                if (A.onKey(ev) && (ev.key === ' ' || ev.code === 'Space'))
+                {
+                    // 应用后把焦点从按钮挪走，避免下一次空格又触发按钮 click
+                    var ae = document.activeElement;
+                    if (ae && ae.blur)
+                    {
+                        ae.blur();
+                    }
+                }
             });
 
             if (A.demoIfRequested) { A.demoIfRequested(); }

@@ -1101,6 +1101,18 @@
 
     function onKey(ev)
     {
+        // 空格 = 继续选中：保留当前高亮，再框一块追加进去（与「继续裁剪」按钮一致）
+        // 裁剪模式下**一律**吃掉默认行为：否则空格会触发焦点所在按钮的 click
+        if ((ev.key === ' ' || ev.code === 'Space') && mode)
+        {
+            ev.preventDefault();
+            if (preview)
+            {
+                beginAppend();
+            }
+            return true;
+        }
+
         if (ev.key === 'Escape' && mode)
         {
             setMode(null);
