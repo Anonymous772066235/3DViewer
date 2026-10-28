@@ -314,6 +314,19 @@ var id = ix.idx[list[q] * 9 + k];
 
 **验证**：同一 OBJ（398,789 三角形）修复后画面完整；STL 正常；`check.ps1` 7 项全 PASS，索引自检无告警。
 
+
+**1.0.0.5 ~ 1.0.0.6** — 索引自检可视化 + 载入可中断
+
+- **1.0.0.5｜索引自检暴露到状态栏**：`uploadLayer` 的越界自检结果写入 `renderer.idxOk`，`?debug=1` 状态栏显示 `idx=ok` / `idx=BAD`；`check.ps1` 的 `base` / `single` 用例新增断言 `idx=ok`
+  - 目的：补上 `cull-parity` 抓不到的盲区（开/关剔除都用同一份坏索引时，两张图一致会误判 PASS）
+- **1.0.0.6｜载入可中断**：新增 `App.prototype.cancelLoad()`；`loadOne` 的分块进度回调里检查 `_abortLoad` 并抛 `__abort__`，`addFiles` 捕获后跳出循环并提示"已取消载入"；**载入中按 `Esc`** 触发取消（优先于其它 Escape 语义）
+  - 未改解析器：仍是一次性解析，但在分块回调处可中止，大文件卡住时可以中途退出
+- 验证：`check.ps1` 7 项全 PASS
+
+**未完成（两次尝试后回退）**：批次 3b「`ui.js init()` 拆 6 个 `bindXxx()`」—— 切分后 `MV.ui` 未被赋值（`Cannot read properties of undefined (reading 'setInfo')`），已从备份回退。两次失败说明一次性切 6 段的做法不可靠，应改为「一次只搬 1 个函数 → 跑一次 `check.ps1` → 再搬下一个」。
+
+**未完成**：批次 2b「STL 单路径流式上传」—— 需把 `loadFile` 改为 onChunk 回调、`loadOne` 边收边建层、`uploadLayer` 支持增量，属架构级改造，未在本轮实施。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

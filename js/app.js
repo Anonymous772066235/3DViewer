@@ -856,6 +856,7 @@
             return;
         }
         this.loading = true;
+        this._abortLoad = false;
 
         for (var i = 0; i < files.length; i++)
         {
@@ -884,6 +885,11 @@
             catch (err)
             {
                 global.MV.ui.setProgress(false, '');
+                if (err && err.message === '__abort__')
+                {
+                    global.MV.ui.setInfo('已取消载入');
+                    break;
+                }
                 global.MV.ui.setInfo('载入失败: ' + file.name + ' — ' + err.message);
                 console.error(err);
             }
@@ -956,6 +962,16 @@
         return mg.decide(ans, est, limit);
     };
 
+    /* 取消正在进行的载入（Esc）：解析器是分块异步的，下一次进度回调时抛出中止信号 */
+    App.prototype.cancelLoad = function ()
+    {
+        if (this.loading)
+        {
+            this._abortLoad = true;
+            global.MV.ui.setInfo('正在取消载入…');
+        }
+    };
+
     App.prototype.loadOne = async function (file, slots, limitOpts)
     {
         var self = this;
@@ -972,6 +988,10 @@
             },
             async function (frac, text)
             {
+                if (self._abortLoad)
+                {
+                    throw new Error('__abort__');
+                }
                 global.MV.ui.setProgress(true, (text || '读取中') + ' · ' + file.name, frac);
                 await new Promise(function (r) { setTimeout(r, 0); });
             },
@@ -1245,6 +1265,7 @@
                 ' wc=' + (g0.wireCount || 0) +
                 ' vc=' + (g0.vertCount || 0) +
                 ' nc=' + (g0.normalCount || 0) +
+                ' idx=' + (this.renderer && this.renderer.idxOk === false ? 'BAD' : 'ok') +
                 ' blocks=' + (this.lastStats.chunksDrawn || 0) + '/' + (this.lastStats.chunksTotal || 0) +
                 ' calls=' + this.lastStats.meshCalls + '/' + this.lastStats.wireCalls + '/' +
                 this.lastStats.vertCalls + '/' + this.lastStats.normalCalls + '/' +
@@ -1469,6 +1490,13 @@
             }
             else if (e.key === 'Escape')
             {
+                // 载入中按 Esc = 取消载入（优先于其它 Escape 语义）
+                if (self.loading)
+                {
+                    self.cancelLoad();
+                    return;
+                }
+
                 if (self.pickMode)
                 {
                     self.cancelPickCenter();

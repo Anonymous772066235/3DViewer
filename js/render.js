@@ -451,6 +451,7 @@
 
         this.canvas = canvas;
         this.gl = null;
+        this.idxOk = true;   // 索引值域自检结果（false = 曾有越界）
         this.ready = false;
         this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0, chunksDrawn: 0, chunksTotal: 0 };
 
@@ -544,6 +545,7 @@
             }
             if (badIdx > 0)
             {
+                this.idxOk = false;
                 layer._uploadFailed = true;
                 if (renderHooks && renderHooks.notify)
                 {

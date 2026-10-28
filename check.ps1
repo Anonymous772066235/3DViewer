@@ -90,8 +90,8 @@ if (-not (Test-Health)) {
 
 # ---------- 4. cases ----------
 $cases = @(
-    @{ name = 'base';     q = 'url=_t/m.stl&slot=B&debug=1';                    must = @('err=0') },
-    @{ name = 'single';   q = 'url=_t/m.stl&slot=B&single=1&debug=1';           must = @('err=0') },
+    @{ name = 'base';     q = 'url=_t/m.stl&slot=B&debug=1';                    must = @('err=0', 'idx=ok') },
+    @{ name = 'single';   q = 'url=_t/m.stl&slot=B&single=1&debug=1';           must = @('err=0', 'idx=ok') },
     @{ name = 'pick';     q = 'url=_t/m.stl&slot=B&single=1&debug=1&demo=pick'; must = @('err=0', 'pick-list') },
     @{ name = 'segment';  q = 'url=_t/m.stl&slot=B&single=1&debug=1&demo=seg&segapply=1'; must = @('err=0', '_segmented') },
     @{ name = 'boundary'; q = 'url=_t/m.stl&slot=B&single=1&debug=1&boundary=1'; must = @('err=0', 'p-boundary') },
