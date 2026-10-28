@@ -289,6 +289,31 @@
 - `index.html` 加载顺序：`core → io → algo → render → gizmo → ui → app`
 - 验证：`check.ps1` 7 项全 PASS（含 `cull-parity`），截图确认视角器与 XYZ 箭头正常
 
+
+**1.0.0.4** — 修复网格面片破碎（导入 OBJ/STL 均受影响）
+
+**现象**：导入 OBJ 的 mesh 后面片呈暗红碎块、几何被拉成细长条；STL 同样受影响。状态栏 `err=0`、三角形数与文件一致（OBJ 398.8k / STL 72.7k），`blocks` 统计也正常 —— 属于"数量和错误码都对、只有画面碎"的静默错误。
+
+**根因**：`render.js` 的 `buildSpaceChunks()` 里索引步长用错。`ix.idx` 是**索引数组**（每个三角形 3 个元素），而代码沿用了 `positions` 的 **9 float/三角形** 步长：
+
+```js
+// 错的
+var o = t * 9;
+var a0 = ix.idx[o] * 3, a1 = ix.idx[o + 3] * 3, a2 = ix.idx[o + 6] * 3;
+var id = ix.idx[list[q] * 9 + k];
+```
+
+`t*9` 远超 `ix.idx.length`（= `tri*3`）→ 取到 `undefined` → 写进 `Uint32Array` 变成 **0** → 大量三角形塌陷到顶点 0，形成放射状碎片与拉伸。
+
+**修复**：索引一律用 `t*3 + k`；同时在 `uploadLayer` 上传前加**索引值域自检**（任何 `idx >= vcount` 立即报错并跳过该图层），避免同类错误再次静默发生。
+
+**为什么之前没被发现**：
+- `check.ps1` 的 `cull-parity` 比较「开剔除 vs 关剔除」，两次都走同一份坏索引 → 两张图一致 → 误判 PASS；
+- 其余用例只断言 `err=0` 与 DOM，不检查画面；
+- 我此前只截了左下角视角器的特写，没看整幅模型。
+
+**验证**：同一 OBJ（398,789 三角形）修复后画面完整；STL 正常；`check.ps1` 7 项全 PASS，索引自检无告警。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

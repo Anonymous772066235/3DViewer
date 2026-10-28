@@ -289,8 +289,8 @@
 
         for (var t = 0; t < tri; t++)
         {
-            var o = t * 9;
-            var a0 = ix.idx[o] * 3, a1 = ix.idx[o + 3] * 3, a2 = ix.idx[o + 6] * 3;
+            // 索引数组是「每三角形 3 个」，不是 positions 的 9 float 步长
+            var a0 = ix.idx[t * 3] * 3, a1 = ix.idx[t * 3 + 1] * 3, a2 = ix.idx[t * 3 + 2] * 3;
             var cx = (ix.verts[a0] + ix.verts[a1] + ix.verts[a2]) / 3;
             var cy = (ix.verts[a0 + 1] + ix.verts[a1 + 1] + ix.verts[a2 + 1]) / 3;
             var cz = (ix.verts[a0 + 2] + ix.verts[a1 + 2] + ix.verts[a2 + 2]) / 3;
@@ -319,7 +319,7 @@
 
             for (var q = 0; q < list.length; q++)
             {
-                var o2 = list[q] * 9;
+                var o2 = list[q] * 3;
                 for (var k = 0; k < 3; k++)
                 {
                     var id = ix.idx[o2 + k];
@@ -535,6 +535,23 @@
 
             // 空间分块：按质心分格 + 重排索引（同格三角形连续，AABB 更紧凑）
             var sc = buildSpaceChunks(ix, d.count);
+
+            // 自检：索引值域越界会让三角形塌到顶点 0（画面破碎但 err=0、面数也对）
+            var badIdx = 0;
+            for (var bi = 0; bi < sc.idx.length; bi++)
+            {
+                if (sc.idx[bi] >= ix.vcount) { badIdx++; }
+            }
+            if (badIdx > 0)
+            {
+                layer._uploadFailed = true;
+                if (renderHooks && renderHooks.notify)
+                {
+                    renderHooks.notify('内部错误：索引越界 ' + badIdx + ' 处（顶点数 ' + ix.vcount +
+                        '，索引上限 ' + (sc.idx.length / 3 | 0) * 3 + '），已跳过该图层');
+                }
+                return;
+            }
 
             var vao = gl.createVertexArray();
             gl.bindVertexArray(vao);
