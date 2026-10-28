@@ -765,11 +765,21 @@
             labels[4] = 'g';
             labels[5] = 'b';
         }
-        else if (w > 6)
+        else if (w >= 6)
         {
-            labels[3] = 'nx';
-            labels[4] = 'ny';
-            labels[5] = 'nz';
+            // 数值优先：第 4~6 列是单位向量（平方和 ≈ 1）→ 默认按法向导入
+            // 仅是默认值，弹窗里每列都能改（x/y/z/nx/ny/nz/r/g/b/tag/sf）
+            var sm = info.sample || [];
+            var ux = Number(sm[3]), uy = Number(sm[4]), uz = Number(sm[5]);
+            var len = Math.sqrt(ux * ux + uy * uy + uz * uz);
+            var unitVec = isFinite(len) && len > 0 && Math.abs(len - 1) <= 0.03;
+
+            if (unitVec || w > 6)
+            {
+                labels[3] = 'nx';
+                labels[4] = 'ny';
+                labels[5] = 'nz';
+            }
         }
 
         for (i = 3; i < w; i++)
