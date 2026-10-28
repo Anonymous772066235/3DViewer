@@ -414,6 +414,170 @@ var id = ix.idx[list[q] * 9 + k];
 > **版本号说明**：本次提交为 **`1.0.0.8`**（git 中上一版是 `1.0.0.7`）。改动过程中版本号曾写到 1.0.0.9 / 1.0.0.10，已统一并回 1.0.0.8。
 > 提醒：**每次改 JS 都要同步升 `?v=`**，否则浏览器按 URL 命中旧缓存，表现为"代码改了页面没变"。
 
+
+**1.0.0.9** — algo.js 剥离全部 DOM 依赖（分层契约达标）
+
+`algo.js` 原有 **11 处 `document.*`**（选择框 SVG 创建 + 4 个裁剪按钮绑定 ×2 处），是把 `segment.js` 并进来时留下的。这次全部移出：
+
+| 原位置 | 内容 | 移到 |
+|---|---|---|
+| `canvasEl()` / `createElementNS` ×4 | 主 canvas 查找 + SVG 选择框、rect、polygon 创建 | **`ui.createSegOverlay()`**（界面层建 DOM，返回 `{overlay, rect, poly}`） |
+| `syncButtons()` | 切 3 个按钮的 `active` / `disabled` | **`ui.syncSegButtons(mode, hasPreview)`**（经 `hooks.syncSegButtons`） |
+| `window.load` 里的 4 个按钮绑定 | 矩形 / 多边形 / 应用拆分 / 取消 | **`app.bindSegmentUi()`**（`app.init()` 之后） |
+| 同处的 `Esc` / `Enter` 监听 | 取消 / 闭合多边形 | **`app` 的 keydown → `MV.algo.onKey(ev)`** |
+| `demoIfRequested()` 调用 | `?demo=seg` 自动演示 | `app.bindSegmentUi()` 末尾 |
+
+`algo` 现在只导出纯逻辑入口：`currentMode / toggleMode / applySplit / cancelEdit / onKey / demoIfRequested`。
+
+**两个修掉的坑**：
+1. `setMode()` 里 `overlay.style.pointerEvents` 报 `Cannot read properties of null` —— `ensureOverlay()` 没拿到选择框。根因：`bindHooks()` 用 `for (var k in hooks)` **遍历 hooks 自身**，新增的 `canvas / createOverlay / syncSegButtons` 永远注入不进来；改成遍历**传入对象**后正常。
+2. 删掉 `canvasEl()` 后 `demoIfRequested()` 里仍有一处 `var cv = canvasEl();` → `ReferenceError`，被 `check.ps1` 的 console 抓取直接指出（`algo.js:851`）。
+
+**依赖复查**：
+
+```
+core.js    MV.ui:0  document:0  gl:0     ✅
+io.js      MV.ui:0  document:0  gl:0     ✅
+algo.js    MV.ui:0  document:0  gl:0     ✅  ← 本次达标
+render.js  MV.ui:0  document:0  gl:458   ✅
+ui.js      MV.ui:3  document:50 gl:0     ✅ 界面层
+app.js     MV.ui:73 document:16 gl:0     ✅ 编排层
+```
+
+**验证**：`check.ps1` 7 项全 PASS（`segment` 用例覆盖 setMode → 预览 → applySplit 全链路）。
+
+
+**1.0.0.9（续 1）** — 裁剪工具栏改造（编辑栏 + 追加选区 + 撤销）
+
+**入口收敛**：工具 ▾ 从「拾取 / 矩形选择 / 多边形选择 / 应用拆分 / 取消」5 项，收敛为「拾取 / **裁剪**」2 项（与拾取同级）。点「裁剪」后，画布**右上角浮出编辑栏**。
+
+**编辑栏（7 个内联 SVG 图标，非位图）**：
+
+| 图标 | 功能 | 说明 |
+|---|---|---|
+| 虚线框 + 四角点 | 矩形选择 | 当前模式时蓝框高亮 |
+| 五边形 + 顶点 | 多边形选择 | 同上 |
+| 方框 + 斜线 | 裁剪预览 | **显示 / 隐藏**预览高亮，默认开 |
+| 虚线框 + 加号 | 继续裁剪 | **在当前选区上追加一块** |
+| 对勾 | 应用裁剪 | 拆成 `_segmented` / `_remaining` |
+| 逆时针箭头 | **撤销** | 回退上一次追加（`Ctrl+Z` 同效） |
+| ✕ | 退出裁剪 | `Esc` 同效 |
+
+编辑栏左端显示「选区 N 块」，让累积层数可见。
+
+**追加选区的算法**（不加新几何算法）：对**剩余部分**继续裁
+
+```
+第1块: splitMesh(原始, P1) → { seg1, rem1 }
+第2块: splitMesh(rem1, P2) → { seg2, rem2 }   累积 = seg1 ∪ seg2
+```
+
+好处：严格并集、重叠区不重复计入、完全复用现有半空间裁剪。
+
+**撤销的实现**（内存安全）：只记 `planes`（每块一个棱柱，几 KB），撤销时 `pop` 后从原始数据**重放**剩余平面。不保存顶点快照（百万面时每个快照 ~108 MB，会爆）。
+
+**三个修掉的坑**：
+1. `beginAppend()` 后选区凭空消失 —— `clearShape()` 里有一句 `preview = null`，被 `beginAppend` 间接触发；改为 `clearShape()` 只清「正在拖拽的临时形状」，`preview` 由 `setMode(null)` / 空结果 / `applySplit` 负责清。
+2. 无头环境下 `?demo=seg` 永不执行 —— `demoIfRequested` 的轮询用 `requestAnimationFrame`，headless 里可能不推进；改 `setTimeout(tick, 16)`。
+3. `Esc` 退出裁剪后无法再进入 —— app 的 Esc 分支会 `selectedId = null`（原有行为）；改为**裁剪进行中按 Esc 只退出裁剪、保留图层选中**。
+
+**验证**：
+- 探针：`demo后 show/count=1` → `Esc后 hidden/mode=null` → `selectedId=1 getSelected=yes` → `点裁剪 show/mode=rect` → `点多边形 polyActive=true rectActive=false` → `点✕ hidden`
+- 追加/撤销：`base count=1` → `beginAppend + 框选 → count=2` → `undo → count=1`；空选区点追加安全返回
+- 截图：7 个图标清晰可辨，矩形与预览按钮蓝框高亮
+- `check.ps1` 7 项全 PASS
+
+
+**1.0.0.9（续 2）** — 选区与相机互锁
+
+**问题**：裁剪的选区是按「当前视角投影」算出的棱柱。原来整个裁剪过程中 overlay 一直 `pointer-events:auto`，导致：
+- 框选时相机确实转不动（事件被 overlay 吃掉），但用户不知道是「设计如此」还是「卡了」；
+- **选区算完也转不动视角**，无法换个角度检查高亮对不对。
+
+**改法**：按「是否正在框选」切换 overlay 的指针行为，并同步锁/解锁相机。
+
+| 阶段 | overlay | 相机 | 高亮 |
+|---|---|---|---|
+| 正在框选（按下 → 松开 / 双击闭合） | `pointer-events:auto` | **锁定**（旋转、平移、缩放全部无视） | — |
+| 选区已确定 | `pointer-events:none` | **解锁**，可自由转视角 | 保持 |
+| 点「继续裁剪」或切换矩形/多边形 | 回到 `auto` | 重新锁定 | 保留已有选区 |
+| 应用 / 退出（✕、Esc） | `none` | 解锁 | 清空 |
+
+**实现**：
+- `algo.setOverlayInteractive(on)`：统一切换 overlay 指针行为并回调 `hooks.cameraLock`
+- `app.setCameraLock(on)`：置 `cameraLocked`，`pointerdown` 与 `wheel` 直接 return（不只是靠 overlay 挡）
+- 触发点：`setMode`（进入锁 / 退出解）、`computePreview` 成功（解）、`doAppend` 成功（解）、`beginAppend`（锁）、`applySplit`（解）
+
+**验证**（探针实测）：
+```
+预览后     locked=false  overlay=none
+拖动后     相机变化=true          ← 解锁后可转视角
+追加后     locked=true   overlay=auto
+锁定时拖动 相机变化=false         ← 框选时相机确实被锁
+退出后     locked=false  overlay=none
+```
+`check.ps1` 7 项全 PASS。
+
+
+**1.0.0.9（续 3）** — 选区框收敛 + 高亮改为「纯色覆盖」
+
+**问题 1：选区确定后还画着矩形/多边形框**
+框是屏幕空间的数据（黄色虚线），预览算出来后已经用高亮表达了范围，框留着只会误导（转视角后它和实际选区不重合）。改为在 `computePreview` 与 `doAppend` 成功后调用 `clearShape()`，框立即消失，`preview` 不受影响。
+
+**问题 2：高亮是「叠加」而不是「覆盖」，换视角就不完整**
+原来的实现是「原模型完整画一遍 + 预览层半透明青色再叠一层」（`alpha=0.55`、`depthMask(false)`、`LEQUAL`），因此：
+- 两者共面 → 深度顺序随视角变化 → **同位置出现两种颜色的混合**；
+- 从背面看时，预览层画在「正面位置」，被原模型的**背面几何**挡住 → **完全看不到高亮**。
+
+改为**替换式**：预览期间该图层不画完整模型，改画两份数据。
+
+| 数据 | 颜色 | 说明 |
+|---|---|---|
+| `rem`（未被选中的剩余部分） | 图层原色 + 原背面色，正常光照 | 由 `splitMesh` 的差集得到 |
+| `seg`（选中部分） | 高亮青 `(0.10, 0.95, 0.85)`，不透明，不参与光照 | 由交集得到 |
+
+这样每个三角形**只出现一次**，颜色是确定值，任何视角都是完整高亮（背面也正确显示为原色）。
+
+**实现**：
+- `Renderer.setPreview({ seg, rem, layerId, color, backColor, shade })`：两份 VAO（`previewVao` / `previewRemVao`）
+- `drawMeshLayer` 开头：`if (this.previewOverlayId === layer.id && this.previewVao) return;` —— 跳过被预览的图层（连带跳过它的线框/顶点/边界，预览期间只看高亮）
+- `drawPreviewSeg`：先画 `rem`（`uTwoSided=1` + 原色/背面色），再画 `seg`（`uTwoSided=0` + 高亮色）
+
+**验证**：
+- 正面（`?demo=seg`）：选中区纯青、无黄色框；剩余区橙色正常
+- 背面（`?demo=seg&yaw=35&pitch=-25`）：选中区**仍是纯青完整高亮**，剩余区暗红（原背面色），无混色
+- `check.ps1` 7 项全 PASS
+
+> 附带影响：预览期间状态栏 `blocks` 显示 `0/0`（因为该图层被跳过、不再走分块统计），属显示层面的小瑕疵，不影响画面。
+
+
+**1.0.0.9（续 3 补充）｜为什么放弃「替换式」**
+
+1.0.0.11 先做了「预览期间原图层不画，改画 rem（原色）+ seg（高亮）」。实测发现两个问题：
+
+| 问题 | 实测 |
+|---|---|
+| 裁剪结果本身有缺口 | `seg` 44,385 + `rem` 22,194 = **66,579** 三角形，而原模型 **72,700** —— 少 **8.4%**，缺口处没有三角形可画 |
+| 缺口在视觉上就是「露出原色」 | 用户看到的高亮区域内夹杂原色，正是这 8.4% + 边界处 |
+
+换视角时缺口更明显（背面看时整块高亮都消失过）。
+
+**最终方案：原模型完整绘制 + 高亮层纯色覆盖**
+
+```js
+gl.disable(gl.BLEND);        // 不透明
+gl.depthMask(false);         // 不写深度
+gl.depthFunc(gl.ALWAYS);     // 关深度测试：任何角度、任何遮挡都可见
+gl.disable(gl.CULL_FACE);    // 正背面都涂
+```
+
+- 原图层**照常完整绘制**（`blocks=16/16` 恢复正常），不再依赖 rem/seg 互补
+- 高亮层只「涂」选中部分，纯色、覆盖、无混色
+- 关深度是为了背面视角与被遮挡处也能看到完整高亮（裁剪选区本来就是"可见即选中"的语义）
+- 结束时恢复 `depthFunc(LESS)` + `depthMask(true)`，不影响后续视角器/标记
+
+**验证**：正面 `?demo=seg` 与背面 `?demo=seg&yaw=35&pitch=-25` 两视角，选中区均为**纯青完整覆盖**，无原色夹杂；`check.ps1` 7 项全 PASS。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）
@@ -461,7 +625,7 @@ var id = ix.idx[list[q] * 9 + k];
 
 ## 维护约定
 
-1. 版本号**从末位递增**：`1.0.0.0` → `1.0.0.1` → `1.0.0.2` …（不是 `1.0.1.0`）；每次提交同步改 `index.html` 的 `?v=` 与副标题、以及本文件的标题行；
+1. 版本号**按「提交」递增**，不是按「改动」递增：一次提交内的多次修改共用同一个版本号。规则是「上一版末位 +1，满 10 进位」：`1.0.0.8` → `1.0.0.9` → `1.0.1.0` → `1.0.1.1` …；提交前同步改 `index.html` 的 `?v=` 与副标题、以及本文件的标题行；
 2. 条目写「**改了什么 + 为什么**」，不只写「优化代码」；
 3. 修复类条目记录**根因**（例如「`2^22` 键溢出」「前三点共线导致绕序失效」），便于回溯；
 4. 新增文件、URL 参数、环境变量同步更新附录 A / B。

@@ -14,15 +14,22 @@
         notify: function () {},
         refreshTree: function () {},
         refreshProps: function () {},
-        renderPickBar: function () {}
+        renderPickBar: function () {},
+        canvas: null,               // 由界面层提供，返回主 canvas
+        createOverlay: null,        // 由界面层创建裁剪选择框
+        syncSegButtons: null        // 由界面层同步裁剪按钮状态
     };
 
     function bindHooks(h)
     {
         if (!h) { return; }
-        for (var k in hooks)
+        // 遍历注入对象（而不是 hooks 自身），否则新增的 hook 永远进不来
+        for (var k in h)
         {
-            if (typeof h[k] === 'function') { hooks[k] = h[k]; }
+            if (typeof h[k] === 'function')
+            {
+                hooks[k] = h[k];
+            }
         }
     }
 
@@ -45,7 +52,8 @@
     var poly = [];            // [{x,y}] CSS px
     var dragging = false;
     var startPt = null;
-    var preview = null;       // { layer, seg, rem }
+    var preview = null;       // { layer, seg, rem, planes } —— planes 记录每次追加的棱柱
+    var pendingAppend = false; // 等待用户框选「第二块」
 
     function app()
     {
@@ -64,14 +72,14 @@
         }
     }
 
-    function canvasEl()
-    {
-        return document.getElementById('gl');
-    }
-
     function toCanvasCSS(ev)
     {
-        var cv = canvasEl();
+        // canvas 由界面层提供（algo 不碰 DOM）
+        var cv = hooks.canvas ? hooks.canvas() : null;
+        if (!cv)
+        {
+            return { x: 0, y: 0 };
+        }
         var r = cv.getBoundingClientRect();
         return { x: ev.clientX - r.left, y: ev.clientY - r.top };
     }
@@ -82,36 +90,35 @@
         {
             return overlay;
         }
-        var cv = canvasEl();
-        if (!cv || !cv.parentNode)
+        // 选择框由界面层创建（ui.createSegOverlay），algo 只拿引用做几何绘制
+        var made = hooks.createOverlay ? hooks.createOverlay() : null;
+        if (!made)
         {
             return null;
         }
-        overlay = document.createElementNS(NS, 'svg');
-        overlay.setAttribute('id', 'seg-overlay');
-        overlay.style.cssText =
-            'position:absolute;left:0;top:0;width:100%;height:100%;' +
-            'pointer-events:none;z-index:5';
+        overlay = made.overlay;
+        rectEl = made.rect;
+        polyEl = made.poly;
 
-        rectEl = document.createElementNS(NS, 'rect');
-        rectEl.setAttribute('fill', 'rgba(255, 210, 70, 0.12)');
-        rectEl.setAttribute('stroke', '#ffd246');
-        rectEl.setAttribute('stroke-width', '1.2');
-        rectEl.setAttribute('stroke-dasharray', '5 3');
-        rectEl.style.display = 'none';
-        overlay.appendChild(rectEl);
-
-        polyEl = document.createElementNS(NS, 'polygon');
-        polyEl.setAttribute('fill', 'rgba(255, 210, 70, 0.12)');
-        polyEl.setAttribute('stroke', '#ffd246');
-        polyEl.setAttribute('stroke-width', '1.2');
-        polyEl.setAttribute('stroke-dasharray', '5 3');
-        polyEl.style.display = 'none';
-        overlay.appendChild(polyEl);
-
-        cv.parentNode.appendChild(overlay);
         bindEvents();
         return overlay;
+    }
+
+    /* 选择框是否吃指针事件：
+     *   true  → 框选中，锁住相机（事件被 overlay 接走）
+     *   false → 选区已定，事件穿透到 canvas，可以自由转视角看高亮 */
+    function setOverlayInteractive(on)
+    {
+        if (!overlay)
+        {
+            return;
+        }
+        overlay.style.pointerEvents = on ? 'auto' : 'none';
+        overlay.style.cursor = on ? 'crosshair' : '';
+        if (hooks.cameraLock)
+        {
+            hooks.cameraLock(!!on);
+        }
     }
 
     function redrawShape()
@@ -147,12 +154,13 @@
         }
     }
 
+    /* 只清「正在拖拽的临时形状」，不动已算出的 preview
+     * （preview 的清空由 setMode(null) / computePreview 的空结果 / applySplit 负责） */
     function clearShape()
     {
         rect = null;
         poly = [];
         dragging = false;
-        preview = null;
         if (rectEl) { rectEl.style.display = 'none'; }
         if (polyEl) { polyEl.style.display = 'none'; }
     }
@@ -167,11 +175,9 @@
         if (!m)
         {
             clearShape();
-            if (overlay)
-            {
-                overlay.style.pointerEvents = 'none';
-                overlay.style.cursor = '';
-            }
+            preview = null;
+            pendingAppend = false;
+            setOverlayInteractive(false);
             var a0 = app();
             if (a0 && a0.renderer)
             {
@@ -197,8 +203,7 @@
         }
 
         clearShape();
-        overlay.style.pointerEvents = 'auto';
-        overlay.style.cursor = 'crosshair';
+        setOverlayInteractive(true);
         syncButtons();
         say(m === 'rect'
             ? '矩形选择：拖动框选（松手预览），再点「应用拆分」'
@@ -207,12 +212,21 @@
 
     function syncButtons()
     {
-        var r = document.getElementById('btn-seg-rect');
-        var p = document.getElementById('btn-seg-poly');
-        var ap = document.getElementById('btn-seg-apply');
-        if (r) { r.classList.toggle('active', mode === 'rect'); }
-        if (p) { p.classList.toggle('active', mode === 'poly'); }
-        if (ap) { ap.disabled = !preview; }
+        if (hooks.syncSegButtons)
+        {
+            hooks.syncSegButtons(mode, !!preview);
+        }
+        if (hooks.segState)
+        {
+            hooks.segState({
+                visible: !!mode,
+                mode: mode,
+                hasPreview: hasPreview(),
+                count: selectionCount(),
+                canUndo: selectionCount() > 0,
+                appending: pendingAppend
+            });
+        }
     }
 
     /* ---------------- 屏幕 → 世界 ---------------- */
@@ -618,6 +632,12 @@
 
     function computePreview()
     {
+        if (pendingAppend)
+        {
+            doAppend();
+            return;
+        }
+
         var a = app();
         var layer = a.getSelected();
         if (!layer)
@@ -659,21 +679,15 @@
             return;
         }
 
-        preview = { layer: layer, seg: res.seg, rem: res.rem };
+        preview = { layer: layer, seg: res.seg, rem: res.rem, planes: [planes] };
 
-        if (res.seg.kind === 'points')
-        {
-            // 点云：预览只用状态栏数字，不做 GPU 高亮（点云预览与属性状态易冲突）
-            a.renderer.setPreview(null);
-        }
-        else
-        {
-            a.renderer.setPreview({
-                kind: res.seg.kind,
-                positions: res.seg.positions
-            });
-        }
-        a.markDirty();
+        // 点云：预览只用状态栏数字，不做 GPU 高亮（点云预览与属性状态易冲突）
+        refreshPreviewVisual();
+
+        // 选区已确定：框不再需要（高亮已经表达了范围），清掉屏幕空间的矩形/多边形
+        clearShape();
+        // 解锁相机，允许转动查看高亮
+        setOverlayInteractive(false);
         syncButtons();
 
         var segCount = res.seg.positions.length / 3;
@@ -685,6 +699,184 @@
                 ? (remCount / 3).toFixed(0) + ' 面'
                 : remCount + ' 点') +
             ' — 点「应用拆分」生成图层');
+    }
+
+    /* ---------------- 追加选区 / 撤销 ---------------- */
+
+    /* 两个 mesh 顶点数组拼接（seg 累积用） */
+    function concatMesh(a, b)
+    {
+        var n1 = a.positions.length;
+        var n2 = b.positions.length;
+        var out = new Float32Array(n1 + n2);
+        out.set(a.positions, 0);
+        out.set(b.positions, n1);
+        return {
+            kind: 'mesh',
+            positions: out,
+            count: (n1 + n2) / 9,
+            format: a.format || b.format || 'MESH'
+        };
+    }
+
+    function hasPreview()
+    {
+        return !!(preview && preview.seg && preview.seg.positions.length);
+    }
+
+    /* 预览高亮的显示开关（编辑栏上的「预览」按钮） */
+    var previewVisible = true;
+
+    /* 所有预览高亮的刷新都走这里，保证「隐藏」状态下不会被其它操作意外点亮 */
+    function refreshPreviewVisual()
+    {
+        var a = app();
+        if (!a || !a.renderer)
+        {
+            return;
+        }
+        if (previewVisible && preview && preview.seg &&
+            preview.seg.positions && preview.seg.positions.length)
+        {
+            var L = preview.layer || {};
+            a.renderer.setPreview({
+                kind: preview.seg.kind,
+                positions: preview.seg.positions,
+                seg: preview.seg,
+                rem: preview.rem,
+                layerId: L.id,
+                color: L.colorRgb,
+                backColor: L.backColorRgb,
+                shade: L.shadeMode
+            });
+        }
+        else
+        {
+            a.renderer.setPreview(null);
+        }
+        a.markDirty();
+    }
+
+    function togglePreview()
+    {
+        previewVisible = !previewVisible;
+        refreshPreviewVisual();
+        syncButtons();
+        say(previewVisible ? '预览：显示' : '预览：已隐藏');
+    }
+
+    function selectionCount()
+    {
+        return preview && preview.planes ? preview.planes.length : 0;
+    }
+
+    /* 「继续裁剪」：进入等待第二次框选的状态（不动当前选区） */
+    function beginAppend()
+    {
+        if (!preview)
+        {
+            say('请先框选一块，再点「继续裁剪」');
+            return;
+        }
+        if (preview.layer.kind !== 'mesh')
+        {
+            say('点云暂不支持追加选区，请应用后重新框选');
+            return;
+        }
+
+        pendingAppend = true;
+        clearShape();
+        setOverlayInteractive(true);     // 追加时重新锁相机等第二次框选
+        syncButtons();
+        say('追加选区：再框一块，会并入当前选区（重叠部分不重复计入）');
+    }
+
+    /* 真正追加：只对「剩余部分」再裁，天然不会重复 */
+    function doAppend()
+    {
+        var a = app();
+        var sel = selPoints();
+        if (!sel)
+        {
+            say('选区太小或未完成');
+            pendingAppend = false;
+            syncButtons();
+            return;
+        }
+
+        var vi = a.lastActiveView >= 0 ? a.lastActiveView : 0;
+        var mvp = mvpOf(vi);
+        var planes = prismPlanes(sel, null, mvp);
+
+        var pseudo = {
+            kind: 'mesh',
+            data: { positions: preview.rem.positions, format: preview.layer.data.format }
+        };
+        var r = splitMesh(pseudo, planes);
+
+        pendingAppend = false;
+
+        if (!r.seg.positions.length)
+        {
+            say('追加区域内没有数据，选区保持 ' + selectionCount() + ' 块');
+            syncButtons();
+            return;
+        }
+
+        preview.seg = concatMesh(preview.seg, r.seg);
+        preview.rem = r.rem;
+        preview.planes.push(planes);
+
+        refreshPreviewVisual();
+        clearShape();
+        setOverlayInteractive(false);
+        syncButtons();
+        say('已追加：选区 ' + (preview.seg.positions.length / 9).toFixed(0) +
+            ' 面（' + preview.planes.length + ' 块）');
+    }
+
+    /* 撤销一步：弹出最后一个平面，从原始数据重放剩下的 */
+    function undoSelection()
+    {
+        if (!preview || !preview.planes || !preview.planes.length)
+        {
+            return;
+        }
+
+        preview.planes.pop();
+        pendingAppend = false;
+
+        var layer = preview.layer;
+        var seg = null;
+        var rem = { positions: layer.data.positions };
+
+        for (var i = 0; i < preview.planes.length; i++)
+        {
+            var r = splitMesh({
+                kind: 'mesh',
+                data: { positions: rem.positions, format: layer.data.format }
+            }, preview.planes[i]);
+            seg = seg ? concatMesh(seg, r.seg) : r.seg;
+            rem = r.rem;
+        }
+
+        var a = app();
+        if (!seg)
+        {
+            preview = null;
+            a.renderer.setPreview(null);
+            a.markDirty();
+            syncButtons();
+            say('已撤销到空选区');
+            return;
+        }
+
+        preview.seg = seg;
+        preview.rem = rem;
+        refreshPreviewVisual();
+        syncButtons();
+        say('已撤销一步，剩 ' + preview.planes.length + ' 块 · ' +
+            (seg.positions.length / 9).toFixed(0) + ' 面');
     }
 
     /* ---------------- 应用 ---------------- */
@@ -727,6 +919,8 @@
         a.selectedId = lSeg.id;
         a.renderer.setPreview(null);
         preview = null;
+        pendingAppend = false;
+        setOverlayInteractive(false);
 
         hooks.refreshTree();
         hooks.refreshProps();
@@ -852,7 +1046,8 @@
             var v0 = a && a.views[0];
             if (!target || !v0 || !v0.rect || !(v0.rect.w > 0) || tries++ > 60)
             {
-                return global.requestAnimationFrame(tick);
+                // 用 setTimeout 而非 rAF：无头浏览器里 rAF 可能不再推进，导致 demo 永不执行
+                return global.setTimeout(tick, 16);
             }
 
             a.selectedId = target.id;
@@ -861,9 +1056,9 @@
 
             setMode('rect');
 
-            var cv = canvasEl();
-            var w = cv.clientWidth || 800;
-            var h = cv.clientHeight || 600;
+            var cv = hooks.canvas ? hooks.canvas() : null;
+            var w = (cv && cv.clientWidth) || 800;
+            var h = (cv && cv.clientHeight) || 600;
             rect = { x0: w * 0.44, y0: h * 0.36, x1: w * 0.66, y1: h * 0.70 };
             redrawShape();
             computePreview();
@@ -887,32 +1082,37 @@
         global.requestAnimationFrame(tick);
     }
 
-    window.addEventListener('load', function ()
+    /* 交互接线交给 app：这里只暴露纯逻辑入口 */
+    function currentMode()
     {
-        var r = document.getElementById('btn-seg-rect');
-        var p = document.getElementById('btn-seg-poly');
-        var ap = document.getElementById('btn-seg-apply');
-        var ca = document.getElementById('btn-seg-cancel');
+        return mode;
+    }
 
-        if (r) { r.addEventListener('click', function () { setMode(mode === 'rect' ? null : 'rect'); }); }
-        if (p) { p.addEventListener('click', function () { setMode(mode === 'poly' ? null : 'poly'); }); }
-        if (ap) { ap.addEventListener('click', applySplit); }
-        if (ca) { ca.addEventListener('click', function () { setMode(null); say('已取消编辑'); }); }
+    function toggleMode(m)
+    {
+        setMode(mode === m ? null : m);
+    }
 
-        demoIfRequested();
+    function cancelEdit()
+    {
+        setMode(null);
+        say('已取消编辑');
+    }
 
-        window.addEventListener('keydown', function (ev)
+    function onKey(ev)
+    {
+        if (ev.key === 'Escape' && mode)
         {
-            if (ev.key === 'Escape' && mode)
-            {
-                setMode(null);
-            }
-            if (ev.key === 'Enter' && mode === 'poly' && poly.length >= 3)
-            {
-                computePreview();
-            }
-        });
-    });
+            setMode(null);
+            return true;
+        }
+        if (ev.key === 'Enter' && mode === 'poly' && poly.length >= 3)
+        {
+            computePreview();
+            return true;
+        }
+        return false;
+    }
 
     /* ==================== 拾取与测量（原 pick.js）（App 方法，由 app.js 启动时安装） ==================== */
     function installPickMethods()
@@ -1348,5 +1548,21 @@
     global.MV.algo = global.MV.algo || {};
     global.MV.algo.installAppMethods = installPickMethods;
     global.MV.algo.bindHooks = bindHooks;
+
+    /* 裁剪的交互入口（app 绑定按钮 / 键盘后调用） */
+    global.MV.algo.currentMode = currentMode;
+    global.MV.algo.toggleMode = toggleMode;
+    global.MV.algo.applySplit = applySplit;
+    global.MV.algo.cancelEdit = cancelEdit;
+    global.MV.algo.onKey = onKey;
+    global.MV.algo.demoIfRequested = demoIfRequested;
+
+    /* 裁剪改造：追加选区 / 撤销 / 状态查询 */
+    global.MV.algo.setMode = setMode;
+    global.MV.algo.togglePreview = togglePreview;
+    global.MV.algo.beginAppend = beginAppend;
+    global.MV.algo.undoSelection = undoSelection;
+    global.MV.algo.hasPreview = hasPreview;
+    global.MV.algo.selectionCount = selectionCount;
 
 })(window);

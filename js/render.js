@@ -1361,39 +1361,69 @@
     Renderer.prototype.setPreview = function (geo)
     {
         var gl = this.gl;
+        var self = this;
+
         this.previewGeo = geo || null;
         this.previewCount = 0;
+        this.previewRemCount = 0;
+        this.previewOverlayId = (geo && geo.layerId) || null;
+        this.previewColor = (geo && geo.color) || [0.44, 0.67, 0.93];
+        this.previewBackColor = (geo && geo.backColor) || [0.69, 0.23, 0.19];
+        this.previewShade = (geo && geo.shade) || 0;
 
-        if (this.previewVao)
+        var olds = [this.previewVao, this.previewRemVao];
+        var oldb = [this.previewBuffer, this.previewRemBuffer];
+        for (var i = 0; i < olds.length; i++)
         {
-            gl.deleteVertexArray(this.previewVao);
-            this.previewVao = null;
+            if (olds[i]) { gl.deleteVertexArray(olds[i]); }
+            if (oldb[i]) { gl.deleteBuffer(oldb[i]); }
         }
-        if (this.previewBuffer)
-        {
-            gl.deleteBuffer(this.previewBuffer);
-            this.previewBuffer = null;
-        }
+        this.previewVao = null;
+        this.previewRemVao = null;
+        this.previewBuffer = null;
+        this.previewRemBuffer = null;
 
-        if (!geo || !geo.positions || !geo.positions.length)
+        if (!geo)
         {
             return;
         }
 
-        var loc = (geo.kind === 'points') ? this.pointA.pos : this.meshA.pos;
+        var isPoints = geo.kind === 'points';
+        var loc = isPoints ? this.pointA.pos : this.meshA.pos;
 
-        var vao = gl.createVertexArray();
-        var buf = gl.createBuffer();
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-        gl.bufferData(gl.ARRAY_BUFFER, geo.positions, gl.DYNAMIC_DRAW);
-        gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
-        gl.bindVertexArray(null);
+        function makeVao(positions)
+        {
+            var vao = gl.createVertexArray();
+            var buf = gl.createBuffer();
+            gl.bindVertexArray(vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+            gl.enableVertexAttribArray(loc);
+            gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+            gl.bindVertexArray(null);
+            return { vao: vao, buf: buf, n: positions.length / 3 };
+        }
 
-        this.previewVao = vao;
-        this.previewBuffer = buf;
-        this.previewCount = geo.positions.length / 3;
+        // 选中部分（高亮）
+        var segPos = (geo.seg && geo.seg.positions) || (isPoints ? geo.positions : null);
+        if (segPos && segPos.length)
+        {
+            var a = makeVao(segPos);
+            this.previewVao = a.vao;
+            this.previewBuffer = a.buf;
+            this.previewCount = a.n;
+        }
+
+        // 剩余部分（原色）—— 只有网格才有
+        if (!isPoints && geo.rem && geo.rem.positions && geo.rem.positions.length)
+        {
+            var b = makeVao(geo.rem.positions);
+            this.previewRemVao = b.vao;
+            this.previewRemBuffer = b.buf;
+            this.previewRemCount = b.n;
+        }
+
+        self.previewCalls = 0;
     };
 
     Renderer.prototype.drawPreviewSeg = function (mvp, viewM, ctx)
@@ -1406,12 +1436,24 @@
         }
 
         var gl = this.gl;
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        // 高亮纯色覆盖，但保留正确遮挡：
+        //   不透明            → 与原始三角形不会混色
+        //   LEQUAL + 偏移     → 与原始三角形共面时能覆盖（切片后顶点不同，深度有微小差异）
+        //   不关深度测试      → 真正挡在前面的几何会正确遮住高亮
+        gl.disable(gl.BLEND);
         gl.depthMask(false);
-        // 预览三角形与原网格共面：LESS 会把它们全部判为“更远”，这里放行相等
         gl.depthFunc(gl.LEQUAL);
-        gl.disable(gl.CULL_FACE);          // 切割后的绕序不保证一致，禁用剔除
+        gl.enable(gl.POLYGON_OFFSET_FILL);
+        gl.polygonOffset(-1.0, -2.0);
+        gl.disable(gl.CULL_FACE);
+
+        if (!this.previewVao || !this.previewCount)
+        {
+            gl.disable(gl.POLYGON_OFFSET_FILL);
+            gl.depthFunc(gl.LESS);
+            gl.depthMask(true);
+            return;
+        }
         gl.bindVertexArray(this.previewVao);
 
         if (geo.kind === 'points')
@@ -1422,7 +1464,7 @@
             gl.uniform1f(this.pointU.uPointSize, 4 * ((ctx && ctx.dpr) || 1));
             gl.uniform1f(this.pointU.uDepthBias, -0.00002);
             gl.uniform1i(this.pointU.uColorMode, 0);
-            gl.uniform4f(this.pointU.uColor, 0.10, 0.95, 0.85, 0.95);
+            gl.uniform4f(this.pointU.uColor, 0.10, 0.95, 0.85, 1.0);
             gl.uniform1f(this.pointU.uZMin, 0);
             gl.uniform1f(this.pointU.uZMax, 1);
             gl.uniform1f(this.pointU.uSFMin, 0);
@@ -1442,13 +1484,15 @@
             gl.useProgram(this.meshP);
             gl.uniformMatrix4fv(this.meshU.uMVP, false, mvp);
             gl.uniformMatrix4fv(this.meshU.uView, false, viewM);
-            gl.uniform4f(this.meshU.uColor, 0.10, 0.95, 0.85, 0.55);
+            if (this.meshU.uTwoSided) { gl.uniform1i(this.meshU.uTwoSided, 0); }
+            gl.uniform4f(this.meshU.uColor, 0.10, 0.95, 0.85, 1.0);
             gl.uniform3fv(this.meshU.uLightView, this.lightView || [0, 0, 1]);
             gl.uniform1i(this.meshU.uShade, 0);
             gl.drawArrays(gl.TRIANGLES, 0, this.previewCount);
         }
 
         gl.bindVertexArray(null);
+        gl.disable(gl.POLYGON_OFFSET_FILL);
         gl.depthFunc(gl.LESS);
         gl.depthMask(true);
         gl.disable(gl.BLEND);

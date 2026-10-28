@@ -1742,6 +1742,90 @@
         applyLayoutMode();
     }
 
+    /* 裁剪编辑栏：显隐 / 选中态 / 禁用态 / 选区块数（由 algo 的 hooks.segState 驱动） */
+    function updateSegBar(state)
+    {
+        var bar = document.getElementById('seg-bar');
+        if (!bar)
+        {
+            return;
+        }
+
+        state = state || {};
+        bar.classList.toggle('hidden', !state.visible);
+        if (!state.visible)
+        {
+            return;
+        }
+
+        var el;
+        el = document.getElementById('seg-btn-rect');
+        if (el) { el.classList.toggle('active', state.mode === 'rect'); }
+
+        el = document.getElementById('seg-btn-poly');
+        if (el) { el.classList.toggle('active', state.mode === 'poly'); }
+
+        el = document.getElementById('seg-btn-append');
+        if (el) { el.disabled = !state.hasPreview; }
+
+        el = document.getElementById('seg-btn-apply');
+        if (el) { el.disabled = !state.hasPreview; }
+
+        el = document.getElementById('seg-btn-undo');
+        if (el) { el.disabled = !state.canUndo; }
+
+        el = document.getElementById('seg-count');
+        if (el) { el.textContent = '选区 ' + (state.count || 0) + ' 块'; }
+    }
+
+    /* ---------------- 裁剪选择框（SVG overlay） ----------------
+     * 属于界面层：algo 只拿 {overlay, rect, poly} 三个引用做几何绘制，不创建 DOM
+     */
+    function createSegOverlay()
+    {
+        var cv = document.getElementById('gl');
+        if (!cv || !cv.parentNode)
+        {
+            return null;
+        }
+
+        var NS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('id', 'seg-overlay');
+        svg.style.cssText =
+            'position:absolute;left:0;top:0;width:100%;height:100%;' +
+            'pointer-events:none;z-index:5';
+
+        function mkShape(tag)
+        {
+            var el = document.createElementNS(NS, tag);
+            el.setAttribute('fill', 'rgba(255, 210, 70, 0.12)');
+            el.setAttribute('stroke', '#ffd246');
+            el.setAttribute('stroke-width', '1.2');
+            el.setAttribute('stroke-dasharray', '5 3');
+            el.style.display = 'none';
+            svg.appendChild(el);
+            return el;
+        }
+
+        var rect = mkShape('rect');
+        var poly = mkShape('polygon');
+
+        cv.parentNode.appendChild(svg);
+        return { overlay: svg, rect: rect, poly: poly };
+    }
+
+    /* 裁剪按钮的激活/可用状态（algo 通过 hooks.syncSegButtons 回调过来） */
+    function syncSegButtons(mode, hasPreview)
+    {
+        var r = document.getElementById('btn-seg-rect');
+        var p = document.getElementById('btn-seg-poly');
+        var ap = document.getElementById('btn-seg-apply');
+        if (r) { r.classList.toggle('active', mode === 'rect'); }
+        if (p) { p.classList.toggle('active', mode === 'poly'); }
+        if (ap) { ap.disabled = !hasPreview; }
+    }
+
     global.MV.ui = {
         init: init,
         renderTree: renderTree,
@@ -1755,7 +1839,10 @@
         applyLayoutMode: applyLayoutMode,
         renderPickBar: renderPickBar,
         updateColorBar: updateColorBar,
-        hexToRgb: hexToRgb
+        hexToRgb: hexToRgb,
+        createSegOverlay: createSegOverlay,
+        syncSegButtons: syncSegButtons,
+        updateSegBar: updateSegBar
     };
 
 

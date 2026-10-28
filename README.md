@@ -486,7 +486,7 @@ serve.bat
 | --- | --- | --- |
 | `js/core.js` | **L1 基础**：Vec3 / Mat4 / Quat / BBox / OrbitCamera | DOM、GL、业务状态 |
 | `js/io.js` | **L2 IO**：格式解析（STL/OBJ/PLY/点云）+ 孔位优化调用 + 载入前规模估算 | 渲染、界面布局 |
-| `js/algo.js` | **L3 算法**：三维裁剪、拾取与测量 | GL、DOM（App 方法由 app 启动时注入） |
+| `js/algo.js` | **L3 算法**：三维裁剪、拾取与测量（**零 DOM / 零 GL**，交互入口以 `MV.algo.*` 导出，由 app 绑定按钮与键盘） | GL、DOM、`MV.ui`（全部经 `hooks` 注入） |
 | `js/render.js` | **L4 渲染**：WebGL 管线 + 视角器 | 图层管理、业务规则 |
 | `js/gizmo.js` | **L4.5 视角器**：削角六面体 26 面、X/Y/Z 方向箭头、点击切换视角 | render 的 GL 状态、图层数据 |
 | `js/ui.js` | **L5 界面**：场景树 / 属性面板 / 视图设置 / 弹窗 / 全局拖放 | GL 细节、算法实现 |

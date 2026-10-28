@@ -1323,6 +1323,16 @@
         return (clientX - r.left) < r.width * 0.5 ? 0 : 1;
     };
 
+    /* 相机锁：框选过程中禁止旋转/平移/缩放，避免选区随视角漂移 */
+    App.prototype.setCameraLock = function (on)
+    {
+        this.cameraLocked = !!on;
+        if (this.canvas)
+        {
+            this.canvas.style.cursor = on ? 'crosshair' : '';
+        }
+    };
+
     App.prototype.bindPointer = function ()
     {
         var self = this;
@@ -1332,6 +1342,10 @@
 
         canvas.addEventListener('pointerdown', function (e)
         {
+            if (self.cameraLocked)
+            {
+                return;                          // 框选中：不响应旋转/平移
+            }
             if (e.button !== 0 && e.button !== 1 && e.button !== 2)
             {
                 return;
@@ -1409,6 +1423,12 @@
 
         canvas.addEventListener('wheel', function (e)
         {
+            if (self.cameraLocked)
+            {
+                e.preventDefault();
+                return;                      // 框选中：不响应缩放
+            }
+
             e.preventDefault();
             var vi = self.viewIndexAt(e.clientX);
             self.lastActiveView = vi;
@@ -1505,6 +1525,14 @@
                 {
                     self.setPickInfo(false);
                 }
+
+                // 裁剪进行中：Esc 只退出裁剪，不清图层选中（否则要重新点树才能再进）
+                if (global.MV.algo && global.MV.algo.currentMode && global.MV.algo.currentMode())
+                {
+                    global.MV.algo.setMode(null);
+                    return;
+                }
+
                 self.selectedId = null;
                 global.MV.ui.renderTree();
                 global.MV.ui.renderProps();
@@ -1525,7 +1553,13 @@
         notify: global.MV.ui.setInfo,
         refreshTree: global.MV.ui.renderTree,
         refreshProps: global.MV.ui.renderProps,
-        renderPickBar: global.MV.ui.renderPickBar
+        renderPickBar: global.MV.ui.renderPickBar,
+        // 裁剪交互用的三件事：canvas、选择框 DOM、按钮状态 —— 都由界面层实现
+        canvas: function () { return document.getElementById('gl'); },
+        createOverlay: global.MV.ui.createSegOverlay,
+        syncSegButtons: global.MV.ui.syncSegButtons,
+        segState: global.MV.ui.updateSegBar,
+        cameraLock: function (on) { global.MV.app.setCameraLock(on); }
     };
     if (global.MV.algo && global.MV.algo.bindHooks) { global.MV.algo.bindHooks(uiHooks); }
     if (global.MV.ioBindHooks) { global.MV.ioBindHooks(uiHooks); }
@@ -1539,6 +1573,44 @@
         var app = new App();
         global.MV.app = app;
         app.init();
+
+        // 裁剪交互接线：algo 只提供纯逻辑，按钮与键盘都在这里绑
+        (function bindSegmentUi()
+        {
+            var A = global.MV.algo;
+            if (!A)
+            {
+                return;
+            }
+
+            function on(id, fn)
+            {
+                var el = document.getElementById(id);
+                if (el) { el.addEventListener('click', fn); }
+            }
+
+            on('btn-seg', function () { A.setMode('rect'); });
+            on('seg-btn-rect', function () { A.toggleMode('rect'); });
+            on('seg-btn-poly', function () { A.toggleMode('poly'); });
+            on('seg-btn-preview', function () { A.togglePreview(); });
+            on('seg-btn-append', function () { A.beginAppend(); });
+            on('seg-btn-apply', function () { A.applySplit(); });
+            on('seg-btn-undo', function () { A.undoSelection(); });
+            on('seg-btn-exit', function () { A.cancelEdit(); });
+
+            window.addEventListener('keydown', function (ev)
+            {
+                if (A.currentMode() && (ev.ctrlKey || ev.metaKey) && (ev.key === 'z' || ev.key === 'Z'))
+                {
+                    ev.preventDefault();
+                    A.undoSelection();
+                    return;
+                }
+                A.onKey(ev);
+            });
+
+            if (A.demoIfRequested) { A.demoIfRequested(); }
+        })();
     });
 
 })(window);
