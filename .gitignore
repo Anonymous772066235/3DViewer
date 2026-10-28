@@ -1,0 +1,23 @@
+# ---------- 运行产物 ----------
+server/bridge.log
+__pycache__/
+*.pyc
+
+# ---------- 临时验证文件（统一放 _t/，不要再散落在根目录） ----------
+_t/
+_tmp*/
+_test/
+_*.png
+_*.py
+*.tmp
+
+# ---------- 编辑器 / IDE ----------
+.codebuddy/
+.idea/
+.vscode/
+*.swp
+
+# ---------- 系统文件 ----------
+Thumbs.db
+desktop.ini
+.DS_Store

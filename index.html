@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>3D Viewer</title>
+<link rel="stylesheet" href="css/style.css?v=1.0.0.0" />
+</head>
+<body>
+<div id="app">
+
+    <header id="topbar">
+        <div class="brand">
+            <span class="logo">3DV</span>
+            <span class="title">3D Viewer</span>
+            <span class="sub">mesh / point cloud compare · v1.0.0.0</span>
+        </div>
+        <div class="toolbar">
+            <button id="btn-load-before" title="载入到 左侧 (A)">载入 左侧 (A)</button>
+            <button id="btn-load-after" title="载入到 右侧 (B)">载入 右侧 (B)</button>
+            <button id="btn-load-both" title="同一文件同时载入两侧">载入 两侧</button>
+            <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗口</button>
+            <span class="sep"></span>
+            <button id="btn-fit" title="视图自适应 (F)">自适应</button>
+            <button id="btn-shot" title="导出当前画面为 PNG">截图</button>
+            <button id="btn-clear" title="清空所有图层">清空</button>
+            <!-- ===== 孔位优化 BEGIN（注释掉这两个标记之间即可关闭） ===== -->
+            <button id="btn-optimize" title="调用 HoleOptimize_cli 优化当前网格，结果自动载入右侧（需先运行 serve.bat）">孔位优化</button>
+            <!-- ===== 孔位优化 END ===== -->
+            <!-- ===== 工具菜单 BEGIN（拾取 / 裁剪 为同级功能；注释掉整块即关闭） ===== -->
+            <div id="tool-menu-wrap" class="menu-wrap">
+                <button id="btn-tools" class="menu-btn" title="工具：拾取 / 裁剪">工具 ▾</button>
+                <div id="tools-menu" class="menu hidden">
+                    <button id="btn-pick" title="拾取模式（P）：在数据上取点，显示坐标 / 法向 / 标签 / 标量，并计算距离与角度">拾取<span class="kbd">P</span></button>
+                    <!-- ===== 三维编辑 BEGIN（注释掉这两个标记之间即可关闭裁剪） ===== -->
+                    <div class="menu-sep"></div>
+                    <div class="menu-label">裁剪</div>
+                    <button id="btn-seg-rect" title="矩形选择：在画布上拖出方框，松手即预览">矩形选择</button>
+                    <button id="btn-seg-poly" title="多边形选择：单击加点，双击闭合（Enter 也可闭合）">多边形选择</button>
+                    <button id="btn-seg-apply" disabled title="把预览的选区拆成 *_segmented / *_remaining 两个图层">应用拆分</button>
+                    <button id="btn-seg-cancel" title="取消选择（Esc）">取消</button>
+                    <!-- ===== 三维编辑 END ===== -->
+                </div>
+            </div>
+            <!-- ===== 工具菜单 END ===== -->
+        </div>
+        <input type="file" id="file-input" multiple accept=".stl,.obj,.ply,.txt,.xyz,.csv,.asc,.pts,.dat" hidden />
+    </header>
+
+    <main id="main">
+
+        <aside id="sidebar">
+
+            <section class="panel">
+                <div class="panel-title">
+                    <span>场景树</span>
+                    <span class="panel-hint">勾选控制显示</span>
+                </div>
+                <div id="tree" class="tree"></div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title"><span>图层属性</span></div>
+                <div id="props" class="props">
+                    <div class="empty-hint">在场景树中选择一个图层</div>
+
+                    <div class="prop-group">
+                        <div class="group-title">属性</div>
+                        <div class="prop-row" data-prop="base">
+                            <label>名称</label>
+                            <input type="text" id="p-name" />
+                        </div>
+                        <div class="prop-row" data-prop="base">
+                            <label>归属</label>
+                            <select id="p-slot">
+                                <option value="A">左侧 (A)</option>
+                                <option value="B">右侧 (B)</option>
+                                <option value="S">公共 (S)</option>
+                            </select>
+                        </div>
+                        <div class="prop-row col" data-prop="base">
+                            <label>统计</label>
+                            <span class="stat" id="p-stat">-</span>
+                        </div>
+                        <div class="prop-row col" data-prop="base">
+                            <label>路径</label>
+                            <span class="stat" id="p-path">-</span>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="group-title">外观</div>
+                        <div class="prop-row" data-prop="base">
+                            <label>配色</label>
+                            <button id="btn-colors" class="color-btn" title="打开配色面板（面片 / 背面 / 线框 / 顶点 / 边界）">
+                                <span id="btn-colors-dot" class="color-dot"></span>
+                                <span>配色…</span>
+                            </button>
+                        </div>
+                        <div class="prop-row" data-prop="base">
+                            <label>不透明度</label>
+                            <input type="range" id="p-opacity" min="0.05" max="1" step="0.01" />
+                            <span class="val" id="p-opacity-val">1.00</span>
+                        </div>
+
+                        <div id="color-pop" class="color-pop hidden" data-pop="colors">
+                            <div class="pop-title">配色</div>
+                            <div class="prop-row" data-prop="base">
+                                <label id="p-color-k">颜色</label>
+                                <input type="color" id="p-color" />
+                            </div>
+                            <div class="prop-row" data-prop="mesh">
+                                <label>背面</label>
+                                <input type="color" id="p-backcolor" />
+                            </div>
+                            <div class="prop-row" data-prop="mesh">
+                                <label>线框</label>
+                                <input type="color" id="p-wirecolor" />
+                            </div>
+                            <div class="prop-row" data-prop="mesh">
+                                <label>顶点</label>
+                                <input type="color" id="p-vertcolor" />
+                            </div>
+                            <div class="prop-row" data-prop="mesh">
+                                <label>边界</label>
+                                <input type="color" id="p-boundarycolor" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="group-title">显示（网格）</div>
+                        <div class="prop-row" data-prop="mesh">
+                            <label>元素</label>
+                            <div class="chk-grid">
+                                <label><input type="checkbox" id="p-faces" /> 面片</label>
+                                <label><input type="checkbox" id="p-wire" /> 线框</label>
+                                <label><input type="checkbox" id="p-verts" /> 顶点</label>
+                                <label title="只被一个三角形使用的边（开放边界）；封闭模型应无边界"><input type="checkbox" id="p-boundary" /> 边界</label>
+                            </div>
+                        </div>
+                        <div class="prop-row" data-prop="mesh">
+                            <label>顶点大小</label>
+                            <input type="range" id="p-vsize" min="1" max="16" step="0.5" />
+                            <span class="val" id="p-vsize-val">3</span>
+                        </div>
+                        <div class="prop-row inline3" data-prop="mesh">
+                            <label>面法向</label>
+                            <label class="inline"><input type="checkbox" id="p-normals" /> 显示</label>
+                            <input type="range" id="p-normallen" min="0.1" max="6" step="0.1" title="法向长度（相对平均边长）" />
+                            <span class="val" id="p-normallen-val">1.0</span>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="group-title">着色</div>
+                        <div class="prop-row" data-prop="mesh">
+                            <label>模式</label>
+                            <select id="p-shade">
+                                <option value="1">光照</option>
+                                <option value="0">纯色</option>
+                                <option value="2">按法向（背面黑）</option>
+                            </select>
+                        </div>
+                        <div class="prop-row" data-prop="points">
+                            <label>模式</label>
+                            <select id="p-pointcolor">
+                                <option value="0">单色</option>
+                                <option value="1">按高度</option>
+                                <option value="2">按法向</option>
+                                <option value="3">按标签</option>
+                                <option value="4">顶点色</option>
+                                <option value="5">标量场</option>
+                            </select>
+                        </div>
+                        <div class="prop-row" data-prop="points">
+                            <label>点大小</label>
+                            <input type="range" id="p-pointsize" min="1" max="24" step="0.5" />
+                            <span class="val" id="p-pointsize-val">3</span>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="group-title">标量场（点云）</div>
+                        <div class="prop-row" id="row-sf">
+                            <label>字段</label>
+                            <select id="p-sf"></select>
+                        </div>
+                        <div class="prop-row range2" id="row-sfrange">
+                            <label>范围</label>
+                            <input type="text" id="p-sfmin" placeholder="自动" title="最小值（留空 = 自动）" />
+                            <input type="text" id="p-sfmax" placeholder="自动" title="最大值（留空 = 自动）" />
+                            <button id="p-sfauto" class="mini" title="恢复自动范围">自动</button>
+                        </div>
+                        <div class="prop-row" id="row-sframp">
+                            <label>色带</label>
+                            <select id="p-sframp">
+                                <option value="0">蓝-青-绿-黄-红</option>
+                                <option value="1">蓝-绿-红</option>
+                                <option value="2">灰度</option>
+                                <option value="3">蓝-白-红</option>
+                            </select>
+                        </div>
+                        <div class="prop-row col" id="row-sfhist">
+                            <label>分布</label>
+                            <canvas id="p-sfhist" width="440" height="110"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="prop-row" data-prop="base">
+                            <label></label>
+                            <button id="btn-remove-layer" class="danger" title="从场景中移除该图层（Delete）">移除该图层</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title"><span>视图设置</span></div>
+                <div class="viewcfg">
+                    <div class="cfg-group">
+                        <div class="group-title">相机</div>
+                        <div class="row" id="row-ghost">
+                            <label class="wide"><input type="checkbox" id="opt-ghost" checked /> 叠加对面模型</label>
+                            <div class="seg">
+                                <label><input type="radio" name="ghostmode" id="opt-ghost-trans" value="0" checked /> 透明</label>
+                                <label><input type="radio" name="ghostmode" id="opt-ghost-solid" value="1" /> 实体</label>
+                            </div>
+                        </div>
+                        <div class="row" id="row-sync">
+                            <label class="wide"><input type="checkbox" id="opt-sync" /> 左右相机同步</label>
+                        </div>
+                        <div class="row">
+                            <span class="k">旋转中心</span>
+                            <div class="btn-group">
+                                <button id="btn-pick-center" class="mini" title="点击后在模型表面单击设为旋转中心（等价 Ctrl+左键）">重设</button>
+                                <button id="btn-level" class="mini" title="清除滚转，把模型摆正">回正</button>
+                                <button id="btn-reset-view" class="mini" title="恢复初始 45° 俯视">默认视角</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="cfg-group">
+                        <div class="group-title">显示</div>
+                        <div class="row chk2">
+                            <label><input type="checkbox" id="opt-grid" checked /> 地面网格</label>
+                            <label><input type="checkbox" id="opt-axes" checked /> 坐标轴</label>
+                        </div>
+                        <div class="row">
+                            <span class="k">背景</span>
+                            <input type="color" id="opt-bg" value="#141821" />
+                        </div>
+                    </div>
+
+                    <div class="cfg-group">
+                        <div class="group-title">光照</div>
+                        <div class="row">
+                            <label class="wide"><input type="checkbox" id="opt-lightfollow" checked /> 跟随相机</label>
+                        </div>
+                        <div class="row">
+                            <span class="k">方位</span>
+                            <input type="range" id="opt-lightaz" min="0" max="360" step="1" value="45" />
+                            <span class="val" id="opt-lightaz-val">45°</span>
+                        </div>
+                        <div class="row">
+                            <span class="k">俯仰</span>
+                            <input type="range" id="opt-lightel" min="-90" max="90" step="1" value="36" />
+                            <span class="val" id="opt-lightel-val">36°</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </aside>
+
+        <div id="view-area">
+            <canvas id="gl"></canvas>
+            <div id="drop-zone-a" class="drop-zone left"><span>松开导入到左侧 (A)</span></div>
+            <div id="drop-zone-b" class="drop-zone right"><span>松开导入到右侧 (B)</span></div>
+            <div class="view-tag left" id="tag-left">左侧 (A)</div>
+            <div class="view-tag right" id="tag-right">右侧 (B)</div>
+            <div id="split-line"></div>
+            <div id="drop-hint">拖拽 STL / OBJ / PLY / 点云文件到左半屏（左侧 A）或右半屏（右侧 B）</div>
+
+            <canvas id="axis-cube" width="160" height="160" title="点击面切换视角"></canvas>
+
+            <div id="pickbar" class="hidden">
+                <div class="pick-head">
+                    <span>拾取</span>
+                    <button id="pick-clear" class="mini">清空</button>
+                    <button id="pick-close" class="mini" title="关闭">×</button>
+                </div>
+                <div id="pick-list"></div>
+                <div id="pick-calc"></div>
+            </div>
+
+            <div id="sfbar" class="hidden">
+                <div id="sf-name">标量场</div>
+                <canvas id="sf-hist" width="320" height="84"></canvas>
+                <div id="sf-ramp"></div>
+                <div class="sf-range"><span id="sf-min">0</span><span id="sf-max">1</span></div>
+            </div>
+
+            <div id="progress" class="hidden">
+                <div class="pg-text" id="pg-text">载入中…</div>
+                <div class="pg-bar"><div class="pg-fill" id="pg-fill"></div></div>
+            </div>
+
+            <div id="help" class="hidden">
+                <h3>操作说明</h3>
+                <table>
+                    <tr><td>左键拖拽</td><td>旋转</td></tr>
+                    <tr><td>中键 / 右键拖拽</td><td>平移</td></tr>
+                    <tr><td>滚轮</td><td>缩放</td></tr>
+                    <tr><td>F</td><td>自适应视图</td></tr>
+                    <tr><td>W</td><td>选中层切换线框</td></tr>
+                    <tr><td>N</td><td>选中层切换法向</td></tr>
+                    <tr><td>Ctrl + 左键 / 「重设」按钮</td><td>把点击处设为旋转中心</td></tr>
+                    <tr><td>「回正」按钮</td><td>自由旋转后把模型摆正（清滚转）</td></tr>
+                    <tr><td>双击模型表面</td><td>在该处重设旋转中心（双击空白处仍为视图自适应）</td></tr>
+                    <tr><td>双击树节点</td><td>聚焦到该图层</td></tr>
+                    <tr><td>拖放文件</td><td>左半屏→A，右半屏→B</td></tr>
+                    <tr><td>截图</td><td>下载 PNG 到浏览器下载目录，并尝试复制到剪贴板</td></tr>
+                    <tr><td>清空</td><td>二次确认后清空全部图层</td></tr>
+                </table>
+                <button id="btn-help-close">关闭</button>
+            </div>
+        </div>
+
+    </main>
+
+    <footer id="statusbar">
+        <span id="st-fps">-- fps</span>
+        <span id="st-count">0 图层</span>
+        <span id="st-info">就绪</span>
+        <span class="grow"></span>
+        <button id="btn-help" class="link">帮助 ?</button>
+    </footer>
+
+</div>
+
+<!-- 二次确认弹窗 -->
+<div id="modal" class="modal hidden">
+    <div class="modal-box">
+        <div class="modal-title" id="modal-title">请确认</div>
+        <div class="modal-text" id="modal-text"></div>
+        <div class="modal-actions">
+            <button id="modal-cancel">取消</button>
+            <button id="modal-ok" class="primary">确定</button>
+        </div>
+    </div>
+</div>
+
+<!-- 载入前内存预估 / 下采样 -->
+<div id="memdlg" class="modal hidden">
+    <div class="modal-box mem-box">
+        <div class="modal-title">数据较大 — 建议下采样<button id="mem-close" class="mini">×</button></div>
+        <div class="mem-body">
+            <div class="mem-row"><span>文件</span><b id="mem-name">-</b></div>
+            <div class="mem-row"><span>规模</span><b id="mem-scale">-</b></div>
+            <div class="mem-row"><span>预计占用</span><b id="mem-need">-</b></div>
+            <div class="mem-row"><span>内存预算</span><b id="mem-limit">-</b></div>
+            <div class="mem-slider">
+                <input type="range" id="mem-pct" min="5" max="100" step="5" value="50" />
+                <span id="mem-pct-val">50%</span>
+            </div>
+            <div class="mem-est" id="mem-est">-</div>
+        </div>
+        <div class="modal-actions">
+            <button id="mem-cancel">取消</button>
+            <button id="mem-full">仍然全量导入</button>
+            <button id="mem-sample" class="primary">下采样导入</button>
+        </div>
+    </div>
+</div>
+
+<!-- 场景树右键菜单 -->
+<div id="ctx-menu" class="ctx-menu hidden"></div>
+
+<!-- 孔位优化错误详情 -->
+<div id="errdlg" class="modal hidden">
+    <div class="modal-box err-box">
+        <div class="modal-title" id="err-title">出错了</div>
+        <pre id="err-text"></pre>
+        <div class="modal-actions">
+            <button id="err-close" class="primary">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 点云列含义确认 -->
+<div id="coldlg" class="modal hidden">
+    <div class="modal-box col-box">
+        <div class="modal-title">确认点云列含义</div>
+        <div class="modal-text" id="col-info"></div>
+        <div class="col-head">
+            <span>列</span>
+            <span>名称 / 示例</span>
+            <span>含义</span>
+        </div>
+        <div class="col-rows" id="col-rows"></div>
+        <div class="col-err" id="col-err"></div>
+        <div class="modal-actions">
+            <button id="col-cancel">取消导入</button>
+            <button id="col-ok" class="primary">确定并导入</button>
+        </div>
+    </div>
+</div>
+
+<!-- ?v= 变更时强制刷新缓存 -->
+    <script src="js/core.js?v=1.0.0.0"></script>
+    <script src="js/io.js?v=1.0.0.0"></script>
+    <script src="js/algo.js?v=1.0.0.0"></script>
+    <script src="js/render.js?v=1.0.0.0"></script>
+    <script src="js/ui.js?v=1.0.0.0"></script>
+    <script src="js/app.js?v=1.0.0.0"></script>
+<!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
+<!-- ===== 三维编辑 BEGIN ===== -->
+<!-- ===== 三维编辑 END ===== -->
+<!-- ===== 孔位优化 END ===== -->
+</body>
+</html>
