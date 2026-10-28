@@ -108,6 +108,7 @@ foreach ($c in $cases) {
     $cargs = @(
         '--headless=new', "--user-data-dir=$prof", '--disable-gpu', '--enable-unsafe-swiftshader',
         '--no-first-run', '--window-size=1400,900', '--virtual-time-budget=30000000',
+        '--enable-logging=stderr', '--v=0',
         '--dump-dom', $url
     )
     Start-Process -FilePath $Chrome -ArgumentList $cargs -RedirectStandardOutput $dom `
@@ -119,6 +120,18 @@ foreach ($c in $cases) {
     $missing = @()
     foreach ($m in $c.must) {
         if ($html -notmatch [regex]::Escape($m)) { $missing += $m }
+    }
+
+    # 页面 console 里未捕获的异常（加载期错误也能抓到）
+    $logPath = Join-Path $outDir ($c.name + '.log')
+    if (Test-Path $logPath) {
+        $bad = Select-String -Path $logPath -Pattern 'Uncaught|ReferenceError|SyntaxError|TypeError' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($bad) {
+            $txt = ($bad.Line -replace '\s+', ' ').Trim()
+            if ($txt.Length -gt 80) { $txt = $txt.Substring(0, 80) }
+            $missing += ('console:' + $txt)
+        }
     }
     # memdlg must be visible (class without 'hidden')
     if ($c.name -eq 'mempopup') {

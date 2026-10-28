@@ -338,6 +338,82 @@ var id = ix.idx[list[q] * 9 + k];
 
 > **决策（2026-10-28）：不启用流式上传**。原因：当前绘制依赖索引化（全量顶点去重 + 空间分块重排索引），而流式要求边解析边上传、此时数据不全无法去重/重排。三个备选——A 流式期非索引+收齐后重建（上传两遍）、B 放弃索引化换流式（显存翻倍）、C 只细化进度（无收益）——都不划算。**保持「一次性解析 + 一次性索引化上传」**，大文件的首屏等待靠进度条与 `Esc` 取消来缓解（1.0.0.6 已支持）。
 
+
+**1.0.0.8** — console 错误抓取 + 孔位优化插件化
+
+**A｜`check.ps1` 能抓页面 console 错误**
+- dump 参数加 `--enable-logging=stderr --v=0`，读每个用例的 `.log`，命中 `Uncaught|ReferenceError|SyntaxError|TypeError` 即判 FAIL 并打印片段
+- **有效性验证**：临时在 `io.js` 注入 `__boom_for_test.bar = 1` → 6 个用例立刻 FAIL 并输出 `console:...Uncaught ReferenceError...`，恢复后 7 项全 PASS
+- 意义：以前只能靠状态栏 `err=0`，**加载期异常完全抓不到**（这也是 1.0.0.3 / 视角器合并两次失败的根因无法定位的原因）
+
+**B｜孔位优化改为插件**
+- 从 `io.js` 抽出 optimize 整段 → `js/plugins/optimize.js`（300 行），`io.js` **1680 → 1386 行**
+- 新增 `js/plugins/registry.js`（48 行）：`MV.plugins.register / initAll / list`
+- UI 标记：插件加载时给「孔位优化」按钮加 `is-plugin` class（CSS `::after` 显示小字「插件」并补 title），注释掉插件 script 时标记一起消失
+- 关闭方式：注释掉 `index.html` 里 `plugins/optimize.js` 那一行
+
+**三个坑（都导致"文件不执行"或"按钮失效"，但页面 `err=0`）**：
+1. 把整段包进 `init(app)` → 段内 `window.addEventListener('load')` 在 load 之后注册，永不触发；
+2. 抽取时多带原 IIFE 的开括号 `{` → `depth=1` 语法错误；
+3. 段尾残留 `global.MV.ioBindHooks = bindHooks;`（`bindHooks` 是 io 层私有）→ `ReferenceError` 打断后续 `register`。
+
+**验证**：`check.ps1` 7 项全 PASS 且 console 无告警。
+
+
+**1.0.0.8（续）** — 顶栏收敛为 6 个入口
+
+顶栏从「载入 左侧 / 载入 右侧 / 载入 两侧 / 单窗口 / 自适应 / 截图 / 清空 / 孔位优化 / 工具」9 个按钮，收敛为 6 个：
+
+| 入口 | 形式 | 内容 |
+|---|---|---|
+| **载入 ▾** | 下拉 | 左侧 (A) / 右侧 (B) / 公共（两侧） |
+| **单窗口 / 双窗口** | 按钮 | 文案反映「点击后会变成什么」：双窗时显示「单窗口」，单窗时显示「双窗口」 |
+| **截图** | 按钮 | 不变 |
+| **清空** | 按钮 | 不变 |
+| **插件 ▾** | 下拉 | 孔位优化（由 `js/plugins/optimize.js` 注册并绑定，注释掉插件 script 即整项消失） |
+| **工具 ▾** | 下拉 | 拾取 / 裁剪（矩形选择、多边形选择、应用拆分、取消） |
+
+- **移除「自适应」按钮**：`F` 快捷键与「双击空白处」仍可自适应，只是不再占顶栏位置
+- 三个下拉**互斥**：打开一个会自动收起其它两个，点菜单项、点空白处、按 `Esc` 都会收起
+- 单窗状态下「载入 → 公共（两侧）」自动隐藏（单窗只有一个视口，公共无意义）
+- 切换按钮文案简化为「单窗 / 双窗」（原「单窗口 / 双窗口」），且**不再高亮**（它只表示"点下去会变成什么"，当前状态由文案本身表达，高亮会让人误以为状态指示）
+- `plugins/optimize.js` 里给菜单项加的 `is-plugin` 标记，CSS 选择器从 `.btn.is-plugin::after` 放宽为 `.is-plugin::after`（菜单项没有 `.btn` class）
+
+**验证**：探针脚本实测——初始三个菜单均 `hidden`；点「载入」→ `load=OPEN` 且另两个 `hidden`；点「插件」→ `plugins=OPEN` 且「载入」自动收起；9 个菜单项全部存在；双窗时 `btn-single` 文案为「单窗口」、单窗时为「双窗口」；`btn-fit` 已移除。`check.ps1` 7 项全 PASS（含 console 抓取无告警）。
+
+
+**1.0.0.8（续 2）** — 视角器合并回 render.js
+
+- `js/gizmo.js`（460 行）合并进 `js/render.js`：视角器属于渲染的一部分，不再单列文件；`render.js` 1733 → **2126 行**，js 文件回到 **6 个**
+- `gizmoHooks.notify` → 复用 `renderHooks.notify`；`MV.gizmo.geo` → `MV.gizmoGeo`；`MV.gizmo.installAppMethods` → `MV.render.installAppMethods`
+- `index.html` 去掉 `gizmo.js` 的 `<script>`；`app.js` 安装点改回 `MV.render.installAppMethods()`
+
+**两次失败的原因（这次靠 console 抓取定位）**：
+1. 第一次：用「恰好 4 空格缩进的 `}`」找函数闭合，命中的是**函数体内 `if` 的闭合** → 只截到 13 行；
+2. 第二次（修正配平后）：`installGizmoMethods` 已搬入但**导出语句没加** —— 脚本用 `'render.installAppMethods' in r` 做重复检查，而文件头注释里正好有这个词，于是误判「已存在」跳过；
+   浏览器报 `Uncaught TypeError: this.drawAxisCube is not a function`（app.js:1255），被 `check.ps1` 的 console 抓取直接指出。
+
+另外发现 `gizmo.js` 里 `installGizmoMethods` 开头有一段**重复的 `var App` + if**（上次拆分残留），一并清掉。
+
+**验证**：`check.ps1` 7 项全 PASS（console 无告警），截图确认左下角削角六面体 + XYZ 箭头正常。
+
+
+**1.0.0.8（续 3）** — 单窗拖放语义 + 按钮文案
+
+- **单窗模式下的拖放**：原来单窗一律把落点当「A」，提示文字仍是「松开导入到左侧 (A)」，但单窗只有一块画布、没有左右半屏，语义不成立。改为：
+  - `slotAt()` 单窗直接返回 `'BOTH'`（**公共场景**），`addFiles` 按 `['A','B']` 两侧一起建层，单视口合并渲染
+  - 拖放高亮区宽度 100%，提示改为「松开导入到公共场景」
+  - 顶部 `drop-hint` 改为「拖拽 … 到窗口任意位置（导入公共场景）」
+  - 状态栏提示补上「公共场景」分支（原只有 A/B 两种）
+  - 空场景提示从「拖到视图左/右半屏」改为「使用顶部『载入』按钮，或把文件拖进窗口」
+- **旋转中心按钮**：「默认视角」→ **「默认」**（与「重设」「回正」保持两字对齐）
+
+**验证**：探针实测单窗下 `label=松开导入到公共场景`、`hint=…到窗口任意位置（导入公共场景）`、`zoneA_width=100%`、`reset=默认`、`single_btn=双窗`、`active=false`、无 JS 错误；`check.ps1` 7 项全 PASS。
+
+
+> **版本号说明**：本次提交为 **`1.0.0.8`**（git 中上一版是 `1.0.0.7`）。改动过程中版本号曾写到 1.0.0.9 / 1.0.0.10，已统一并回 1.0.0.8。
+> 提醒：**每次改 JS 都要同步升 `?v=`**，否则浏览器按 URL 命中旧缓存，表现为"代码改了页面没变"。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

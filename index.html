@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.0.7" />
+<link rel="stylesheet" href="css/style.css?v=1.0.0.8" />
 </head>
 <body>
 <div id="app">
@@ -16,20 +16,26 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.0.7</span>
+            <span class="sub">mesh / point cloud compare · v1.0.0.8</span>
         </div>
         <div class="toolbar">
-            <button id="btn-load-before" title="载入到 左侧 (A)">载入 左侧 (A)</button>
-            <button id="btn-load-after" title="载入到 右侧 (B)">载入 右侧 (B)</button>
-            <button id="btn-load-both" title="同一文件同时载入两侧">载入 两侧</button>
-            <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗口</button>
-            <span class="sep"></span>
-            <button id="btn-fit" title="视图自适应 (F)">自适应</button>
+            <div id="load-menu-wrap" class="menu-wrap">
+                <button id="btn-load" class="menu-btn" title="载入数据到指定视口">载入 ▾</button>
+                <div id="load-menu" class="menu hidden">
+                    <button id="btn-load-before" title="载入到 左侧 (A)">左侧 (A)</button>
+                    <button id="btn-load-after" title="载入到 右侧 (B)">右侧 (B)</button>
+                    <button id="btn-load-both" title="同一文件同时载入两侧（公共）">公共（两侧）</button>
+                </div>
+            </div>
+            <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗</button>
             <button id="btn-shot" title="导出当前画面为 PNG">截图</button>
             <button id="btn-clear" title="清空所有图层">清空</button>
-            <!-- ===== 孔位优化 BEGIN（注释掉这两个标记之间即可关闭） ===== -->
-            <button id="btn-optimize" title="调用 HoleOptimize_cli 优化当前网格，结果自动载入右侧（需先运行 serve.bat）">孔位优化</button>
-            <!-- ===== 孔位优化 END ===== -->
+            <div id="plugin-menu-wrap" class="menu-wrap">
+                <button id="btn-plugins" class="menu-btn" title="插件">插件 ▾</button>
+                <div id="plugins-menu" class="menu hidden">
+                    <button id="btn-optimize" title="调用 HoleOptimize_cli 优化当前网格，结果自动载入右侧（需先运行 serve.bat）">孔位优化</button>
+                </div>
+            </div>
             <!-- ===== 工具菜单 BEGIN（拾取 / 裁剪 为同级功能；注释掉整块即关闭） ===== -->
             <div id="tool-menu-wrap" class="menu-wrap">
                 <button id="btn-tools" class="menu-btn" title="工具：拾取 / 裁剪">工具 ▾</button>
@@ -239,7 +245,7 @@
                             <div class="btn-group">
                                 <button id="btn-pick-center" class="mini" title="点击后在模型表面单击设为旋转中心（等价 Ctrl+左键）">重设</button>
                                 <button id="btn-level" class="mini" title="清除滚转，把模型摆正">回正</button>
-                                <button id="btn-reset-view" class="mini" title="恢复初始 45° 俯视">默认视角</button>
+                                <button id="btn-reset-view" class="mini" title="恢复初始 45° 俯视">默认</button>
                             </div>
                         </div>
                     </div>
@@ -279,7 +285,7 @@
 
         <div id="view-area">
             <canvas id="gl"></canvas>
-            <div id="drop-zone-a" class="drop-zone left"><span>松开导入到左侧 (A)</span></div>
+            <div id="drop-zone-a" class="drop-zone left"><span id="drop-label-a">松开导入到左侧 (A)</span></div>
             <div id="drop-zone-b" class="drop-zone right"><span>松开导入到右侧 (B)</span></div>
             <div class="view-tag left" id="tag-left">左侧 (A)</div>
             <div class="view-tag right" id="tag-right">右侧 (B)</div>
@@ -412,13 +418,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.0.7"></script>
-    <script src="js/io.js?v=1.0.0.7"></script>
-    <script src="js/algo.js?v=1.0.0.7"></script>
-    <script src="js/render.js?v=1.0.0.7"></script>
-    <script src="js/gizmo.js?v=1.0.0.7"></script>
-    <script src="js/ui.js?v=1.0.0.7"></script>
-    <script src="js/app.js?v=1.0.0.7"></script>
+    <script src="js/core.js?v=1.0.0.8"></script>
+    <script src="js/io.js?v=1.0.0.8"></script>
+    <script src="js/algo.js?v=1.0.0.8"></script>
+    <script src="js/render.js?v=1.0.0.8"></script>
+    <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
+    <script src="js/plugins/registry.js?v=1.0.0.8"></script>
+    <script src="js/plugins/optimize.js?v=1.0.0.8"></script>
+    <script src="js/ui.js?v=1.0.0.8"></script>
+    <script src="js/app.js?v=1.0.0.8"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

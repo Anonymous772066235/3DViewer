@@ -240,7 +240,7 @@
         if (this.cubeCanvas)
         {
             // HEX_GEO 已拆到 gizmo.js，通过 MV.gizmoGeo 读取
-            var geo = (global.MV.gizmo && global.MV.gizmo.geo);
+            var geo = global.MV.gizmoGeo;
             this.cubeCanvas.title = geo
                 ? ('视角器：' + geo.count + ' 个面 ' + JSON.stringify(geo.stat) +
                     '，箭头为 X/Y/Z 正方向')
@@ -1517,7 +1517,7 @@
 
     // 安装下层模块提供的 App 方法（拾取 / 视角器 / 拖放）
     if (global.MV.algo && global.MV.algo.installAppMethods) { global.MV.algo.installAppMethods(); }
-    if (global.MV.gizmo && global.MV.gizmo.installAppMethods) { global.MV.gizmo.installAppMethods(); }
+    if (global.MV.render && global.MV.render.installAppMethods) { global.MV.render.installAppMethods(); }
     if (global.MV.ui && global.MV.ui.installAppMethods) { global.MV.ui.installAppMethods(); }
 
     // 下层模块的 UI 通知钩子（分层契约：下层不直接调 MV.ui）
@@ -1532,10 +1532,6 @@
     if (global.MV.render && global.MV.render.bindHooks)
     {
         global.MV.render.bindHooks({ notify: global.MV.ui.setInfo, refreshProps: global.MV.ui.renderProps });
-        if (global.MV.gizmo && global.MV.gizmo.bindHooks)
-        {
-            global.MV.gizmo.bindHooks({ notify: global.MV.ui.setInfo });
-        }
     }
 
     window.addEventListener('load', function ()

@@ -492,10 +492,13 @@ serve.bat
 | `js/ui.js` | **L5 界面**：场景树 / 属性面板 / 视图设置 / 弹窗 / 全局拖放 | GL 细节、算法实现 |
 | `js/app.js` | **L6 编排**：状态、图层、视图调度、输入分派、渲染循环、URL 参数（`MV.config`） | 具体算法与 DOM 细节 |
 | `server/` | 本地服务（静态 + `/optimize`）、独立桥接、端到端自测 | 任何前端代码 |
+| `js/plugins/` | **插件**：`registry.js`（注册表）+ 各插件（当前 `optimize.js` 孔位优化） | 主程序逻辑（插件只通过 `MV.*` 与 app 交互） |
 
 **分层契约**：`ui → app → {algo, render, io}`，`{algo, render, io} → core`。下层**不得**直接调 `MV.ui`——通过 `bindHooks()` 注入的 `notify / refreshProps / renderPickBar` 通知，`App.prototype` 方法经 `installAppMethods()` 注入。
 
-**根目录白名单**：`index.html`、`README.md`、`CHANGELOG.md`、`.gitignore`、`serve.bat`、`check.ps1`、`css/`、`js/`、`server/`。
+**根目录白名单**：`index.html`、`README.md`、`CHANGELOG.md`、`.gitignore`、`serve.bat`、`check.ps1`、`css/`、`js/`、`server/`（`js/plugins/` 在 `js/` 内）。
+
+**插件开关**：注释掉 `index.html` 里 `js/plugins/*.js` 的 `<script>` 即关闭该插件，主程序不依赖任何插件。
 
 ### 8.2 落位判断（新增功能三步）
 
@@ -518,7 +521,7 @@ serve.bat
 | 约定 | 说明 |
 | --- | --- |
 | 文件名 | 小写 + 语义（`segment` ✅ / `utils2` ❌） |
-| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → gizmo → ui → app` |
+| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → gizmo → plugins/* → ui → app` |
 | 入口唯一 | 对外只暴露 `serve.bat`；`server/start_bridge.bat` 仅作 `file://` 兜底 |
 | 不使用 ESM / 构建工具 | 保证 `file://` 双击可用（ESM 会被 CORS 拦截），保持零依赖零构建 |
 | URL 参数 | 统一在 `app.init()` 解析成 `MV.config`，其它模块只读配置 |

@@ -16,7 +16,7 @@
     var SLOT_INFO = {
         A: { title: '左侧', badge: 'A' },
         B: { title: '右侧', badge: 'B' },
-        S: { title: '公共图层', badge: 'S' }
+        S: { title: '公共', badge: 'S' }
     };
 
     var collapsed = { A: false, B: false, S: false };
@@ -415,7 +415,7 @@
         if (total === 0)
         {
             var tip = el('div', 'tree-empty',
-                '尚无图层。使用顶部按钮或把文件拖到视图左/右半屏。');
+                '尚无图层。使用顶部「载入」按钮，或把文件拖进窗口。');
             root.appendChild(tip);
         }
     }
@@ -1131,13 +1131,32 @@
         $('tag-right').style.display = single ? 'none' : '';
         $('split-line').style.display = single ? 'none' : '';
 
-        $('btn-load-before').textContent = single ? '载入 A' : '载入 左侧 (A)';
-        $('btn-load-after').textContent = single ? '载入 B' : '载入 右侧 (B)';
+        // 载入菜单：单窗只有 A/B 合一，隐藏「公共」
         $('btn-load-both').style.display = single ? 'none' : '';
 
-        $('btn-single').textContent = single ? '双窗口' : '单窗口';
+        // 拖放提示：单窗没有左右半屏，统一导入公共场景
+        var dropZoneA = $('drop-zone-a');
+        if (dropZoneA)
+        {
+            dropZoneA.style.width = single ? '100%' : '';
+        }
+        var dropLabel = $('drop-label-a');
+        if (dropLabel)
+        {
+            dropLabel.textContent = single ? '松开导入到公共场景' : '松开导入到左侧 (A)';
+        }
+        var dropHint = $('drop-hint');
+        if (dropHint)
+        {
+            dropHint.textContent = single
+                ? '拖拽 STL / OBJ / PLY / 点云文件到窗口任意位置（导入公共场景）'
+                : '拖拽 STL / OBJ / PLY / 点云文件到左半屏（左侧 A）或右半屏（右侧 B）';
+        }
+
+        $('btn-single').textContent = single ? '双窗' : '单窗';
         $('btn-single').title = single ? '切回双视口（左 A / 右 B）' : '合并为单视口（A/B/S 全部图层一起渲染）';
-        $('btn-single').classList.toggle('active', single);
+        // 不做高亮：它只是切换按钮，当前状态已由文案体现
+        $('btn-single').classList.remove('active');
 
         $('row-ghost').style.display = single ? 'none' : '';
         $('row-sync').style.display = single ? 'none' : '';
@@ -1158,7 +1177,6 @@
             app.setSingleView(on);
             setInfo(on ? '单窗口：A / B / S 全部图层在同一视口渲染' : '双窗口：左侧 A / 右侧 B');
         });
-        $('btn-fit').addEventListener('click', function () { app.fitAll(); });
         $('btn-clear').addEventListener('click', function () { app.clearAll(); });
         $('btn-shot').addEventListener('click', function () { app.screenshot(); });
 
@@ -1492,26 +1510,58 @@
             app.setPickInfo(false);
         });
 
-        // 顶栏「工具」下拉：拾取 / 裁剪 同级，点任一项后自动收起
-        var toolsBtn = $('btn-tools');
-        var toolsMenu = $('tools-menu');
-        if (toolsBtn && toolsMenu)
+        // 顶栏下拉：载入 / 插件 / 工具，三者互斥，点任一项后自动收起
+        var topMenus = [
+            { btn: $('btn-load'), menu: $('load-menu') },
+            { btn: $('btn-plugins'), menu: $('plugins-menu') },
+            { btn: $('btn-tools'), menu: $('tools-menu') }
+        ];
+
+        function hideTopMenus()
         {
-            toolsBtn.addEventListener('click', function (ev)
+            for (var mi = 0; mi < topMenus.length; mi++)
             {
-                ev.stopPropagation();
-                toolsMenu.classList.toggle('hidden');
-                toolsBtn.classList.toggle('active', !toolsMenu.classList.contains('hidden'));
-            });
+                if (topMenus[mi].menu)
+                {
+                    topMenus[mi].menu.classList.add('hidden');
+                }
+                if (topMenus[mi].btn)
+                {
+                    topMenus[mi].btn.classList.remove('active');
+                }
+            }
+        }
 
-            toolsMenu.addEventListener('click', function (ev)
+        for (var mj = 0; mj < topMenus.length; mj++)
+        {
+            (function (it)
             {
-                ev.stopPropagation();
-                toolsMenu.classList.add('hidden');
-                toolsBtn.classList.remove('active');
-            });
+                if (!it.btn || !it.menu)
+                {
+                    return;
+                }
 
-            document.addEventListener('click', hideCtxMenu);
+                it.btn.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    var willOpen = it.menu.classList.contains('hidden');
+                    hideTopMenus();
+                    if (willOpen)
+                    {
+                        it.menu.classList.remove('hidden');
+                        it.btn.classList.add('active');
+                    }
+                });
+
+                it.menu.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    hideTopMenus();
+                });
+            })(topMenus[mj]);
+        }
+
+        document.addEventListener('click', hideCtxMenu);
         document.addEventListener('contextmenu', function (ev)
         {
             if (!ev.target || !ev.target.closest || !ev.target.closest('.tree-item'))
@@ -1520,26 +1570,25 @@
             }
         });
 
-        document.addEventListener('click', function ()
-            {
-                toolsMenu.classList.add('hidden');
-                toolsBtn.classList.remove('active');
-            });
+        document.addEventListener('click', hideTopMenus);
 
-            window.addEventListener('keydown', function (ev)
+        window.addEventListener('keydown', function (ev)
+        {
+            if (ev.key === 'Escape')
             {
-                if (ev.key === 'Escape')
-                {
-                    toolsMenu.classList.add('hidden');
-                    toolsBtn.classList.remove('active');
-                }
-            });
+                hideTopMenus();
+            }
+        });
 
-            // ?menu=1 默认展开（便于截图 / 直达）
-            if ((global.MV.config || {}).menu)
+        // ?menu=1 默认展开工具菜单（便于截图 / 直达）
+        if ((global.MV.config || {}).menu)
+        {
+            var mb = $('btn-tools');
+            var mm = $('tools-menu');
+            if (mb && mm)
             {
-                toolsMenu.classList.remove('hidden');
-                toolsBtn.classList.add('active');
+                mm.classList.remove('hidden');
+                mb.classList.add('active');
             }
         }
 
@@ -1732,16 +1781,20 @@
         var zoneA = document.getElementById('drop-zone-a');
         var zoneB = document.getElementById('drop-zone-b');
 
-        // 落点在画布左半 → A，右半 → B；单视图一律进 A
+        // 落点在画布左半 → A，右半 → B；单窗没有左右之分 → 公共场景（BOTH）
         function slotAt(clientX)
         {
+            if (self.settings.singleView)
+            {
+                return 'BOTH';
+            }
             if (!area)
             {
                 return 'A';
             }
             var r = area.getBoundingClientRect();
             var x = clientX - r.left;
-            if (self.settings.singleView || x < r.width * 0.5)
+            if (x < r.width * 0.5)
             {
                 return 'A';
             }
@@ -1754,7 +1807,7 @@
             if (zoneA)
             {
                 zoneA.style.width = single ? '100%' : '';
-                zoneA.classList.toggle('active', slot === 'A');
+                zoneA.classList.toggle('active', single ? slot === 'BOTH' : slot === 'A');
             }
             if (zoneB)
             {
@@ -1822,8 +1875,8 @@
             }
 
             var slot = slotAt(e.clientX);
-            global.MV.ui.setInfo('正在导入 ' + files.length + ' 个文件到' +
-                (slot === 'A' ? '左侧 (A)' : '右侧 (B)') + ' …');
+            var where = slot === 'A' ? '左侧 (A)' : (slot === 'B' ? '右侧 (B)' : '公共场景');
+            global.MV.ui.setInfo('正在导入 ' + files.length + ' 个文件到' + where + ' …');
             self.addFiles(files, slot);
         });
     };
