@@ -201,6 +201,59 @@
         menu.appendChild(b);
     }
 
+
+    /* vertices 占位项的右键菜单：拷到本侧 / 对侧 / 公共 */
+    function showVertexCtx(x, y, layer)
+    {
+        var menu = $('ctx-menu');
+        if (!menu)
+        {
+            return;
+        }
+        menu.innerHTML = '';
+
+        var head = document.createElement('div');
+        head.className = 'ctx-head';
+        head.textContent = layer.name + ' · 顶点云';
+        menu.appendChild(head);
+
+        var other = layer.slot === 'A' ? 'B' : (layer.slot === 'B' ? 'A' : 'A');
+        var selfLabel = layer.slot === 'A' ? '左侧 (A)' : (layer.slot === 'B' ? '右侧 (B)' : '公共 (S)');
+        var otherLabel = other === 'A' ? '左侧 (A)' : '右侧 (B)';
+
+        // 统一入口：预览态下 selectedId 是 null，必须先用闭包里的 layer 恢复选中
+        function pickSlot(slot)
+        {
+            app.clearVertexPreview();
+            app.selectedId = layer.id;
+            app.extractVertices(slot);
+        }
+
+        ctxItem(menu, '拷贝到 ' + selfLabel + '（本侧）', function ()
+        {
+            pickSlot(layer.slot);
+        });
+
+        if (layer.slot !== 'S')
+        {
+            ctxItem(menu, '拷贝到 ' + otherLabel + '（对侧）', function ()
+            {
+                pickSlot(other);
+            });
+        }
+
+        ctxItem(menu, '拷贝到 公共 (S)', function ()
+        {
+            pickSlot('S');
+        });
+
+        menu.classList.remove('hidden');
+        var w = menu.offsetWidth || 170;
+        var h = menu.offsetHeight || 96;
+        menu.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 6)) + 'px';
+        menu.style.top = Math.max(4, Math.min(y, window.innerHeight - h - 6)) + 'px';
+    }
+
     function showCtxMenu(x, y, layer)
     {
         var menu = $('ctx-menu');
@@ -246,6 +299,48 @@
     }
 
     /* ---------------- 场景树 ---------------- */
+    /* 调试：树渲染完同步点一次 ghost 行（用于复现点击路径的报错） */
+    function clickGhostOnce()
+    {
+        if (!(global.MV.config || {}).clickverts || global.MV.__ghClicked)
+        {
+            return;
+        }
+        var a2 = global.MV.app;
+        if (!a2 || !a2.layers.length)
+        {
+            return;
+        }
+
+        var mesh = null;
+        for (var i = 0; i < a2.layers.length; i++)
+        {
+            if (a2.layers[i].kind === 'mesh')
+            {
+                mesh = a2.layers[i];
+                break;
+            }
+        }
+        if (!mesh)
+        {
+            return;
+        }
+
+        // 先保证选中（selectLayer 内部会再渲染一次，下一轮进来就能拿到 ghost 行）
+        if (a2.selectedId !== mesh.id)
+        {
+            a2.selectLayer(mesh.id);
+            return;
+        }
+
+        var gh = document.querySelector('.tree-item.ghost-child');
+        if (gh)
+        {
+            global.MV.__ghClicked = true;
+            gh.click();
+        }
+    }
+
     function renderTree()
     {
         if (!app)
@@ -365,9 +460,24 @@
                 name.title = tip;
                 row.title = tip;
 
-                var meta = el('span', 'lmeta',
-                    layer.kind === 'mesh' ? formatCount(layer.data.count) + ' tri' :
-                        formatCount(layer.data.count) + ' pts');
+                // mesh 显示「面数 · 点数」，点云只显示点数
+                var vc = layer.data.vertCount;
+                var metaTxt;
+                if (layer.kind === 'mesh')
+                {
+                    metaTxt = formatCount(layer.data.count) + ' 面' +
+                        (vc ? ' · ' + formatCount(vc) + ' 点' : '');
+                }
+                else
+                {
+                    metaTxt = formatCount(layer.data.count) + ' 点';
+                }
+
+                var meta = el('span', 'lmeta', metaTxt);
+                if (layer.kind === 'mesh' && vc)
+                {
+                    meta.title = layer.data.count + ' 个三角形 / ' + vc + ' 个顶点';
+                }
 
                 var del = el('button', 'del', '\u00D7');
                 del.title = layer.parentId ? '删除该结果图层' : '删除图层（连同其下的结果）';
@@ -400,8 +510,48 @@
 
                 children.appendChild(row);
 
-                var kids = byParent[layer.id];
-                if (kids)
+                // 已派生的顶点云（子图层）
+                // 注意：kids 必须在这里就取，不能用后面 var kids 的声明（var 提升会导致此处是 undefined）
+                var myKids = byParent[layer.id] || [];
+                var vKids = myKids.filter(function (k)
+                {
+                    return k.data && k.data.format === 'vertices';
+                });
+
+                // 还没有顶点云：显示一个占位子行，点一下即创建
+                if (layer.kind === 'mesh' && vKids.length === 0 && layer.id === app.selectedId)
+                {
+                    var vrow = el('div', 'tree-item child ghost-child');
+                    vrow.style.paddingLeft = (10 + (depth + 1) * 14) + 'px';
+                    vrow.appendChild(el('span', 'vc-ico', '\u2601'));
+                    vrow.appendChild(el('span', 'lname', 'vertices'));
+                    vrow.title = '点击查看顶点信息；右键拷贝到本侧 / 对侧 / 公共';
+
+                    if (app.vertexPreviewId === layer.id)
+                    {
+                        vrow.classList.add('selected');
+                    }
+
+                    // 单击：只显示顶点信息（不创建图层）
+                    vrow.addEventListener('click', function (ev)
+                    {
+                        ev.stopPropagation();
+                        app.previewVertices(layer.id);
+                    });
+
+                    // 右键：拷贝到本侧 / 对侧 / 公共
+                    vrow.addEventListener('contextmenu', function (ev)
+                    {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        showVertexCtx(ev.clientX, ev.clientY, layer);
+                    });
+
+                    children.appendChild(vrow);
+                }
+
+                var kids = myKids;
+                if (kids.length)
                 {
                     kids.forEach(function (k) { emitRow(k, depth + 1); });
                 }
@@ -418,11 +568,130 @@
                 '尚无图层。使用顶部「载入」按钮，或把文件拖进窗口。');
             root.appendChild(tip);
         }
+    
+        clickGhostOnce();
     }
 
     /* ---------------- 属性面板 ---------------- */
+    /* 展开指定 slot 的分组（拷贝到对侧后自动露出来） */
+    function expandSlot(slot)
+    {
+        if (slot === 'A' || slot === 'B' || slot === 'S')
+        {
+            collapsed[slot] = false;
+        }
+    }
+
+    /* 填充「顶点云（尚未创建）」信息区；layer 为空则隐藏该区 */
+    function showVertexInfo(layer)
+    {
+        var box = document.getElementById('vert-info');
+        if (!box)
+        {
+            return;
+        }
+
+        if (!layer || layer.kind !== 'mesh' || !layer.data)
+        {
+            box.classList.add('hidden');
+            return;
+        }
+
+        box.classList.remove('hidden');
+
+        var vd = layer.data;
+        var nv = vd.vertCount || 0;
+
+        var elSrc = document.getElementById('vi-src');
+        var elCnt = document.getElementById('vi-count');
+        var elBox = document.getElementById('vi-bbox');
+
+        if (elSrc) { elSrc.textContent = layer.name; }
+        if (elCnt) { elCnt.textContent = nv.toLocaleString(); }
+
+        var txt = '—';
+        var bb = vd.bbox;
+        var lo = null, hi = null;
+        if (bb && bb.length >= 6 && typeof bb[0] === 'number')
+        {
+            lo = [bb[0], bb[1], bb[2]];
+            hi = [bb[3], bb[4], bb[5]];
+        }
+        else if (bb && bb.min && bb.max && bb.min.length >= 3 && bb.max.length >= 3)
+        {
+            lo = bb.min;
+            hi = bb.max;
+        }
+        if (lo && hi)
+        {
+            txt = lo[0].toFixed(1) + ', ' + lo[1].toFixed(1) + ', ' + lo[2].toFixed(1) +
+                  ' → ' + hi[0].toFixed(1) + ', ' + hi[1].toFixed(1) + ', ' + hi[2].toFixed(1);
+        }
+        if (elBox) { elBox.textContent = txt; }
+    }
+
     function renderProps()
     {
+        // 选中「vertices」占位项时，只显示顶点信息区
+        var viBox = document.getElementById('vert-info');
+        if (viBox)
+        {
+            var vpSrc = null;
+            if (app && app.vertexPreviewId != null)
+            {
+                for (var vpi = 0; vpi < app.layers.length; vpi++)
+                {
+                    if (app.layers[vpi].id === app.vertexPreviewId)
+                    {
+                        vpSrc = app.layers[vpi];
+                        break;
+                    }
+                }
+            }
+
+            if (vpSrc)
+            {
+                viBox.classList.remove('hidden');
+
+                var vd = vpSrc.data || {};
+                var nv = vd.vertCount || 0;
+
+                var elSrc = document.getElementById('vi-src');
+                var elCnt = document.getElementById('vi-count');
+                var elBox = document.getElementById('vi-bbox');
+
+                if (elSrc) { elSrc.textContent = vpSrc.name; }
+                if (elCnt) { elCnt.textContent = nv.toLocaleString(); }
+
+                var txt = '—';
+                var bb = vd.bbox;
+
+                // 兼容两种结构：数组 [minx..maxz] / 对象 { min: [x,y,z], max: [x,y,z] }
+                var lo = null, hi = null;
+                if (bb && bb.length >= 6 && typeof bb[0] === 'number')
+                {
+                    lo = [bb[0], bb[1], bb[2]];
+                    hi = [bb[3], bb[4], bb[5]];
+                }
+                else if (bb && bb.min && bb.max && bb.min.length >= 3 && bb.max.length >= 3)
+                {
+                    lo = bb.min;
+                    hi = bb.max;
+                }
+
+                if (lo && hi)
+                {
+                    txt = lo[0].toFixed(1) + ', ' + lo[1].toFixed(1) + ', ' + lo[2].toFixed(1) +
+                          ' → ' + hi[0].toFixed(1) + ', ' + hi[1].toFixed(1) + ', ' + hi[2].toFixed(1);
+                }
+                if (elBox) { elBox.textContent = txt; }
+
+                return;         // 顶点预览态下不渲染图层属性
+            }
+
+            viBox.classList.add('hidden');
+        }
+
         if (!app)
         {
             return;
@@ -455,7 +724,7 @@
 
         $('p-name').value = layer.name;
         $('p-slot').value = layer.slot;
-        $('p-color-k').textContent = layer.kind === 'mesh' ? '面片颜色' : '点颜色';
+        $('p-color-k').textContent = layer.kind === 'mesh' ? '正面' : '颜色';
         $('p-color').value = layer.color;
         if ($('btn-colors-dot'))
         {
@@ -1693,6 +1962,27 @@
             }
         })();
 
+        var viMake = document.getElementById('vi-make');
+        if (viMake)
+        {
+            viMake.addEventListener('click', function ()
+            {
+                var srcId = app ? app.vertexPreviewId : null;
+                if (srcId == null)
+                {
+                    return;
+                }
+                var slot = 'A';
+                for (var mi2 = 0; mi2 < app.layers.length; mi2++)
+                {
+                    if (app.layers[mi2].id === srcId) { slot = app.layers[mi2].slot; break; }
+                }
+                app.clearVertexPreview();
+                app.selectedId = srcId;
+                app.extractVertices(slot);
+            });
+        }
+
         $('btn-remove-layer').addEventListener('click', function ()
         {
             var l = app.getSelected();
@@ -1914,6 +2204,9 @@
                 });
             })(tabs[k]);
         }
+
+        // 供 app.init 之后按 ?tab= 切到指定 Tab
+        global.MV.ui.showSideTab = showTab;
     }
 
     /* ==================== 侧栏宽 / 面板高拖拽 ==================== */
@@ -2040,6 +2333,8 @@
         updateSegBar: updateSegBar,
         applyTheme: applyTheme,
         setSfbarVisible: setSfbarVisible,
+        showVertexInfo: showVertexInfo,
+        expandSlot: expandSlot,
     };
 
 

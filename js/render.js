@@ -388,11 +388,149 @@
         return true;
     }
 
-    /* 顶点去重 + 索引化：非索引三角面（9 float/三角）→ (verts, idx)
-     * 量化键 Q=1e4（mm 级坐标 = 0.1 μm 精度），只用于判重，顶点坐标保留原值 */
-    function buildIndexed(positions)
+    /* 顶点焊接总开关；实际是否焊接还要看格式（见 uploadLayer，只有 STL 参与）
+     * false = 全局关闭，所有格式都不去重 */
+    var WELD_VERTICES = true;
+
+    /* 一次遍历同时算出：唯一顶点数 / 包围盒 / 去重后的顶点数组
+     * 用数值哈希（不用字符串拼接）做判重，比 Map<string> 快 3~5 倍 */
+    function analyzeMesh(positions)
+    {
+        var n = positions.length;
+        var tri = Math.floor(n / 9);
+
+        if (!tri)
+        {
+            return { vertCount: 0, bbox: null, uniqVerts: null };
+        }
+
+        var Q = 1e4;
+        var seen = new Map();
+        var uniq = new Float32Array(tri * 9);
+        var m = 0;
+
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+
+        for (var i = 0; i < tri * 9; i += 3)
+        {
+            var x = positions[i], y = positions[i + 1], z = positions[i + 2];
+
+            if (x < mnx) { mnx = x; }
+            if (y < mny) { mny = y; }
+            if (z < mnz) { mnz = z; }
+            if (x > mxx) { mxx = x; }
+            if (y > mxy) { mxy = y; }
+            if (z > mxz) { mxz = z; }
+
+            // 量化后做数值哈希：避免字符串拼接与 GC
+            var kx = Math.round(x * Q);
+            var ky = Math.round(y * Q);
+            var kz = Math.round(z * Q);
+            var key = (kx * 73856093) ^ (ky * 19349663) ^ (kz * 83492791);
+
+            var hit = false;
+            var bucket = seen.get(key);
+            if (bucket)
+            {
+                // 哈希冲突时逐个比对真实坐标
+                for (var b = 0; b < bucket.length; b++)
+                {
+                    var u = bucket[b];
+                    if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!hit)
+                {
+                    bucket.push(m);
+                }
+            }
+            else
+            {
+                seen.set(key, [m]);
+            }
+
+            if (!hit)
+            {
+                uniq[m * 3] = x;
+                uniq[m * 3 + 1] = y;
+                uniq[m * 3 + 2] = z;
+                m++;
+            }
+        }
+
+        return {
+            vertCount: m,
+            bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] },
+            uniqVerts: uniq.subarray(0, m * 3)
+        };
+    }
+
+    /* 唯一顶点数（按位置量化去重），用于在树上显示「点数量」 */
+    /* 从 positions 算包围盒 [minX,minY,minZ,maxX,maxY,maxZ] */
+    function bboxOf(positions)
+    {
+        var n = positions.length;
+        if (!n)
+        {
+            return null;
+        }
+
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+
+        for (var i = 0; i < n; i += 3)
+        {
+            var x = positions[i], y = positions[i + 1], z = positions[i + 2];
+            if (x < mnx) { mnx = x; }
+            if (y < mny) { mny = y; }
+            if (z < mnz) { mnz = z; }
+            if (x > mxx) { mxx = x; }
+            if (y > mxy) { mxy = y; }
+            if (z > mxz) { mxz = z; }
+        }
+
+        return [mnx, mny, mnz, mxx, mxy, mxz];
+    }
+
+    function countUniqueVerts(positions)
     {
         var tri = Math.floor(positions.length / 9);
+        var seen = new Set();
+        var Q = 1e4;
+
+        for (var t = 0; t < tri * 3; t++)
+        {
+            var o = t * 3;
+            seen.add(Math.round(positions[o] * Q) + ',' +
+                     Math.round(positions[o + 1] * Q) + ',' +
+                     Math.round(positions[o + 2] * Q));
+        }
+
+        return seen.size;
+    }
+
+    /* 顶点去重 + 索引化：非索引三角面（9 float/三角）→ (verts, idx)
+     * 量化键 Q=1e4（mm 级坐标 = 0.1 μm 精度），只用于判重，顶点坐标保留原值 */
+    function buildIndexed(positions, weld)
+    {
+        var tri = Math.floor(positions.length / 9);
+
+        // 不焊接：顶点原样复制，索引恒等（几何上完全独立，等价于非索引绘制）
+        if (weld === false)
+        {
+            var flat = new Float32Array(tri * 9);
+            flat.set(positions.subarray(0, tri * 9));
+            var eidx = new Uint32Array(tri * 3);
+            for (var ei = 0; ei < tri * 3; ei++)
+            {
+                eidx[ei] = ei;
+            }
+            return { verts: flat, idx: eidx, vcount: tri * 3 };
+        }
         var map = new Map();
         var verts = new Float32Array(tri * 9);
         var idx = new Uint32Array(tri * 3);
@@ -536,7 +674,16 @@
         if (d.kind === 'mesh')
         {
             // 索引化：顶点去重后上传 + 索引缓冲（显存约降 50%，顶点着色器调用大减）
-            var ix = buildIndexed(d.positions);
+            // STL 是散乱三角面（没有共享顶点信息），去重收益最大，也最安全；
+            // OBJ / PLY 自带拓扑或顶点属性，保持原始顶点独立，避免误合并
+            var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
+            var ix = buildIndexed(d.positions, doWeld);
+
+            // 树上要显示「点数量」：焊接时 vcount 就是唯一数，否则单独统计一次
+            if (d.vertCount === undefined)
+            {
+                d.vertCount = doWeld ? ix.vcount : countUniqueVerts(d.positions);
+            }
 
             // 空间分块：按质心分格 + 重排索引（同格三角形连续，AABB 更紧凑）
             var sc = buildSpaceChunks(ix, d.count);
@@ -578,6 +725,9 @@
                 posBuffer: pb,
                 indexBuffer: ib,
                 srcIndex: ix.idx,          // CPU 侧保留，供线框生成边索引
+                // 唯一顶点集：优先用 createLayer 时算好的，避免重复遍历
+                uniqVerts: (d.uniqVerts && d.uniqVerts.length) ? d.uniqVerts
+                    : (doWeld ? ix.verts : null),
                 indexed: true,
                 vertCount: ix.vcount,
                 triCount: d.count,
@@ -1054,7 +1204,7 @@
         {
             // 正面 / 背面分两遍绘制：绕序由 GPU 判定，两面颜色各自独立
             var pushBack = layer.showWire || layer.showVerts || layer.showBoundary;
-            var bc = layer.backColorRgb || [0.69, 0.23, 0.19];
+            var bc = layer.backColorRgb || [0.42, 0.44, 0.47];
             var backCol = [bc[0], bc[1], bc[2], alpha];
             var shade = layer.shadeMode;
             var backShade = shade;
@@ -1372,7 +1522,7 @@
         this.previewRemCount = 0;
         this.previewOverlayId = (geo && geo.layerId) || null;
         this.previewColor = (geo && geo.color) || [0.44, 0.67, 0.93];
-        this.previewBackColor = (geo && geo.backColor) || [0.69, 0.23, 0.19];
+        this.previewBackColor = (geo && geo.backColor) || [0.42, 0.44, 0.47];
         this.previewShade = (geo && geo.shade) || 0;
 
         var olds = [this.previewVao, this.previewRemVao];
@@ -1662,7 +1812,9 @@
         gl.uniformMatrix4fv(this.pointU.uMVP, false, mvp);
         gl.uniformMatrix4fv(this.pointU.uView, false, viewM);
         gl.uniform1f(this.pointU.uPointSize, pointSize);
-        gl.uniform1f(this.pointU.uDepthBias, 0.0);
+        // 顶点云与网格表面完全共面：点必须比面更靠近相机，否则被网格整片挡掉
+        var pBiasV = (layer.data && layer.data.format === 'vertices') ? 0.00035 : 0.0;
+        gl.uniform1f(this.pointU.uDepthBias, pBiasV);
         gl.uniform1i(this.pointU.uColorMode, mode);
         gl.uniform3fv(this.pointU.uColor, layer.colorRgb);
         gl.uniform1f(this.pointU.uZMin, layer.data.bbox.min[2]);
@@ -2451,5 +2603,8 @@ global.MV.Renderer = Renderer;
     global.MV.render = global.MV.render || {};
     global.MV.render.bindHooks = bindRenderHooks;
     global.MV.render.installAppMethods = installGizmoMethods;
+    global.MV.render.countUniqueVerts = countUniqueVerts;
+    global.MV.render.bboxOf = bboxOf;
+    global.MV.render.analyzeMesh = analyzeMesh;
 
 })(window);

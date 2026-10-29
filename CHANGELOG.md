@@ -920,6 +920,604 @@ sfbar=63 | name=10 | hist=22 (attr=22) | ramp=5 | range=10
 
 **注意**：该开关只在**选中点云 + 按标量场着色**时出现（与「字段 / 范围 / 色带 / 分布」同步显隐）。
 
+
+**1.0.1.3** — 字体体系按工业软件规范重排
+
+**审计现状**（改前）：`9px×3 / 10px×10 / 11px×29 / 12px×13 / 13px×5` —— 11px 泛滥到 29 处，与 12px 挤在一起没有层级；9~10px 的中文在 100% 缩放下几乎不可辨认；字重只有 400/600 两档。
+
+**新体系**（最小 11px）：
+
+| 层级 | 字号 | 字重 | 用途 |
+|---|---|---|---|
+| 品牌 | **15px** | 700 | 3DV 标识 |
+| 标题 | **13px** | 600 | 弹窗标题 |
+| 面板标题 | **12px** | **500** | 场景树 / 图层属性 / 视图设置（原来 11/600，靠粗体区分，改成靠字号） |
+| 正文 | **12px** | 400 | 按钮、输入、树项、属性值、状态栏 |
+| 辅助 | **11px** | 400 | 计数、徽标、提示、标量条刻度 |
+
+**渲染细节**（`body`）：
+
+```css
+text-rendering: optimizeLegibility;
+-webkit-font-smoothing: antialiased;
+font-variant-numeric: tabular-nums;          /* 数字等宽，工程读数不跳动 */
+font-feature-settings: "tnum" 1, "lnum" 1, "liga" 0;   /* 关连字，避免 ½ 之类被替换 */
+```
+
+`tabular-nums` 全局继承后，状态栏 `meshA=0 lineA=0 pointA=0`、属性数值、标量条刻度都自动对齐。
+
+**逐项调整**：
+
+| 选择器 | 原 | 现 |
+|---|---|---|
+| `.brand .title` | 13 / 600 | **15 / 600** |
+| `.panel-title` | 11 / 600 | **12 / 500** |
+| `#statusbar` | 11 | **12** |
+| `.prop-row .stat` / `button.mini` / `#help td` / `.pg-text` | 11 | **12** |
+| `.tree-item .lmeta` / `.caret` | 10 | **11** |
+| 所有 9px | 9 | **10**（标量条内保持紧凑） |
+
+
+**1.0.1.3（续）** — 背面默认中性灰 + 属性面板字号统一
+
+**① 背面色**：新导入的网格背面原来是暗红 `#b03a30`，与正面橙色（`#ffb347` 系）色相接近，转视角时不容易分辨正反。
+
+改为**中性灰 `#6b7078`**：与正面的暖色形成冷暖对比，一眼能看出「这是背面」，也不会像纯灰那样发闷。`render.js` 里的兜底色同步为 `[0.42, 0.44, 0.47]`。
+
+**② 属性 / 视图设置字号**：上一轮只统一了外层字号，面板内部仍是混搭 —— 标签 11px、输入框 12px、数值 11px、分组标题 10px。
+
+统一后：
+
+| 元素 | 原 | 现 |
+|---|---|---|
+| 属性标签（名称 / 归类 / 路径 …） | 11px | **12px** |
+| 属性值（`.stat` / `.val` / `label.inline`） | 11px | **12px** |
+| 视图设置标签（`.viewcfg .row .k`）与值 | 11px | **12px** |
+| 分组小标题（属性 / 统计 / 外观 / 显示 / 相机） | 10px / 400 | **11px / 600** + 字距 0.3px |
+
+分组小标题改用「小字号 + 半粗 + 略宽字距」来做层级，而不是放大字号 —— 与属性行的 12px 形成清楚的两级。
+
+**验证**（探针读 computed style）：
+
+```
+属性标签=12px/400 | 属性质=12px/400 | 分组标题=11px/600
+```
+
+
+**1.0.1.3（续 3）** — 标题必须大于正文 + 同级按钮统一
+
+**上一版的问题**：
+
+| 问题 | 说明 |
+|---|---|
+| 面板标题与正文同大 | `.panel-title` 12px，正文也 12px —— 只靠 500 字重区分，远看或暗光下层级不成立 |
+| 按钮字号不一致 | `button` 12px、`button.mini` 12px、**`button.danger` 11px**、`.menu .kbd` 10px |
+| 旧规则残留 | `.group-title` 还有一条 10px 被后面的 11px/600 覆盖，属于死代码 |
+
+**定稿的层级**（每一级字号和字重都不同，双重区分）：
+
+| 级别 | 字号 | 字重 | 用途 |
+|---|---|---|---|
+| 品牌标题 | **16px** | 600 | 3D Viewer |
+| 区块标题 | **14px** | 600 | 弹窗标题 |
+| 面板标题 | **13px** | 500 | 场景树 / 图层属性 / 视图设置 |
+| 正文 | **12px** | 400 | 按钮、输入框、树项、属性行 |
+| 分组小标题 | **11px** | 600 | 属性 / 统计 / 外观 / 相机（+ 字距 .3px） |
+| 辅助 | **11px** | 400 | 计数、提示、徽标文字 |
+| 微 | **10px** | 400 | 标量条刻度 |
+
+品牌 logo「3DV」保持 13px/700（它是图形化标识，不算文字层级）。
+
+**同级按钮统一**（字号 / 字重 / 行高完全一致，只有内边距随尺寸级别变化）：
+
+```css
+button,
+button.mini,
+button.danger,
+.menu button,
+.panel-tabs .tab {
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 16px;
+}
+.panel-tabs .tab { font-weight: 500; }   /* Tab 是导航，多半级 */
+```
+
+`button.danger` 从 11px 提到 12px、`.menu .kbd` 从 10px 提到 11px，旧 `.group-title` 的 10px 规则已删除。
+
+
+**1.0.1.3（续 4）** — 分组小标题反超正文 / 视图设置三行统一
+
+**两个问题都是真的**：
+
+| 问题 | 原状 |
+|---|---|
+| 层级反了 | 分组小标题「相机 / 显示 / 光照」是 **11px**，而正文「叠加对面模型 / 旋转中心」是 **12px** —— 小标题比正文还小 |
+| 三行不同构 | 「叠加对面模型」「左右相机同步」是 `<label class="wide"><input>文字</label>`（勾选框在**左**），「旋转中心」是 `<span class="k">` + 按钮组（标签在**左**、控件在**右**） |
+
+**改法**：
+
+1. **小标题升到 13px / 600**（字距 .4px、颜色 `--text` 82% 不透明），面板标题同步升到 14px / 500，正文保持 12px / 400 —— 三级拉开
+
+   ```
+   视图设置（面板标题 14/500）
+     相机（分组小标题 13/600）
+       旋转中心（正文 12/400）
+   ```
+
+2. **三行统一成「标签左 + 控件右」**：
+
+   ```html
+   <div class="row">
+       <span class="k">叠加对面模型</span>
+       <div class="ctl">☑ ○透明 ○实体</div>
+   </div>
+   ```
+
+   `.viewcfg .row { display:flex; justify-content:space-between }`，`.k` 吃满左侧、`.ctl` 右对齐，`min-height: 26px` 保证三行同高。
+
+**验证**（双窗截图）：
+
+```
+相机  ← 13/600
+  叠加对面模型        ☑  ○透明 ○实体
+  左右相机同步                  ☑
+  旋转中心      [重设] [回正] [默认]
+```
+
+顺带加了 `?tab=view` / `?tab=props` 直达指定 Tab（在 `app.init` 之后应用，因为 `MV.config` 建立晚于 `ui.js` 执行）。
+
+
+**1.0.1.3（续 5）** — 顶点焊接只对 STL 生效
+
+**背景**：`uploadLayer()` 原先对所有 `kind === 'mesh'` 的数据都调 `buildIndexed()` 做顶点去重 —— 按坐标量化键（`Q = 1e4`，0.1 μm）判重，把重合顶点合并成一份、三角形改用索引引用。
+
+**为什么只给 STL**：
+
+| 格式 | 顶点信息来源 | 是否焊接 | 理由 |
+|---|---|---|---|
+| **STL**（binary / ascii） | **没有**，每三角形 3 个独立顶点 | **是** | 天生散乱三角面，去重纯赚（72.7k 面：218,082 → 38,437 顶点，省 82%） |
+| OBJ | 有 `v` 顶点表 + `f` 索引 | 否 | 自带拓扑，再合并可能把有意分离的顶点并掉 |
+| PLY | 有顶点表 + 可选法向 / 颜色 / 属性 | 否 | 同上；将来若支持逐顶点属性，合并后属性无法区分 |
+
+**实现**（`render.js`）：
+
+```js
+var WELD_VERTICES = true;   // 总开关，false 时所有格式都不去重
+
+// uploadLayer 里
+var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
+var ix = buildIndexed(d.positions, doWeld);
+```
+
+`buildIndexed(positions, weld)` 在 `weld === false` 时走恒等索引分支：顶点原样复制、`idx[i] = i`。这样几何上完全不合并，而 `buildSpaceChunks` 重排、`drawElements`、线框 / 边界取边、视锥剔除等依赖索引的逻辑照常工作 —— 不需要切换成 `drawArrays`，避免动 4~5 处绘制路径。
+
+**验证**（探针同页加载 STL + OBJ）：
+
+```
+STL  fmt=STL(binary)  tri=72694  vc=38437  焊接=是
+OBJ  fmt=OBJ          tri=2      vc=6      焊接=否
+```
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 6）** — 树显示面/点数 + 顶点云拷贝
+
+**① 面数与点数**
+
+树项右侧原来是 `72.7k tri`，现在改成 **`72.7k 面 · 38.4k 点`**，点云图层显示 `38.4k 点`，`title` 里给精确值。
+
+点数取**唯一顶点数**（按位置量化去重，`Q = 1e4` 即 0.1 μm）—— 与焊接判重规则一致。为了让树一渲染就有值，这一步放在 `createLayer()` 里做（导入时算一次，72.7k 面约 20 ms），而不是等 `uploadLayer` 上传显存时才算：
+
+```js
+// app.js createLayer
+if (data.kind === 'mesh' && data.vertCount === undefined && data.positions)
+{
+    data.vertCount = MV.render.countUniqueVerts(data.positions);
+}
+```
+
+**② 顶点云拷贝**
+
+图层属性里新增 **「拷贝顶点为点云」**（仅选中网格时显示）：
+
+| 项 | 说明 |
+|---|---|
+| 数据 | 遍历网格三角形，按位置量化去重抽出唯一顶点，写成 `kind: 'points'` |
+| 图层 | 名字 `vertices`，`parentId = 源网格 id` → 复用已有的父子层级（`emitRow(layer, depth)` 缩进渲染） |
+| 删除 | 随源网格级联删除（`removeLayer` 已有此逻辑） |
+| 属性 | 独立 `propsKey`（`verts:<id>:<n>`），颜色/点大小可单独调，不影响源网格 |
+
+**踩的坑**：自动验证参数 `?mkverts=1` 没能触发（`bindSegmentUi` 里的轮询条件），**按钮功能本身已就绪但未经界面点击验证** —— 需要手工点一次确认。
+
+**验证**：
+
+```
+树项    m    72.7k 面 · 38.4k 点
+check.ps1  7 项全 PASS
+```
+
+
+**1.0.1.3（续 7）** — 顶点云入口移到场景树
+
+上一版把「拷贝顶点为点云」放在**图层属性**里，要先选中网格、再切到属性面板才能点，路径太长，也和数据结构无关。
+
+改为**直接长在场景树上** —— 网格节点下始终显示一个 `vertices` 子项：
+
+```
+右侧  1 层
+  全选 / 全不选
+  ☑ ▢ m                    72.7k 面 · 38.4k 点    ×
+      └ ☁ vertices          ← 灰色斜体，未创建时的占位
+  ▾ S 公共                  0 层
+```
+
+| 状态 | 表现 |
+|---|---|
+| 未创建 | 灰色斜体 `☁ vertices`，悬停变亮，**点击即创建** |
+| 已创建 | 变成正常的子图层的行（可勾选显隐、可删除、显示 `38.4k 点`） |
+
+**实现**：`renderTree` 的 `emitRow` 里，mesh 图层若没有 `format === 'vertices'` 的子图层，就追加一个 `.tree-item.child.ghost-child` 占位行；`click` → `app.selectedId = 源网格 id` 后调 `extractVertices()`。图层属性里的按钮及其绑定、显隐逻辑一并删除。
+
+**验证**（截图）：
+
+```
+m          72.7k 面 · 38.4k 点   ×
+  └ ☁ vertices
+```
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 8）** — 顶点云拷贝改为右键触发
+
+**问题**：上一版 `vertices` 占位行是**单击即创建**。树里每次点都会生成一个新图层，误触代价太大（每点一次多一个 38k 点的点云）。
+
+**改为**：
+
+| 操作 | 行为 |
+|---|---|
+| 单击 `vertices` | 只选中父网格，**不创建** |
+| **右键** `vertices` | 弹出图层菜单，内含 **「拷贝顶点为点云」** |
+| **双击** `vertices` | 快捷创建（等价于点右键菜单项） |
+
+鼠标指针在占位行上显示为 `context-menu`（而非 pointer），提示这是右键操作。
+
+**右键菜单**复用了已有的 `showCtxMenu(x, y, layer)`，在 `layer.kind === 'mesh'` 时插入一项：
+
+```js
+if (layer.kind === 'mesh')
+{
+    menu.appendChild(sep);
+    ctxItem(menu, '拷贝顶点为点云', function ()
+    {
+        app.selectedId = layer.id;
+        app.extractVertices();
+    });
+}
+```
+
+这样右键**网格行本身**也能拷贝，不必先找到 `vertices` 子项。
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 9）** — 顶点云交互改为三级
+
+前两版的问题是：`vertices` 常驻显示、单击就创建。现在按「看信息 → 再决定拷贝到哪」的节奏重做：
+
+| 操作 | 行为 |
+|---|---|
+| 点击**网格行** | 选中后才显示它的 `vertices` 子项（未选中的网格不显示） |
+| 点击 **`vertices`** | **只显示顶点信息**，不创建图层。属性面板切到「顶点云（尚未创建）」区：来源网格、点数、范围 |
+| **右键 `vertices`** | 菜单三项：**拷贝到本侧 / 对侧 / 公共** |
+
+**属性面板的顶点信息区**（新增 `#vert-info`）：
+
+```
+┌ 顶点云（尚未创建） ┐
+│ 来源   m                        │
+│ 点数   38,437                   │
+│ 范围   -25.0, -25.0, 0.0 → 25.0, 25.0, 12.0 │
+│        [拷贝到本侧]              │
+└────────────────────┘
+```
+
+`renderProps()` 开头判断 `app.vertexPreviewId`：有值时只渲染这一区并 `return`，不进入常规图层属性。
+
+**右键菜单**（`showVertexCtx`）：
+
+```js
+拷贝到 右侧 (B)（本侧）
+拷贝到 左侧 (A)（对侧）
+拷贝到 公共 (S)
+```
+
+`extractVertices(targetSlot)` 新增参数，决定新图层挂在哪个 slot；`propsKey` 里也带上 slot，避免不同侧的顶点云共享显示属性。
+
+**状态清理**：`selectLayer()` 里调 `clearVertexPreview()`，选中别的图层即退出顶点预览态。
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 10）** — 顶点云树交互口径修正
+
+上一版仍不符合预期：导入后自动选中第一个图层 → `vertices` 一进来就显示；右键目标写的是「公共」；mesh 行的右键菜单里还留着「拷贝顶点为点云」。
+
+按最终口径改：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 导入后选中 | 自动选中第一个图层 | **不选中**（`selectedId = null`），所以默认不显示 `vertices` |
+| 显示条件 | `layer.id === selectedId`（自动选中即显示） | 同上，但只有**用户点击**才会选中 |
+| 右键 `vertices` 目标 | 本侧 / 对侧 / **公共 (S)** | 本侧 / 对侧 / **两侧 (A + B)** |
+| 右键 `mesh` 菜单 | 含「拷贝顶点为点云」 | **删除**，只剩移动 / 拷贝到对侧 |
+
+`extractVertices('BOTH')` 会把同一个顶点集在 A、B 两侧各建一个 `vertices` 图层（`propsKey` 带 slot，两边显示属性独立），选中落在后建的那个上。
+
+**验证**（截图，默认态）：
+
+```
+右侧  1 层
+  全选 / 全不选
+  ☑ ▪ m          72.7k 面 · 38.4k 点  ×     ← 未选中、无高亮
+  ▾ S 公共        0 层
+```
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 11）** — 修点 vertices 后报 undefined
+
+**现象**：点击 `vertices` 后页面底部报 `Uncaught TypeError: Cannot read properties of undefined`，`vertices` 也会从树里消失。
+
+**根因**：`previewVertices()` 为了让「顶点预览态」不和真实图层选中冲突，把 `selectedId` 置成了 `null`：
+
+```js
+this.vertexPreviewId = meshId;
+this.selectedId = null;        // ← 清掉了
+```
+
+而树的显示条件是 `layer.id === app.selectedId` —— 一清空，`vertices` 立刻消失；紧接着 `renderProps()` 也拿不到图层，访问 `l.data` 就抛 undefined。
+
+**修法**（两处）：
+
+1. **预览时保留选中**：`this.selectedId = meshId`，改用 `vertexPreviewId` 单独表达「正在看顶点信息」。这样 mesh 仍高亮、`vertices` 仍在，属性面板走顶点分支。
+2. **顶点信息渲染加空值保护**：`vpSrc.data || {}`、三个 `getElementById` 都判空、`bbox` 增加 `typeof === 'number'` 检查，避免脏数据把整个 `renderProps` 打断。
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 12）** — 缓存后缀 + 顶点范围补全
+
+**为什么改了却看不到效果**：这一轮反复修改 `ui.js` / `app.js`，但 `index.html` 里的 `?v=` 一直是 `1.0.1.3` —— 浏览器认为资源没变，直接用缓存，改动静默失效。前面「点 vertices 报错」「右键没反应」两次排查，有相当一部分是看了旧代码的表现。
+
+**改法**：把构建序号与版本号解耦
+
+```
+?v=1.0.1.3  →  ?v=1.0.1.3c
+```
+
+版本号仍按「提交时 +1」的规则走，`?v=` 后缀单独维护 —— 改 JS 就动一下后缀，强制浏览器重新拉取。
+
+**顺带修**：顶点信息里的「范围」一直显示 `—`。因为 `data.bbox` 有两种结构（数组 `[minx..maxz]` / 对象 `{min, max}`），只判了数组。现在两种都认，且 `createLayer()` 对 mesh 缺 `bbox` 时会用 `render.bboxOf()` 补算。
+
+**验证**（`?preview=1` 直达顶点预览态）：
+
+```
+vi-src   = m
+vi-count = 38,437
+vi-bbox  = -426.1, -52.6, -306.2 → 294.3, 49.5, -251.6
+Uncaught = 无
+树里 vertices 行 = 1
+```
+
+`check.ps1` **7 项全 PASS**。
+
+
+**1.0.1.3（续 13）** — 拷贝提速 + 顶点信息改直填
+
+**① 拷贝慢的根因与优化**
+
+原来一次拷贝要遍历三遍：
+1. `createLayer` 里 `countUniqueVerts`（算点数）
+2. `createLayer` 里 `bboxOf`（算包围盒）
+3. `extractVertices` 里再建一次 `Map<string>`（算去重顶点）
+
+72.7k 面 = 21.8 万次字符串拼接 + Map 写入 + GC，几百毫秒起。
+
+改为**一次遍历出三样**（`render.analyzeMesh`）：
+
+| 项 | 说明 |
+|---|---|
+| 判重方式 | 数值哈希 `(kx*73856093)^(ky*19349663)^(kz*83492791)`，冲突时比对真实坐标 |
+| 产物 | `vertCount` + `bbox` + `uniqVerts`，全部挂到 `data` 上 |
+| 时机 | 只在 `createLayer` 跑一次，之后树显示 / 顶点云拷贝 / 上传显存全部复用 |
+| 拷贝成本 | **零遍历**，直接把 `data.uniqVerts` 交给新图层 |
+
+**② 顶点信息改为直接填充**
+
+`renderProps()` 里那段「顶点预览分支」依赖 `renderProps` 被正确调用，实测在部分时序下没走到。改为把填充逻辑抽成 **`ui.showVertexInfo(layer)`**，由 `App.previewVertices()` 直接调用 —— 不再依赖 `renderProps` 的分支判断。
+
+**③ 清理调试钩子**
+
+`?clickverts=1`（模拟 DOM 点击）在 headless 下拿到的 `.ghost-child` 可能是重绘前的旧节点，结果不可信，已删除。保留两个可复现入口：
+
+| 参数 | 行为 |
+|---|---|
+| `?preview=1` | 直接进顶点预览态（等价于点 vertices） |
+| `?mkverts=1` | 直接拷贝顶点云 |
+
+**验证**：
+
+```
+?mkverts=1   vertices 出现，38.4k 点，err=0
+?preview=1   vi-src=m / vi-count=38,437 / vi-bbox 有值，err=0
+check.ps1    7 项全 PASS
+```
+
+**缓存后缀**同步到 `?v=1.0.1.3k`（这一轮改了 `app.js` / `ui.js` / `render.js`，不硬刷新会继续跑旧代码）。
+
+
+**1.0.1.3（续 14）** — 修点击 vertices 报错 / 对侧拷贝不显示
+
+**问题 1：点 vertices 底部报 JS 错误**
+
+`renderTree` 的 `emitRow` 里，`kids` 被用在声明之前：
+
+```js
+children.appendChild(row);
+
+var vKids = (kids || []).filter(...)   // ← 此处 kids 是 undefined（var 提升）
+...
+var kids = byParent[layer.id];          // ← 509 行才赋值
+```
+
+`var` 提升让 472 行的 `kids` 恒为 `undefined`，于是：
+
+- 判断“是否已有顶点云”永远为假 → 已经有 `vertices` 子图层时仍会再插一个占位行
+- 后面的 `kids.forEach(...)` 与实际分组数据错位，点击占位行时触发的重绘在这套错乱结构上执行，抛异常
+
+**修法**：在 `emitRow` 开头统一取一次 `var myKids = byParent[layer.id] || [];`，占位判断与子行渲染都用它；后续 `if (kids.length)` 复用同一数组。
+
+**问题 2：拷贝到对侧后要手动折叠再展开才看得见**
+
+`extractVertices(slot)` 之后确实调了 `refreshTree()`，但目标 slot 的分组若处于**折叠状态**（`collapsed[slot] === true`），新图层就在隐藏的 `tree-children` 里，视觉上等于没拷贝。
+
+**修法**：新增 `ui.expandSlot(slot)`，拷贝前后展开目标分组：
+
+```js
+if (global.MV.ui.expandSlot) { global.MV.ui.expandSlot(slotOut); }
+global.MV.ui.refreshTree();
+```
+
+快路径与慢路径都加（顺带补了快路径缺失的 `var slotOut` 定义，否则会 ReferenceError）。
+
+**验证**（`?clickverts=1` 模拟真实 DOM 点击，且由 `renderTree` 末尾同步触发，不依赖定时器）：
+
+```
+点击 vertices  →  err=0，无 JS 错误
+                   vi-src=m / vi-count=38,437 / vi-bbox 有值
+                   ghost 占位行 1 个
+拷贝后         →  lname: m | vertices，lmeta: 38.4k 点
+                   ghost 占位行 0 个（已有子图层，自动收起占位）
+check.ps1      →  7 项全 PASS
+```
+
+
+**1.0.1.3（续 15）** — 修 refreshTree 不存在导致的点击报错
+
+**现象**：点 `vertices` 后底部显示
+
+```
+JS 错误: Uncaught TypeError: global.MV.ui.refreshTree is not a function @ app.js:396
+```
+
+**根因**：`MV.ui` 导出的名字是 `renderTree` / `renderProps`，但 `app.js` 里有 5 处写成了 `refreshTree` / `refreshProps`：
+
+| 行 | 位置 |
+|---|---|
+| 396 | `previewVertices()` |
+| 463 / 464 | `extractVertices()` 快路径 |
+| 534 / 535 | `extractVertices()` 慢路径 |
+
+`refreshTree` 不存在 → 调用即抛 `TypeError` → `previewVertices` 中断在刷新树这一步。
+
+**为什么我之前一直"看到"没问题**：状态栏 `#st-info` 同时被 debug 文本（`dbg meshA=0 …`）每帧覆盖，JS 错误只闪现一瞬；我用 dump 抓到的都是后面的 debug 文本，判定成 `err=0`。这是验证方法本身的漏洞。
+
+**修法**：
+
+1. 5 处改名为 `renderTree` / `renderProps`（残留检查 = 0）
+2. 全局错误处理里**额外 `console.error('JSERR @ 文件:行 -> 消息')`** —— console 不会被覆盖，`--enable-logging=stderr` 可稳定捕获
+
+**验证**（抓 stderr 里的 `JSERR`，不靠状态栏）：
+
+```
+clickverts    JSERR: none    lname: m | vertices    vi-src=m  vi-count=38,437
+mkverts       JSERR: none    lname: m | vertices
+check.ps1     7 项全 PASS
+```
+
+
+**1.0.1.3（续 16）** — 拷贝出的顶点云不显示
+
+**现象**：右键拷出 `vertices` 后，窗口里什么也没有，改颜色也没反应。
+
+**根因**：`uploadLayer()` 只在两个地方被调用 —— `addFiles()`（导入）和 `copyLayerToSlot()`（拷贝到对侧）。`extractVertices()` 手工 `push` 进 `layers` 的图层**从未上传到 GPU**，于是：
+
+```js
+// 绘制列表构建
+if (!lay.visible || !lay.gpu) { continue; }   // ← gpu 为 null，直接跳过
+```
+
+图层在树里存在、属性面板也能改，但渲染层永远不画它 —— 这就是“改配色没用”的原因。
+
+**第二个问题**：即便上传成功，点云也看不见。`drawPoints` 里 `uDepthBias = 0.0`，而顶点与网格表面**完全共面**，深度相等时点被网格面挡住（网格先画、写深度）。实测截图确认：模型上没有任何点。
+
+**修法**：
+
+1. `extractVertices()` 两条路径在 `push` 之后补 `this.renderer.uploadLayer(layer)`
+2. `drawPoints()` 对 `format === 'vertices'` 的图层用正向深度偏移：
+
+```js
+var pBiasV = (layer.data && layer.data.format === 'vertices') ? 0.00035 : 0.0;
+gl.uniform1f(this.pointU.uDepthBias, pBiasV);
+```
+
+3. 新增 `App.applyVertexCloudStyle(lay)`：青色 `#22d3ee` + 点径 2，与橙色网格明确区分（原来沿用 `pickColor('B')` 的橙红，和模型几乎同色，叠上去只像“变色”）
+
+**踩的坑**：第一次改 bias 改到了 `drawPreviewSeg`（预览高亮）里，那里没有 `layer` 变量，会引入 ReferenceError；已回滚并改到 `drawPoints` 正确位置。
+
+**验证**（`?mkverts=1` 截图）：模型上覆盖清晰的青色点云层，与橙色网格对比明确；树里可单独勾选显隐；`check.ps1` 7 项全 PASS。
+
+> 说明：顶点密度等于网格顶点密度（38,437 个铺满表面），视觉上会盖住整个模型，这是几何决定的，不是渲染问题。
+
+
+**1.0.1.3（续 17）** — 点云属性不应出现网格专有项
+
+**现象**：选中点云（含拷出的 `vertices`）时，属性面板里仍有「背面 / 线框 / 顶点 / 边界」颜色和「显示（网格）」整组。
+
+**根因**：`renderProps()` 早就按 `data-prop` 做了类型过滤：
+
+```js
+var show = (kind === 'base') ||
+           (kind === 'mesh' && layer.kind === 'mesh') ||
+           (kind === 'points' && layer.kind === 'points');
+r.classList.toggle('show', !!show);
+```
+
+但 CSS 有一条更强的规则把它压掉了：
+
+```css
+#props .prop-row { display: grid; ... }   /* 特异性 (1,1,0) —— id 选择器 */
+.prop-row.show   { display: flex; }       /* (0,2,0) —— 比不过 */
+.prop-row        { display: none; }       /* (0,1,0) */
+```
+
+`#props .prop-row` 里写了 `display: grid`，特异性高于 `.show` 的显隐控制，于是**所有行无条件显示**，`data-prop` 过滤形同虚设。
+
+**修法**：把 `display` 交给 `.show` 决定，布局属性留在原规则：
+
+```css
+#props .prop-row { grid-template-columns: 66px minmax(0, 1fr) auto; ... }  /* 去掉 display */
+#props .prop-row.show { display: grid; }
+
+#props .prop-row.col { ... }              /* 去掉 display: block */
+#props .prop-row.col.show { display: block; }
+```
+
+**验证**（两张截图对比）：
+
+| 选中 | 属性面板 |
+|---|---|
+| **网格** | 属性 / 外观（配色、不透明度）/ **显示（网格）**：面片·线框·顶点·边界、顶点大小 / 着色 |
+| **点云** | 属性 / 外观（**配色**、不透明度）/ 着色（模式、点大小）—— 无线框、顶点、边界、法向 |
+
+另外加了 `?selone=1`（选中首个图层）便于截图核对。
+
+`check.ps1` **7 项全 PASS**。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

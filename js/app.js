@@ -17,7 +17,14 @@
         var el = document.getElementById('st-info');
         if (el && e && e.message)
         {
-            el.textContent = 'JS 错误: ' + e.message;
+            var where = ((e.filename || '').split('/').pop()) + ':' + (e.lineno || '?');
+            el.textContent = 'JS 错误: ' + e.message + ' @ ' + where;
+
+            // 状态栏会被 debug 文本反复覆盖，错误必须另打一份到 console 才能追溯
+            if (global.console && global.console.error)
+            {
+                global.console.error('JSERR @ ' + where + ' -> ' + e.message);
+            }
         }
     });
 
@@ -32,6 +39,7 @@
         this.layers = [];
         this.nextId = 1;
         this.selectedId = null;
+        this.vertexPreviewId = null;   // 选中 vertices 占位项时的源网格 id（未创建图层）
         this.pendingSlot = 'A';
         this.lastActiveView = -1;
         this.pickMode = false;
@@ -130,6 +138,11 @@
             memauto: params.get('memauto') || '',
             mempct: parseInt(params.get('mempct') || '50', 10) || 50,
             menu: params.get('menu') === '1',
+            tab: params.get('tab') || '',
+            mkverts: params.get('mkverts') === '1',
+            preview: params.get('preview') === '1',
+            clickverts: params.get('clickverts') === '1',
+            selone: params.get('selone') === '1',
             colors: params.get('colors') === '1',
             noconfirm: params.get('noconfirm') === '1',
             debug: params.get('debug') === '1',
@@ -377,8 +390,194 @@
         'shadeMode', 'showFaces', 'showWire', 'showVerts', 'showBoundary', 'showNormals', 'normalLen'
     ];
 
+
+    /* 把网格的唯一顶点抽成一个独立点云图层（挂在源网格下）
+     * 用位置量化去重（Q=1e4，0.1 μm），与焊接判重规则一致 */
+
+    /* 选中「vertices」占位项：只显示信息，不创建图层 */
+    App.prototype.previewVertices = function (meshId)
+    {
+        this.vertexPreviewId = meshId;
+        this.selectedId = meshId;        // 保持选中：树里 mesh 仍高亮、vertices 仍显示
+
+        global.MV.ui.renderTree();
+
+        // 直接填充顶点信息区（不依赖 renderProps 的分支判断）
+        if (global.MV.ui.showVertexInfo)
+        {
+            global.MV.ui.showVertexInfo(this.getSelected());
+        }
+    };
+
+    /* 退掉顶点预览（选中别的图层时调用） */
+    App.prototype.clearVertexPreview = function ()
+    {
+        if (this.vertexPreviewId !== null && this.vertexPreviewId !== undefined)
+        {
+            this.vertexPreviewId = null;
+        }
+    };
+
+
+    /* 顶点云统一外观：青色 + 小点径，便于与源网格区分 */
+    App.prototype.applyVertexCloudStyle = function (lay)
+    {
+        var hex = '#22d3ee';
+        lay.color = hex;
+        lay.colorRgb = global.MV.ui.hexToRgb(hex);
+        lay.pointSize = 2;
+        lay.opacity = 1;
+        lay.pointColorMode = 0;
+    };
+
+    App.prototype.extractVertices = function (targetSlot)
+    {
+        // 兼容「顶点预览态」：此时 selectedId 为 null，退回用 vertexPreviewId
+        var src = this.getSelected();
+        if (!src && this.vertexPreviewId != null)
+        {
+            for (var vi = 0; vi < this.layers.length; vi++)
+            {
+                if (this.layers[vi].id === this.vertexPreviewId) { src = this.layers[vi]; break; }
+            }
+        }
+
+        if (!src || src.kind !== 'mesh' || !src.data || !src.data.positions)
+        {
+            global.MV.ui.setInfo('请先在场景树里选中一个网格图层');
+            return;
+        }
+
+        // 快路径：STL 焊接时 render 已经算好唯一顶点集，直接拿来用（不重算）
+        var cached = (src.data && src.data.uniqVerts) || (src.gpu && src.gpu.uniqVerts);
+        if (cached && cached.length)
+        {
+            var cn = cached.length / 3;
+            var cbb = src.data && src.data.bbox ? src.data.bbox : null;
+            var cdata = {
+                kind: 'points',
+                positions: cached,
+                count: cn,
+                vertCount: cn,
+                normals: null,
+                colors: null,
+                tags: null,
+                scalars: [],
+                bbox: cbb,
+                format: 'vertices',
+                truncated: false,
+                totalSource: cn,
+                note: ''
+            };
+            var slotOut = targetSlot || src.slot;
+            var clayer = this.createLayer('vertices', slotOut, cdata,
+                'verts:' + src.id + ':' + cn + ':' + slotOut);
+            clayer.parentId = src.id;
+            clayer.visible = true;
+            this.applyVertexCloudStyle(clayer);
+            this.layers.push(clayer);
+            this.selectedId = clayer.id;
+            if (this.renderer) { this.renderer.uploadLayer(clayer); }   // 新图层必须上传，否则绘制列表跳过
+            this.markDirty();
+            // 目标分组若折叠着，先展开，否则新图层看不见
+            if (global.MV.ui.expandSlot) { global.MV.ui.expandSlot(slotOut); }
+            global.MV.ui.renderTree();
+            global.MV.ui.renderProps();
+            global.MV.ui.setInfo('已把 ' + cn + ' 个顶点拷成点云（复用焊接结果，无需重算）');
+            return;
+        }
+
+        var pos = src.data.positions;
+        var nTri = Math.floor(pos.length / 9);
+        var map = new Map();
+        var out = new Float32Array(nTri * 3 * 3);
+        var n = 0;
+        var Q = 1e4;
+
+        var minX = Infinity, minY = Infinity, minZ = Infinity;
+        var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+        for (var t = 0; t < nTri * 3; t++)
+        {
+            var o = t * 3;
+            var x = pos[o], y = pos[o + 1], z = pos[o + 2];
+            var key = Math.round(x * Q) + ',' + Math.round(y * Q) + ',' + Math.round(z * Q);
+            if (map.has(key))
+            {
+                continue;
+            }
+            map.set(key, n);
+            out[n * 3] = x;
+            out[n * 3 + 1] = y;
+            out[n * 3 + 2] = z;
+            n++;
+
+            if (x < minX) { minX = x; }
+            if (y < minY) { minY = y; }
+            if (z < minZ) { minZ = z; }
+            if (x > maxX) { maxX = x; }
+            if (y > maxY) { maxY = y; }
+            if (z > maxZ) { maxZ = z; }
+        }
+
+        if (n === 0)
+        {
+            global.MV.ui.setInfo('该网格没有可提取的顶点');
+            return;
+        }
+
+        var data = {
+            kind: 'points',
+            positions: out.subarray(0, n * 3),
+            count: n,
+            vertCount: n,
+            normals: null,
+            colors: null,
+            tags: null,
+            scalars: [],
+            bbox: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+            format: 'vertices',
+            truncated: false,
+            totalSource: n,
+            note: ''
+        };
+
+        var slotOut = targetSlot || src.slot;
+        var lay = this.createLayer('vertices', slotOut, data,
+            'verts:' + src.id + ':' + n + ':' + slotOut);
+        lay.parentId = src.id;
+        lay.visible = true;
+        this.applyVertexCloudStyle(lay);
+        this.layers.push(lay);
+        this.selectedId = lay.id;
+        if (this.renderer) { this.renderer.uploadLayer(lay); }          // 同上
+        this.markDirty();
+
+        if (global.MV.ui.expandSlot) { global.MV.ui.expandSlot(slotOut); }
+        global.MV.ui.renderTree();
+        global.MV.ui.renderProps();
+        global.MV.ui.setInfo('已把 ' + n + ' 个顶点拷成点云图层（挂在 ' + src.name + ' 下）');
+    };
+
     App.prototype.createLayer = function (name, slot, data, key)
     {
+        // 树里要立即显示「点数量」：在导入时就统计一次唯一顶点数（焊接结果与它一致）
+        // 网格只分析一次：顶点数 / 包围盒 / 去重顶点集，后续（树显示、顶点云拷贝）全部复用
+        if (data.kind === 'mesh' && data.positions && data.uniqVerts === undefined)
+        {
+            if (global.MV.render && global.MV.render.analyzeMesh)
+            {
+                var an = global.MV.render.analyzeMesh(data.positions);
+                data.vertCount = an.vertCount;
+                data.bbox = an.bbox;
+                data.uniqVerts = an.uniqVerts;
+            }
+            else
+            {
+                data.vertCount = Math.floor(data.positions.length / 9);
+            }
+        }
+
         var hex = this.pickColor(slot);
         var layer = {
             id: this.nextId++,
@@ -400,7 +599,7 @@
                 color: hex,
                 colorRgb: global.MV.ui.hexToRgb(hex),
                 backColor: '#b03a30',
-                backColorRgb: global.MV.ui.hexToRgb('#b03a30'),
+                backColorRgb: global.MV.ui.hexToRgb('#6b7078'),   // 背面色：中性灰，避免与正面色抢眼
                 wireColor: '#2f9df0',
                 wireColorRgb: global.MV.ui.hexToRgb('#2f9df0'),
                 vertColor: '#f2f3fa',
@@ -479,6 +678,7 @@
 
     App.prototype.selectLayer = function (id)
     {
+        this.clearVertexPreview();
         this.selectedId = id;
         global.MV.ui.renderTree();
         global.MV.ui.renderProps();
@@ -1060,6 +1260,30 @@
                 self.renderer.uploadLayer(layer);
             }
             self.layers.push(layer);
+
+        // 调试钩子：首个图层就绪时立刻执行（事件驱动，不依赖定时器）
+        if (!self._dbgFired && global.MV.config)
+        {
+            if (global.MV.config.selone)
+            {
+                self._dbgFired = true;
+                self.selectLayer(layer.id);
+            }
+            else if (global.MV.config.preview)
+            {
+                self._dbgFired = true;
+                self.selectedId = layer.id;
+                global.MV.ui.renderTree();
+                self.previewVertices(layer.id);
+            }
+            else if (global.MV.config.mkverts)
+            {
+                self._dbgFired = true;
+                self.selectedId = layer.id;
+                global.MV.ui.renderProps();
+                self.extractVertices();
+            }
+        }
             if (!firstLayer)
             {
                 firstLayer = layer;
@@ -1068,7 +1292,8 @@
 
         if (this.selectedId === null && firstLayer)
         {
-            this.selectedId = firstLayer.id;
+            // 导入后不自动选中：需要用户点一下网格，才显示它的 vertices 子树
+        this.selectedId = null;
         }
 
         // 仅在视图此前为空时自动适配，避免打断已有视角
@@ -1611,6 +1836,14 @@
         global.MV.app = app;
         app.init();
 
+        // ?tab=view 落到视图设置 Tab（config 此时已建立）
+        var cfgTab = (global.MV.config || {}).tab;
+        if ((cfgTab === 'view' || cfgTab === 'props') &&
+            global.MV.ui && global.MV.ui.showSideTab)
+        {
+            global.MV.ui.showSideTab(cfgTab);
+        }
+
         // 恢复上次选的主题（默认深色）
         var savedTheme = null;
         try { savedTheme = global.localStorage.getItem('viewer3d.theme'); } catch (e) { /* ignore */ }
@@ -1674,6 +1907,7 @@
             });
 
             if (A.demoIfRequested) { A.demoIfRequested(); }
+
         })();
     });
 

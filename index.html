@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.1.2" />
+<link rel="stylesheet" href="css/style.css?v=1.0.1.3x" />
 </head>
 <body>
 <div id="app">
@@ -16,7 +16,7 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.1.2</span>
+            <span class="sub">mesh / point cloud compare · v1.0.1.3</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
@@ -190,6 +190,16 @@
                         </div>
                     </div>
 
+                    <div class="prop-group hidden" id="vert-info">
+                        <div class="group-title"><span>顶点云（尚未创建）</span></div>
+                        <div class="prop-row"><label>来源</label><span class="val" id="vi-src">—</span></div>
+                        <div class="prop-row"><label>点数</label><span class="val" id="vi-count">—</span></div>
+                        <div class="prop-row"><label>范围</label><span class="val" id="vi-bbox">—</span></div>
+                        <div class="prop-row"><label></label>
+                            <button id="vi-make" title="把顶点拷成点云图层">拷贝到本侧</button>
+                        </div>
+                    </div>
+
                     <div class="prop-group">
                         <div class="group-title">
                             <span>标量场（点云）</span>
@@ -234,14 +244,20 @@
                     <div class="cfg-group">
                         <div class="group-title">相机</div>
                         <div class="row" id="row-ghost">
-                            <label class="wide"><input type="checkbox" id="opt-ghost" checked /> 叠加对面模型</label>
-                            <div class="seg">
-                                <label><input type="radio" name="ghostmode" id="opt-ghost-trans" value="0" checked /> 透明</label>
-                                <label><input type="radio" name="ghostmode" id="opt-ghost-solid" value="1" /> 实体</label>
+                            <span class="k">叠加对面模型</span>
+                            <div class="ctl">
+                                <input type="checkbox" id="opt-ghost" checked />
+                                <div class="seg">
+                                    <label><input type="radio" name="ghostmode" id="opt-ghost-trans" value="0" checked /> 透明</label>
+                                    <label><input type="radio" name="ghostmode" id="opt-ghost-solid" value="1" /> 实体</label>
+                                </div>
                             </div>
                         </div>
                         <div class="row" id="row-sync">
-                            <label class="wide"><input type="checkbox" id="opt-sync" /> 左右相机同步</label>
+                            <span class="k">左右相机同步</span>
+                            <div class="ctl">
+                                <input type="checkbox" id="opt-sync" />
+                            </div>
                         </div>
                         <div class="row">
                             <span class="k">旋转中心</span>
@@ -486,15 +502,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.1.2"></script>
-    <script src="js/io.js?v=1.0.1.2"></script>
-    <script src="js/algo.js?v=1.0.1.2"></script>
-    <script src="js/render.js?v=1.0.1.2"></script>
+    <script src="js/core.js?v=1.0.1.3x"></script>
+    <script src="js/io.js?v=1.0.1.3x"></script>
+    <script src="js/algo.js?v=1.0.1.3x"></script>
+    <script src="js/render.js?v=1.0.1.3x"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.1.2"></script>
-    <script src="js/plugins/optimize.js?v=1.0.1.2"></script>
-    <script src="js/ui.js?v=1.0.1.2"></script>
-    <script src="js/app.js?v=1.0.1.2"></script>
+    <script src="js/plugins/registry.js?v=1.0.1.3x"></script>
+    <script src="js/plugins/optimize.js?v=1.0.1.3x"></script>
+    <script src="js/ui.js?v=1.0.1.3x"></script>
+    <script src="js/app.js?v=1.0.1.3x"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->
