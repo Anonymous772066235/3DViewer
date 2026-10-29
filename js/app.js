@@ -1323,6 +1323,40 @@
         return (clientX - r.left) < r.width * 0.5 ? 0 : 1;
     };
 
+    /* 主题：同步 CSS（body class）与 WebGL 画布底色 */
+    App.prototype.setTheme = function (light)
+    {
+        light = !!light;
+        this.settings.themeLight = light;
+        // 与 CSS 的 --bg-deep 对齐：#eef1f5 / #0d1117
+        this.settings.bg = light ? [0.933, 0.945, 0.961] : [0.051, 0.067, 0.090];
+
+        // 「背景」色板控件显示的是当前画布色，切主题时同步
+        var bgInp = document.getElementById('opt-bg');
+        if (bgInp)
+        {
+            bgInp.value = light ? '#eef1f5' : '#0d1117';
+        }
+
+        // 网格线是 WebGL 画的，跟着主题走（浅色下需要更深的灰才看得见）
+        if (this.renderer)
+        {
+            this.renderer.gridColor = light ? [0.72, 0.76, 0.82] : [0.22, 0.26, 0.32];
+        }
+
+        if (global.MV.ui && global.MV.ui.applyTheme)
+        {
+            global.MV.ui.applyTheme(light);
+        }
+        try
+        {
+            global.localStorage.setItem('viewer3d.theme', light ? 'light' : 'dark');
+        }
+        catch (e) { /* file:// 下可能禁用 */ }
+
+        this.markDirty();
+    };
+
     /* 相机锁：框选过程中禁止旋转/平移/缩放，避免选区随视角漂移 */
     App.prototype.setCameraLock = function (on)
     {
@@ -1574,6 +1608,15 @@
         global.MV.app = app;
         app.init();
 
+        // 恢复上次选的主题（默认深色）
+        var savedTheme = null;
+        try { savedTheme = global.localStorage.getItem('viewer3d.theme'); } catch (e) { /* ignore */ }
+        // URL 优先：?theme=light / ?theme=dark（便于截图与分享）
+        var qs = global.location.search || '';
+        if (qs.indexOf('theme=light') >= 0) { savedTheme = 'light'; }
+        if (qs.indexOf('theme=dark') >= 0) { savedTheme = 'dark'; }
+        app.setTheme(savedTheme === 'light');
+
         // 裁剪交互接线：algo 只提供纯逻辑，按钮与键盘都在这里绑
         (function bindSegmentUi()
         {
@@ -1587,6 +1630,15 @@
             {
                 var el = document.getElementById(id);
                 if (el) { el.addEventListener('click', fn); }
+            }
+
+            var themeBtn = document.getElementById('btn-theme');
+            if (themeBtn)
+            {
+                themeBtn.addEventListener('click', function ()
+                {
+                    app.setTheme(!app.settings.themeLight);
+                });
             }
 
             on('btn-seg', function () { A.setMode('rect'); });

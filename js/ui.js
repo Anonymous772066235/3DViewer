@@ -1742,6 +1742,19 @@
         applyLayoutMode();
     }
 
+    /* 主题：只切 body 上的 class，颜色由 CSS 变量决定 */
+    function applyTheme(light)
+    {
+        document.body.classList.toggle('theme-light', !!light);
+
+        // 按钮文案 = 点下去会变成的主题（与「单窗/双窗」的交互一致）
+        var btn = document.getElementById('btn-theme');
+        if (btn)
+        {
+            btn.textContent = light ? '深色' : '浅色';
+        }
+    }
+
     /* 裁剪编辑栏：显隐 / 选中态 / 禁用态 / 选区块数（由 algo 的 hooks.segState 驱动） */
     function updateSegBar(state)
     {
@@ -1842,7 +1855,8 @@
         hexToRgb: hexToRgb,
         createSegOverlay: createSegOverlay,
         syncSegButtons: syncSegButtons,
-        updateSegBar: updateSegBar
+        updateSegBar: updateSegBar,
+        applyTheme: applyTheme
     };
 
 

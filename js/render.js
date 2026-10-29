@@ -1809,7 +1809,8 @@
                     gl.useProgram(this.lineP);
                     gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
                     gl.uniform1f(this.lineU.uDepthBias, 0.0);
-                    gl.uniform4f(this.lineU.uColor, 0.22, 0.26, 0.32, 1.0);
+                    var gc = this.gridColor || [0.22, 0.26, 0.32];
+            gl.uniform4f(this.lineU.uColor, gc[0], gc[1], gc[2], 1.0);
                     gl.bindVertexArray(this.gridCache.vao);
                     gl.drawArrays(gl.LINES, 0, this.gridCache.count);
                     gl.bindVertexArray(null);

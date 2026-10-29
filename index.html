@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.1.0" />
+<link rel="stylesheet" href="css/style.css?v=1.0.1.1" />
 </head>
 <body>
 <div id="app">
@@ -16,11 +16,11 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.1.0</span>
+            <span class="sub">mesh / point cloud compare · v1.0.1.1</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
-                <button id="btn-load" class="menu-btn" title="载入数据到指定视口">载入 ▾</button>
+                <button id="btn-load" class="menu-btn" title="载入数据到指定视口">载入</button>
                 <div id="load-menu" class="menu hidden">
                     <button id="btn-load-before" title="载入到 左侧 (A)">左侧 (A)</button>
                     <button id="btn-load-after" title="载入到 右侧 (B)">右侧 (B)</button>
@@ -31,14 +31,14 @@
             <button id="btn-shot" title="导出当前画面为 PNG">截图</button>
             <button id="btn-clear" title="清空所有图层">清空</button>
             <div id="plugin-menu-wrap" class="menu-wrap">
-                <button id="btn-plugins" class="menu-btn" title="插件">插件 ▾</button>
+                <button id="btn-plugins" class="menu-btn" title="插件">插件</button>
                 <div id="plugins-menu" class="menu hidden">
                     <button id="btn-optimize" title="调用 HoleOptimize_cli 优化当前网格，结果自动载入右侧（需先运行 serve.bat）">孔位优化</button>
                 </div>
             </div>
             <!-- ===== 工具菜单 BEGIN（拾取 / 裁剪 为同级功能；注释掉整块即关闭） ===== -->
             <div id="tool-menu-wrap" class="menu-wrap">
-                <button id="btn-tools" class="menu-btn" title="工具：拾取 / 裁剪">工具 ▾</button>
+                <button id="btn-tools" class="menu-btn" title="工具：拾取 / 裁剪">工具</button>
                 <div id="tools-menu" class="menu hidden">
                     <button id="btn-pick" title="拾取模式（P）：在数据上取点，显示坐标 / 法向 / 标签 / 标量，并计算距离与角度">拾取<span class="kbd">P</span></button>
                     <!-- ===== 三维编辑 BEGIN（注释掉这一行即关闭裁剪入口） ===== -->
@@ -247,6 +247,10 @@
 
                     <div class="cfg-group">
                         <div class="group-title">显示</div>
+                        <div class="row">
+                            <span class="k">主题切换</span>
+                            <button id="btn-theme" title="切换深色 / 浅色主题">浅色</button>
+                        </div>
                         <div class="row chk2">
                             <label><input type="checkbox" id="opt-grid" checked /> 地面网格</label>
                             <label><input type="checkbox" id="opt-axes" checked /> 坐标轴</label>
@@ -471,15 +475,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.1.0"></script>
-    <script src="js/io.js?v=1.0.1.0"></script>
-    <script src="js/algo.js?v=1.0.1.0"></script>
-    <script src="js/render.js?v=1.0.1.0"></script>
+    <script src="js/core.js?v=1.0.1.1"></script>
+    <script src="js/io.js?v=1.0.1.1"></script>
+    <script src="js/algo.js?v=1.0.1.1"></script>
+    <script src="js/render.js?v=1.0.1.1"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.1.0"></script>
-    <script src="js/plugins/optimize.js?v=1.0.1.0"></script>
-    <script src="js/ui.js?v=1.0.1.0"></script>
-    <script src="js/app.js?v=1.0.1.0"></script>
+    <script src="js/plugins/registry.js?v=1.0.1.1"></script>
+    <script src="js/plugins/optimize.js?v=1.0.1.1"></script>
+    <script src="js/ui.js?v=1.0.1.1"></script>
+    <script src="js/app.js?v=1.0.1.1"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->
