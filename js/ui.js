@@ -507,6 +507,10 @@
         $('row-sframp').classList.toggle('show', showSF);
         $('row-sfhist').classList.toggle('show', showSF);
 
+        // 标量条「显示」开关（在分组标题行右侧，只在标量场模式出现）
+        var sfWrap = $('sf-toggle-wrap');
+        if (sfWrap) { sfWrap.classList.toggle('show', showSF); }
+
         if (showSF)
         {
             var sfPick = sfs[Math.min(layer.sfIndex || 0, sfs.length - 1)];
@@ -946,11 +950,25 @@
     }
 
     /* ---------------- 标量场色条 ---------------- */
+    function setSfbarVisible(on)
+    {
+        showSfbar = !!on;
+        updateColorBar();
+    }
+
+    var showSfbar = true;      // 标量条是否显示（视图设置里可关）
+
     function updateColorBar()
     {
         var bar = $('sfbar');
         if (!bar)
         {
+            return;
+        }
+
+        if (!showSfbar)
+        {
+            bar.classList.add('hidden');
             return;
         }
 
@@ -1839,6 +1857,170 @@
         if (ap) { ap.disabled = !hasPreview; }
     }
 
+
+
+
+    /* 百分比 max-height 在部分环境下不生效，用像素再兜一层 */
+    function syncTabPanelMax()
+    {
+        var side = document.getElementById('sidebar');
+        if (!side)
+        {
+            return;
+        }
+
+        var limit = Math.max(120, Math.floor(side.clientHeight * 0.5));
+        var panels = document.querySelectorAll('#sidebar > .panel[data-tab]');
+        for (var i = 0; i < panels.length; i++)
+        {
+            // 直接给高度：flex 分配下 max-height 会被 min-height 兜住，锁定尺寸最可靠
+            panels[i].style.height = limit + 'px';
+            panels[i].style.maxHeight = limit + 'px';
+            panels[i].style.flex = '0 0 ' + limit + 'px';
+        }
+    }
+
+    /* 侧栏 Tab：图层属性 / 视图设置 共用一块区域 */
+    function bindSideTabs()
+    {
+        var tabs = document.querySelectorAll('#sidebar .panel-tabs .tab[data-tab]');
+        var panels = document.querySelectorAll('#sidebar > .panel[data-tab]');
+        if (!tabs.length || !panels.length)
+        {
+            return;
+        }
+
+        function showTab(name)
+        {
+            for (var i = 0; i < tabs.length; i++)
+            {
+                tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
+            }
+            for (var j = 0; j < panels.length; j++)
+            {
+                panels[j].classList.toggle('tab-hidden', panels[j].getAttribute('data-tab') !== name);
+            }
+            syncTabPanelMax();
+        }
+
+        for (var k = 0; k < tabs.length; k++)
+        {
+            (function (t)
+            {
+                t.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    showTab(t.getAttribute('data-tab'));
+                });
+            })(tabs[k]);
+        }
+    }
+
+    /* ==================== 侧栏宽 / 面板高拖拽 ==================== */
+    function bindSidebarResize()
+    {
+        var side = document.getElementById('sidebar');
+        var grip = document.getElementById('sidebar-resizer');
+
+        if (side && grip)
+        {
+            grip.addEventListener('mousedown', function (ev)
+            {
+                ev.preventDefault();
+                var startX = ev.clientX;
+                var startW = side.getBoundingClientRect().width;
+                grip.classList.add('dragging');
+
+                function move(e2)
+                {
+                    var w = Math.max(220, Math.min(620, startW + (e2.clientX - startX)));
+                    side.style.flex = '0 0 ' + w + 'px';
+                    side.style.width = w + 'px';
+                }
+
+                function up()
+                {
+                    grip.classList.remove('dragging');
+                    document.removeEventListener('mousemove', move);
+                    document.removeEventListener('mouseup', up);
+                }
+
+                document.addEventListener('mousemove', move);
+                document.addEventListener('mouseup', up);
+            });
+        }
+
+        var grips = document.querySelectorAll('.panel-resizer');
+        for (var i = 0; i < grips.length; i++)
+        {
+            (function (g)
+            {
+                g.addEventListener('mousedown', function (ev)
+                {
+                    ev.preventDefault();
+                    var prev = g.previousElementSibling;
+                    if (!prev || !side)
+                    {
+                        return;
+                    }
+
+                    var startY = ev.clientY;
+                    var startH = prev.getBoundingClientRect().height;
+                    g.classList.add('dragging');
+
+                    function move(e2)
+                    {
+                        var total = side.getBoundingClientRect().height;
+                        var hh = Math.max(54, Math.min(total - 140, startH + (e2.clientY - startY)));
+                        prev.style.flex = '0 0 ' + hh + 'px';
+                        prev.style.height = hh + 'px';
+                    }
+
+                    function up()
+                    {
+                        g.classList.remove('dragging');
+                        document.removeEventListener('mousemove', move);
+                        document.removeEventListener('mouseup', up);
+                    }
+
+                    document.addEventListener('mousemove', move);
+                    document.addEventListener('mouseup', up);
+                });
+            })(grips[i]);
+        }
+
+        // 标量条开关（视图设置里）+ 标量条自带的关闭按钮
+        var cb = document.getElementById('opt-sfbar');
+        if (cb)
+        {
+            cb.addEventListener('change', function () { setSfbarVisible(cb.checked); });
+        }
+
+        var sfClose = document.getElementById('sf-close');
+        if (sfClose)
+        {
+            sfClose.addEventListener('click', function (ev)
+            {
+                ev.stopPropagation();
+                setSfbarVisible(false);
+                if (cb) { cb.checked = false; }
+            });
+        }
+
+        bindSideTabs();
+        global.addEventListener('resize', syncTabPanelMax);
+
+        // 首次布局可能还没算完（sidebar.clientHeight 为 0 时会退化到 min-height），
+        // 多补两次计算；另外在首个渲染帧后再算一次
+        syncTabPanelMax();
+        setTimeout(syncTabPanelMax, 0);
+        setTimeout(syncTabPanelMax, 250);
+        if (global.requestAnimationFrame)
+        {
+            global.requestAnimationFrame(function () { syncTabPanelMax(); });
+        }
+    }
+
     global.MV.ui = {
         init: init,
         renderTree: renderTree,
@@ -1856,7 +2038,8 @@
         createSegOverlay: createSegOverlay,
         syncSegButtons: syncSegButtons,
         updateSegBar: updateSegBar,
-        applyTheme: applyTheme
+        applyTheme: applyTheme,
+        setSfbarVisible: setSfbarVisible,
     };
 
 
@@ -2062,5 +2245,7 @@
 
     global.MV.ui = global.MV.ui || {};
     global.MV.ui.installAppMethods = installDndMethods;
+
+    bindSidebarResize();
 
 })(window);

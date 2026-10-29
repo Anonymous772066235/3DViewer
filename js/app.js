@@ -1338,10 +1338,13 @@
             bgInp.value = light ? '#eef1f5' : '#0d1117';
         }
 
-        // 网格线是 WebGL 画的，跟着主题走（浅色下需要更深的灰才看得见）
+        // 网格线与 ghost 叠加都是 WebGL 画的，跟着主题走
+        // （浅色画布上浅灰 + 16% 透明度几乎不可见，改用更深的中灰并提高不透明度）
         if (this.renderer)
         {
             this.renderer.gridColor = light ? [0.72, 0.76, 0.82] : [0.22, 0.26, 0.32];
+            this.renderer.ghostColor = light ? [0.42, 0.47, 0.55] : [0.62, 0.68, 0.78];
+            this.renderer.ghostAlpha = light ? 0.26 : 0.16;
         }
 
         if (global.MV.ui && global.MV.ui.applyTheme)

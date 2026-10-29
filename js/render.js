@@ -456,7 +456,11 @@
         this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0, chunksDrawn: 0, chunksTotal: 0 };
 
         // 编辑选区预览
-        this.previewGeo = null;
+        // ghost（对面图层叠加）的基色与透明度，随主题切换
+    this.ghostColor = [0.62, 0.68, 0.78];
+    this.ghostAlpha = 0.16;
+
+    this.previewGeo = null;
         this.previewVao = null;
         this.previewBuffer = null;
         this.previewCount = 0;
@@ -1929,7 +1933,8 @@
                     else
                     {
                         // 半透明灰色轮廓，正反面同色，不显示线框与法向
-                        this.drawMesh(lay, mvp, viewM, [0.62, 0.68, 0.78, 0.16], 0, false);
+                        var gc = this.ghostColor || [0.62, 0.68, 0.78];
+                        this.drawMesh(lay, mvp, viewM, [gc[0], gc[1], gc[2], this.ghostAlpha], 0, false);
                     }
                 }
                 else
@@ -1943,14 +1948,16 @@
                 if (item.ghost && ctx.settings.ghostMode !== 1)
                 {
                     // 透明叠加：固定浅灰
+                    var pgc = this.ghostColor || [0.62, 0.68, 0.78];
+                    var ga = Math.min(1, (this.ghostAlpha || 0.16) * 1.45);
                     this.drawPoints({
                         gpu: lay.gpu,
                         data: lay.data,
-                        colorRgb: [0.62, 0.68, 0.78],
+                        colorRgb: [pgc[0], pgc[1], pgc[2]],
                         pointColorMode: 0,
                         pointSize: lay.pointSize,
-                        opacity: 0.22
-                    }, mvp, viewM, ps, 0.22, 1);
+                        opacity: ga
+                    }, mvp, viewM, ps, ga, 1);
                 }
                 else
                 {

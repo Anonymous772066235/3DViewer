@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.1.1" />
+<link rel="stylesheet" href="css/style.css?v=1.0.1.2" />
 </head>
 <body>
 <div id="app">
@@ -16,7 +16,7 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.1.1</span>
+            <span class="sub">mesh / point cloud compare · v1.0.1.2</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
@@ -63,8 +63,14 @@
                 <div id="tree" class="tree"></div>
             </section>
 
-            <section class="panel">
-                <div class="panel-title"><span>图层属性</span></div>
+            <div class="panel-resizer" title="拖动调整面板高度"></div>
+
+            <div class="panel-tabs">
+                <span class="tab active" data-tab="props">图层属性</span>
+                <span class="tab" data-tab="view">视图设置</span>
+            </div>
+
+            <section class="panel" data-tab="props">
                 <div id="props" class="props">
                     <div class="empty-hint">在场景树中选择一个图层</div>
 
@@ -185,7 +191,10 @@
                     </div>
 
                     <div class="prop-group">
-                        <div class="group-title">标量场（点云）</div>
+                        <div class="group-title">
+                            <span>标量场（点云）</span>
+                            <span id="sf-toggle-wrap" class="gt-toggle">显示<input type="checkbox" id="opt-sfbar" checked /></span>
+                        </div>
                         <div class="prop-row" id="row-sf">
                             <label>字段</label>
                             <select id="p-sf"></select>
@@ -220,8 +229,7 @@
                 </div>
             </section>
 
-            <section class="panel">
-                <div class="panel-title"><span>视图设置</span></div>
+            <section class="panel tab-hidden" data-tab="view">
                 <div class="viewcfg">
                     <div class="cfg-group">
                         <div class="group-title">相机</div>
@@ -281,6 +289,8 @@
             </section>
 
         </aside>
+
+        <div id="sidebar-resizer" title="拖动调整侧栏宽度"></div>
 
         <div id="view-area">
             <canvas id="gl"></canvas>
@@ -362,8 +372,9 @@
             </div>
 
             <div id="sfbar" class="hidden">
+                <button id="sf-close" title="隐藏标量条（可在 视图设置 → 显示 重新打开）">×</button>
                 <div id="sf-name">标量场</div>
-                <canvas id="sf-hist" width="320" height="84"></canvas>
+                <canvas id="sf-hist" width="320" height="22"></canvas>
                 <div id="sf-ramp"></div>
                 <div class="sf-range"><span id="sf-min">0</span><span id="sf-max">1</span></div>
             </div>
@@ -475,15 +486,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.1.1"></script>
-    <script src="js/io.js?v=1.0.1.1"></script>
-    <script src="js/algo.js?v=1.0.1.1"></script>
-    <script src="js/render.js?v=1.0.1.1"></script>
+    <script src="js/core.js?v=1.0.1.2"></script>
+    <script src="js/io.js?v=1.0.1.2"></script>
+    <script src="js/algo.js?v=1.0.1.2"></script>
+    <script src="js/render.js?v=1.0.1.2"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.1.1"></script>
-    <script src="js/plugins/optimize.js?v=1.0.1.1"></script>
-    <script src="js/ui.js?v=1.0.1.1"></script>
-    <script src="js/app.js?v=1.0.1.1"></script>
+    <script src="js/plugins/registry.js?v=1.0.1.2"></script>
+    <script src="js/plugins/optimize.js?v=1.0.1.2"></script>
+    <script src="js/ui.js?v=1.0.1.2"></script>
+    <script src="js/app.js?v=1.0.1.2"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->
