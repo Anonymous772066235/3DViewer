@@ -264,3 +264,9 @@ curl http://127.0.0.1:8765/health
 | 构建工具 | **不需要** |
 
 > 直接双击 `index.html` 用 `file://` 打开也能查看模型，但孔位优化需要额外启动 `server/start_bridge.bat`。推荐始终用 `serve.bat`。
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 WooChi
