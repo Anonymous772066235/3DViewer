@@ -21,7 +21,7 @@ sys.path.insert(0, HERE)   # bridge.py 与本文件同目录
 import bridge as opt   # noqa: E402  （服务端模块统一在 server/ 下）
 
 PORT = int(os.environ.get('VIEWER_PORT', '8765'))
-ROOT = os.path.dirname(HERE)   # 静态资源根 = viewer3d/
+ROOT = os.path.dirname(HERE)   # 静态资源根 = 3DViewer/
 
 
 class Handler(opt.Handler):

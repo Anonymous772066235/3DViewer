@@ -1,4 +1,4 @@
-# viewer3d 改动日志（CHANGELOG）
+# 3DViewer 改动日志（CHANGELOG）
 
 | 项 | 值 |
 | --- | --- |
@@ -225,7 +225,7 @@
 - 验证：模型载入 72.7k 面、双视图 ghost、视角器、`?demo=pick` 三点距离/角度全部正常，`err=0`
 **工程侧** — 版本管理
 
-- 父仓库 `OptimizeHole2D/.gitignore` 增加 `viewer3d/`（父仓库从未跟踪该目录，直接生效，无需 `git rm --cached`），为 `viewer3d` 建立**独立仓库**做准备。
+- 父仓库 `OptimizeHole2D/.gitignore` 增加 `3DViewer/`（父仓库从未跟踪该目录，直接生效，无需 `git rm --cached`），为 `3DViewer` 建立**独立仓库**做准备。
 
 
 **v20261028k ~ m** — 剥离下层对 UI 的直接依赖
@@ -1584,6 +1584,33 @@ app                MV.ui:86 document:16 gl:0      ← 原 95，合并后减少
 `check.ps1` **7 项全 PASS**（每步单独回归）。
 
 > 说明：拆分函数不会减少总行数（函数头反而多 10 行），收益在于单函数可读性与定位成本。
+
+
+**1.0.1.5** — 目录改名 viewer3d → 3DViewer
+
+工程目录从 `viewer3d` 改为 `3DViewer`，同时把散落在文档与提示里的旧路径一并更新。
+
+| 项 | 说明 |
+|---|---|
+| 内层仓库 | `3DViewer/.git` 随目录移动，`git log` 与全部历史完整保留 |
+| 外层仓库 | `.gitignore` 里 `viewer3d/` → `3DViewer/`，继续保持隔离（外层不跟踪本目录） |
+| 启动脚本 | `serve.bat` 用 `%~dp0`、`server/start_bridge.bat` 用 `cd /d "%~dp0"`，无需改动 |
+| 服务端 | `serve.py` 用 `os.path.dirname(os.path.abspath(__file__))` 定位静态根，不依赖当前工作目录 |
+| exe 定位 | `bridge.py` 以 `OptimizeHole2D` 为项目根（不含 viewer3d），不受影响 |
+| 文案 | `README.md`、`CHANGELOG.md`、`plugins/optimize.js` 报错提示、`serve.py` 注释同步更新 |
+| 特意保留 | `app.js` 里 `localStorage` 键仍为 `'viewer3d.theme'` —— 只是键名，改了会丢用户已选的主题 |
+
+改名后自检：
+
+```
+关键文件 16 个全部在位
+check.ps1  7 项全 PASS（base / single / pick / segment / boundary / mempopup / cull-parity）
+/health    ok=True exists=True mode=same-origin
+           exe = ...\HoleOptimize\build\Release\HoleOptimize_cli.exe
+index.html HTTP 200 len=26247
+```
+
+服务从任意工作目录启动都正常，说明路径解析全部是动态的。
 
 ---
 

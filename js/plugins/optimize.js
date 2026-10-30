@@ -167,14 +167,14 @@
             if (IS_HTTP)
             {
                 tip = '优化接口不可达。通常是 serve.bat 的控制台窗口已被关闭：\n\n' +
-                    '重新双击  viewer3d\\serve.bat  即可（页面与优化接口在同一个服务里）。\n\n' +
+                    '重新双击  3DViewer\\serve.bat  即可（页面与优化接口在同一个服务里）。\n\n' +
                     '若反复失败，请查看 serve 窗口中的 Python 报错。';
             }
             else
             {
                 tip = '当前是直接双击 index.html（file://）打开的。\n\n' +
                     '浏览器安全模型不允许网页启动本地程序，所以这一步必须由你触发一次：\n\n' +
-                    '    双击  viewer3d\\serve.bat\n\n' +
+                    '    双击  3DViewer\\serve.bat\n\n' +
                     '它会在 http://127.0.0.1:8765/ 打开同一页面，并且页面与优化接口同源，\n' +
                     '之后点「孔位优化」不再需要任何额外步骤。\n\n' +
                     '（也可只双击 bridge\\start_bridge.bat，仅启动优化服务）';

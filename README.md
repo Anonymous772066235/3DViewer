@@ -274,7 +274,7 @@ http://127.0.0.1:8765/index.html?url=<文件地址>&slot=B&wire=0&normals=0
 
 ```bat
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ViewerServe /t REG_SZ ^
-  /d "\"C:\Python310\python.exe\" \"D:\tools\viewer3d\serve.py\"" /f
+  /d "\"C:\Python310\python.exe\" \"D:\tools\3DViewer\serve.py\"" /f
 ```
 
 取消自启：`reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ViewerServe /f`
@@ -552,7 +552,7 @@ serve.bat
 ### 8.8 冒烟测试
 
 ```powershell
-cd viewer3d
+cd 3DViewer
 powershell -NoProfile -ExecutionPolicy Bypass -File check.ps1
 ```
 
