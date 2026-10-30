@@ -143,6 +143,9 @@
             preview: params.get('preview') === '1',
             clickverts: params.get('clickverts') === '1',
             selone: params.get('selone') === '1',
+            dumpcv: params.get('dumpcv') === '1',
+            scrollsf: params.get('scrollsf') === '1',
+            pcm: params.has('pcm') ? parseInt(params.get('pcm'), 10) : -1,
             colors: params.get('colors') === '1',
             noconfirm: params.get('noconfirm') === '1',
             debug: params.get('debug') === '1',
@@ -1312,6 +1315,33 @@
             {
                 self._dbgFired = true;
                 self.selectLayer(layer.id);
+                var pcmv = (global.MV.config || {}).pcm;
+                if (typeof pcmv === 'number' && pcmv >= 0)
+                {
+                    layer.pointColorMode = pcmv;
+                }
+
+                // 标量场范围（便于验证与分享链接）
+                // 注意：不能用 init() 里的 params，这里不在其作用域
+                var q = new global.URLSearchParams(global.location.search);
+                function pf(k)
+                {
+                    var v = parseFloat(q.get(k));
+                    return isFinite(v) ? v : null;
+                }
+                var qmin = pf('sfmin'), qmax = pf('sfmax');
+                var qcmin = pf('sfcolmin'), qcmax = pf('sfcolmax');
+                if (qmin !== null) { layer.sfMin = qmin; }
+                if (qmax !== null) { layer.sfMax = qmax; }
+                if (qcmin !== null) { layer.sfColMin = qcmin; }
+                if (qcmax !== null) { layer.sfColMax = qcmax; }
+                if (q.has('sfout'))
+                {
+                    layer.sfOutMode = parseInt(q.get('sfout'), 10) || 1;
+                }
+
+                if (global.MV.ui) { global.MV.ui.renderProps(); }
+                self.markDirty();
             }
             else if (global.MV.config.preview)
             {
@@ -1611,6 +1641,12 @@
         if (global.MV.ui && global.MV.ui.applyTheme)
         {
             global.MV.ui.applyTheme(light);
+        }
+
+        // 范围条 / 标量条都是 canvas，颜色写死在绘制里，切主题必须重画一遍
+        if (global.MV.ui && global.MV.ui.renderProps)
+        {
+            global.MV.ui.renderProps();
         }
         try
         {

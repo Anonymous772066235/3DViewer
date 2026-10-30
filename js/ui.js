@@ -814,6 +814,20 @@
             $('p-sfmax').value = (layer.sfMax === null || layer.sfMax === undefined) ? '' : String(layer.sfMax);
             $('p-sfmin').placeholder = fmtNum(sfs[si0].min);
             $('p-sfmax').placeholder = fmtNum(sfs[si0].max);
+
+            // 颜色范围：留空表示用数据全范围
+            var ecmin = $('p-sfcolmin');
+            var ecmax = $('p-sfcolmax');
+            if (ecmin)
+            {
+                ecmin.value = (layer.sfColMin === null || layer.sfColMin === undefined) ? '' : String(layer.sfColMin);
+                ecmin.placeholder = fmtNum(sfs[si0].min);
+            }
+            if (ecmax)
+            {
+                ecmax.value = (layer.sfColMax === null || layer.sfColMax === undefined) ? '' : String(layer.sfColMax);
+                ecmax.placeholder = fmtNum(sfs[si0].max);
+            }
             $('p-sframp').value = String(layer.sfRamp || 0);
         }
 
@@ -821,8 +835,13 @@
         var showSF = hasSF && pcm === 5;
         $('row-sf').classList.toggle('show', hasSF);
         $('row-sfrange').classList.toggle('show', showSF);
+        var rowCol = $('row-sfcolrange');
+        if (rowCol) { rowCol.classList.toggle('show', showSF); }
         $('row-sframp').classList.toggle('show', showSF);
         $('row-sfhist').classList.toggle('show', showSF);
+
+        var rowOut = $('row-sfout');
+        if (rowOut) { rowOut.classList.toggle('show', showSF); }
 
         // 标量条「显示」开关（在分组标题行右侧，只在标量场模式出现）
         var sfWrap = $('sf-toggle-wrap');
@@ -833,7 +852,32 @@
             var sfPick = sfs[Math.min(layer.sfIndex || 0, sfs.length - 1)];
             var loV = (typeof layer.sfMin === 'number' && isFinite(layer.sfMin)) ? layer.sfMin : sfPick.min;
             var hiV = (typeof layer.sfMax === 'number' && isFinite(layer.sfMax)) ? layer.sfMax : sfPick.max;
-            drawHist($('p-sfhist'), sfPick, loV, hiV, layer.sfRamp | 0);
+            var cLo = (typeof layer.sfColMin === 'number' && isFinite(layer.sfColMin)) ? layer.sfColMin : loV;
+            var cHi = (typeof layer.sfColMax === 'number' && isFinite(layer.sfColMax)) ? layer.sfColMax : hiV;
+            drawHist($('p-sfhist'), sfPick, loV, hiV, layer.sfRamp | 0, cLo, cHi);
+
+            var selOut = $('p-sfout');
+            if (selOut) { selOut.value = String((layer.sfOutMode | 0) || 1); }
+
+            if ((global.MV.config || {}).scrollsf)
+            {
+                var rw = $('row-sfhist');
+                if (rw && rw.scrollIntoView) { rw.scrollIntoView({ block: 'center' }); }
+            }
+
+            // 调试：?dumpcv=1 时把 canvas 导出到隐藏节点（headless 便于读取）
+            if ((global.MV.config || {}).dumpcv)
+            {
+                var box = document.getElementById('__cv');
+                if (!box)
+                {
+                    box = document.createElement('div');
+                    box.id = '__cv';
+                    box.style.display = 'none';
+                    document.body.appendChild(box);
+                }
+                try { box.textContent = $('p-sfhist').toDataURL('image/png'); } catch (e2) { box.textContent = 'ERR'; }
+            }
         }
 
         // 组内所有行都隐藏时，整组（含标题）隐藏
@@ -1006,49 +1050,378 @@
     }
 
     /* 标量场分布直方图 + 当前显示范围标记 */
-    function drawHist(cv, sf, lo, hi, ramp)
+    /* 应用颜色范围输入（留空 = 数据全范围） */
+    function applySfColRange()
+    {
+        var l = app ? app.getSelected() : null;
+        if (!l || !l.data.scalars || l.data.scalars.length === 0)
+        {
+            return;
+        }
+        var si = Math.min(l.sfIndex || 0, l.data.scalars.length - 1);
+        var sf = l.data.scalars[si];
+
+        var tmin = $('p-sfcolmin').value.trim();
+        var tmax = $('p-sfcolmax').value.trim();
+        var mn = tmin === '' ? null : parseFloat(tmin);
+        var mx = tmax === '' ? null : parseFloat(tmax);
+
+        if (mn !== null && !isFinite(mn))
+        {
+            setInfo('颜色范围下限无效');
+            return;
+        }
+        if (mx !== null && !isFinite(mx))
+        {
+            setInfo('颜色范围上限无效');
+            return;
+        }
+
+        var a = (mn === null) ? sf.min : mn;
+        var b = (mx === null) ? sf.max : mx;
+        if (!(b > a))
+        {
+            setInfo('颜色范围上限必须大于下限');
+            return;
+        }
+
+        l.sfColMin = (mn === null) ? null : mn;
+        l.sfColMax = (mx === null) ? null : mx;
+
+        app.markDirty();
+        renderProps();
+        updateColorBar();
+    }
+
+    /* ---------------- 标量场范围条 ---------------- */
+
+    /* 当前编辑图层的范围状态；没有可编辑的标量场时返回 null */
+    function sfRulerState()
+    {
+        var lay = app ? app.getSelected() : null;
+        if (!lay || lay.kind !== 'points')
+        {
+            return null;
+        }
+        var sfs = lay.data.scalars || [];
+        if (!sfs.length || (lay.pointColorMode | 0) !== 5)
+        {
+            return null;
+        }
+        var si = Math.min(lay.sfIndex || 0, sfs.length - 1);
+        var sf = sfs[si];
+
+        var dmin = (typeof lay.sfMin === 'number' && isFinite(lay.sfMin)) ? lay.sfMin : sf.min;
+        var dmax = (typeof lay.sfMax === 'number' && isFinite(lay.sfMax)) ? lay.sfMax : sf.max;
+        if (!(dmax > dmin)) { dmax = dmin + 1; }
+
+        // 颜色范围留空 = 数据全范围（与显示范围无关，拖三角时竖线不动）
+        var cmin = (typeof lay.sfColMin === 'number' && isFinite(lay.sfColMin)) ? lay.sfColMin : sf.min;
+        var cmax = (typeof lay.sfColMax === 'number' && isFinite(lay.sfColMax)) ? lay.sfColMax : sf.max;
+        if (!(cmax > cmin)) { cmax = cmin + 1; }
+
+        return { lay: lay, sf: sf, dmin: dmin, dmax: dmax, cmin: cmin, cmax: cmax };
+    }
+
+    /* 重绘范围条（不重建属性面板，拖动时用） */
+    function syncSfRuler()
+    {
+        var st = sfRulerState();
+        if (!st)
+        {
+            return;
+        }
+        drawHist($('p-sfhist'), st.sf, st.dmin, st.dmax, st.lay.sfRamp | 0, st.cmin, st.cmax);
+    }
+
+    /* 直方图 + 双范围手柄：
+     *   顶部三角 = 显示范围（超出者按越界模式绘制）
+     *   贯穿竖线 = 颜色范围（色带在这段铺满）
+     * 分辨率按容器实际像素设置，避免被 CSS 压缩后发虚 */
+    function drawHist(cv, sf, lo, hi, ramp, colLo, colHi)
     {
         if (!cv || !sf)
         {
             return;
         }
+        if (typeof colLo !== 'number' || !isFinite(colLo)) { colLo = lo; }
+        if (typeof colHi !== 'number' || !isFinite(colHi)) { colHi = hi; }
+
+        // 按显示尺寸 × dpr 重设分辨率（首帧 clientWidth 可能为 0，退回 440）
+        var cssW = cv.clientWidth || 0;
+        var wantW = cssW > 20 ? Math.round(cssW * 2) : 440;
+        var wantH = 104;
+        if (cv.width !== wantW || cv.height !== wantH)
+        {
+            cv.width = wantW;
+            cv.height = wantH;
+        }
+
         var g = cv.getContext('2d');
         var W = cv.width;
         var H = cv.height;
+        var TOP = 26;
+
+        // 跟随主题：优先读 app 状态（主题在 init 末尾就可能已设置），再退回 body class
+        var light = !!(global.MV.app && global.MV.app.settings && global.MV.app.settings.themeLight)
+                 || document.body.classList.contains('theme-light');
+        var C_BG = light ? '#eef1f5' : '#12161c';
+        var C_MASK = light ? 'rgba(255,255,255,0.66)' : 'rgba(0,0,0,0.50)';
+        var C_LINE_DARK = light ? 'rgba(255,255,255,0.90)' : 'rgba(0,0,0,0.75)';
+        var C_LINE_LIGHT = light ? 'rgba(22,28,36,0.92)' : 'rgba(255,255,255,0.96)';
+        var C_SEP = light ? 'rgba(0,0,0,0.22)' : 'rgba(255,255,255,0.32)';
+        var C_TRI = light ? '#0891b2' : '#22d3ee';
+        var C_TRI_EDGE = light ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.90)';
+        var C_OUTBAR = light ? 'rgba(146,152,160,0.70)' : 'rgba(126,130,136,0.62)';
         g.clearRect(0, 0, W, H);
 
+        // 背景（深色主题用暗底，浅色主题自动跟随 CSS 变量不可读，这里统一半透明黑）
+        g.fillStyle = C_BG;
+        g.fillRect(0, 0, W, H);
+
+        var span = (sf.max - sf.min) || 1;
+        var PAD = 9;                       // 左右留白，手柄不会贴边被裁
+        function px(v)
+        {
+            var f = (v - sf.min) / span;
+            if (!(f > 0)) { f = 0; }
+            if (f > 1) { f = 1; }
+            return PAD + (W - 2 * PAD) * f;
+        }
+        var dx0 = px(lo), dx1 = px(hi);
+        var cx0 = px(colLo), cx1 = px(colHi);
+
+        // ---- 直方图 ----
         var bins = histBins(sf);
         var maxC = 0;
         for (var i = 0; i < bins.length; i++)
         {
             if (bins[i] > maxC) { maxC = bins[i]; }
         }
-        if (!(maxC > 0))
+        if (maxC > 0)
+        {
+            var bw = (W - 2 * PAD) / bins.length;
+            var ch = H - TOP - 4;
+            for (var b = 0; b < bins.length; b++)
+            {
+                var hh = Math.sqrt(bins[b] / maxC) * ch;
+                if (hh < 1) { continue; }
+                var bv = sf.min + (b + 0.5) / bins.length * span;
+                var outside = (bv < lo || bv > hi);
+                var t = (bv - colLo) / ((colHi - colLo) || 1);
+                g.fillStyle = outside
+                    ? C_OUTBAR
+                    : rampColorAt(ramp, Math.max(0, Math.min(1, t)));
+                g.fillRect(PAD + b * bw, H - hh, Math.max(1, bw + 0.6), hh);
+            }
+        }
+
+        // ---- 显示范围外的暗罩 ----
+        g.fillStyle = C_MASK;
+        if (dx0 > PAD) { g.fillRect(PAD, TOP, dx0 - PAD, H - TOP); }
+        if (dx1 < W - PAD) { g.fillRect(dx1, TOP, W - PAD - dx1, H - TOP); }
+
+        // ---- 颜色范围：先深描边再白线，保证在任何柱色上都看得见 ----
+        function vline(x, dark, light, lw)
+        {
+            g.strokeStyle = dark;
+            g.lineWidth = lw + 2;
+            g.beginPath();
+            g.moveTo(x, TOP); g.lineTo(x, H);
+            g.stroke();
+            g.strokeStyle = light;
+            g.lineWidth = lw;
+            g.beginPath();
+            g.moveTo(x, TOP); g.lineTo(x, H);
+            g.stroke();
+        }
+        vline(cx0, C_LINE_DARK, C_LINE_LIGHT, 2);
+        vline(cx1, C_LINE_DARK, C_LINE_LIGHT, 2);
+
+        // ---- 显示范围：顶部三角手柄（白边 + 青填充）----
+        function tri(x, right)
+        {
+            var w = Math.min(10, x - 1, W - 1 - x);
+            if (w < 3) { w = 3; }
+            var h = TOP - 5;
+            g.beginPath();
+            // 左手柄靠左上、右手柄靠右上，方向随位置自动翻转
+            if (right) { g.moveTo(x - w, 2); g.lineTo(x, 2); g.lineTo(x, h); }
+            else { g.moveTo(x, 2); g.lineTo(x + w, 2); g.lineTo(x, h); }
+            g.closePath();
+            g.fillStyle = C_TRI;
+            g.fill();
+            g.strokeStyle = C_TRI_EDGE;
+            g.lineWidth = 1;
+            g.stroke();
+        }
+        tri(dx0, false);
+        tri(dx1, true);
+
+        // ---- 顶部分隔线与底边 ----
+        g.strokeStyle = C_SEP;
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(0, TOP + 0.5); g.lineTo(W, TOP + 0.5);
+        g.moveTo(0, H - 0.5); g.lineTo(W, H - 0.5);
+        g.stroke();
+    }
+
+    /* 范围条拖动：靠近哪个手柄就抓哪个 */
+    function bindSfRuler()
+    {
+        var cv = $('p-sfhist');
+        if (!cv || cv.__sfBound)
         {
             return;
         }
+        cv.__sfBound = true;
 
-        var bw = W / bins.length;
-        for (var b = 0; b < bins.length; b++)
+        var drag = null;
+
+        function ratio(ev)
         {
-            var h = Math.sqrt(bins[b] / maxC) * (H - 2);
-            g.fillStyle = rampColorAt(ramp, (b + 0.5) / bins.length);
-            g.fillRect(b * bw, H - h, Math.max(1, bw - 1), h);
+            var r = cv.getBoundingClientRect();
+            var fx = (ev.clientX - r.left) / Math.max(r.width, 1);
+            var fy = (ev.clientY - r.top) / Math.max(r.height, 1);
+            return { fx: Math.max(0, Math.min(1, fx)), fy: fy, r: r };
         }
 
-        var dspan = (sf.max - sf.min) || 1;
-        var x0 = Math.max(0, Math.min(W, (lo - sf.min) / dspan * W));
-        var x1 = Math.max(0, Math.min(W, (hi - sf.min) / dspan * W));
-        g.fillStyle = 'rgba(255,255,255,0.10)';
-        g.fillRect(x0, 0, Math.max(0, x1 - x0), H);
-        g.strokeStyle = 'rgba(255,255,255,0.45)';
-        g.lineWidth = 1;
-        g.beginPath();
-        g.moveTo(x0 + 0.5, 0);
-        g.lineTo(x0 + 0.5, H);
-        g.moveTo(x1 - 0.5, 0);
-        g.lineTo(x1 - 0.5, H);
-        g.stroke();
+        function pickHandle(ev)
+        {
+            var st = sfRulerState();
+            if (!st)
+            {
+                return null;
+            }
+            var p = ratio(ev);
+            var span = (st.sf.max - st.sf.min) || 1;
+            var padF = 9 / Math.max(cv.width, 1);
+            var f = function (v)
+            {
+                var t = (v - st.sf.min) / span;
+                if (!(t > 0)) { t = 0; }
+                if (t > 1) { t = 1; }
+                return padF + t * (1 - 2 * padF);
+            };
+
+            var cand = [
+                { k: 'dmin', x: f(st.dmin), top: true },
+                { k: 'dmax', x: f(st.dmax), top: true },
+                { k: 'cmin', x: f(st.cmin), top: false },
+                { k: 'cmax', x: f(st.cmax), top: false }
+            ];
+
+            var best = null;
+            var bd = 0.045;
+            for (var i = 0; i < cand.length; i++)
+            {
+                // 三角手柄只在上部抓，竖线全区可抓
+                if (cand[i].top && p.fy > 0.30) { continue; }
+                var d = Math.abs(p.fx - cand[i].x);
+                if (d < bd)
+                {
+                    bd = d;
+                    best = cand[i].k;
+                }
+            }
+            return best;
+        }
+
+        cv.addEventListener('mousedown', function (ev)
+        {
+            var k = pickHandle(ev);
+            if (!k)
+            {
+                return;
+            }
+            ev.preventDefault();
+            ev.stopPropagation();
+            drag = k;
+            document.body.style.cursor = 'ew-resize';
+        });
+
+        cv.addEventListener('mousemove', function (ev)
+        {
+            if (drag)
+            {
+                return;
+            }
+            cv.style.cursor = pickHandle(ev) ? 'ew-resize' : 'default';
+        });
+
+        window.addEventListener('mousemove', function (ev)
+        {
+            if (!drag)
+            {
+                return;
+            }
+            var st = sfRulerState();
+            if (!st)
+            {
+                drag = null;
+                return;
+            }
+            var p = ratio(ev);
+            var span = (st.sf.max - st.sf.min) || 1;
+            var padF = 9 / Math.max(cv.width, 1);
+            var fv = (p.fx - padF) / Math.max(1e-6, 1 - 2 * padF);
+            fv = Math.max(0, Math.min(1, fv));
+            var v = st.sf.min + fv * span;
+            var gap = span * 1e-4;
+
+            if (drag === 'dmin')
+            {
+                st.lay.sfMin = Math.min(v, st.dmax - gap);
+            }
+            else if (drag === 'dmax')
+            {
+                st.lay.sfMax = Math.max(v, st.dmin + gap);
+            }
+            else if (drag === 'cmin')
+            {
+                st.lay.sfColMin = Math.min(v, st.cmax - gap);
+            }
+            else if (drag === 'cmax')
+            {
+                st.lay.sfColMax = Math.max(v, st.cmin + gap);
+            }
+
+            // 只回写显示范围的输入框。
+            // 颜色范围不动 —— 它要么是 null（数据全范围），要么是用户显式设定的值，
+            // 不应被三角手柄的拖动改写，否则「跟随」状态会被悄悄变成固定值。
+            if (drag === 'dmin' || drag === 'dmax')
+            {
+                var nd = sfRulerState();
+                var e1 = $('p-sfmin');
+                var e2 = $('p-sfmax');
+                if (nd && e1) { e1.value = String(Math.round(nd.dmin * 1000) / 1000); }
+                if (nd && e2) { e2.value = String(Math.round(nd.dmax * 1000) / 1000); }
+            }
+
+            // 拖动竖线时同步颜色范围输入框
+            if (drag === 'cmin' || drag === 'cmax')
+            {
+                var ec1 = $('p-sfcolmin');
+                var ec2 = $('p-sfcolmax');
+                if (ec1) { ec1.value = String(Math.round(st.lay.sfColMin * 1000) / 1000); }
+                if (ec2) { ec2.value = String(Math.round(st.lay.sfColMax * 1000) / 1000); }
+            }
+
+            syncSfRuler();
+            updateColorBar();
+            if (app) { app.markDirty(); }
+        });
+
+        window.addEventListener('mouseup', function ()
+        {
+            if (!drag)
+            {
+                return;
+            }
+            drag = null;
+            document.body.style.cursor = '';
+        });
     }
 
     var colResolve = null;
@@ -1534,6 +1907,12 @@
         $('btn-clear').addEventListener('click', function () { app.clearAll(); });
         $('btn-shot').addEventListener('click', function () { app.screenshot(); });
 
+        $('btn-fit').addEventListener('click', function ()
+        {
+            app.fitAll();
+            setInfo('视图已按当前数据铺满');
+        });
+
         $('modal-ok').addEventListener('click', function ()
         {
             var cb = confirmCb;
@@ -1703,6 +2082,19 @@
         $('p-sfmin').addEventListener('change', applySfRange);
         $('p-sfmax').addEventListener('change', applySfRange);
 
+        $('p-sfcolmin').addEventListener('change', applySfColRange);
+        $('p-sfcolmax').addEventListener('change', applySfColRange);
+        $('p-sfcolauto').addEventListener('click', function ()
+        {
+            var l3 = app ? app.getSelected() : null;
+            if (!l3) { return; }
+            l3.sfColMin = null;
+            l3.sfColMax = null;
+            app.markDirty();
+            renderProps();
+            updateColorBar();
+        });
+
         $('p-sfauto').addEventListener('click', function ()
         {
             var l = app.getSelected();
@@ -1714,6 +2106,36 @@
             updateColorBar();
             app.markDirty();
         });
+
+        // 越界值：半透明灰 / 不显示
+
+        $('p-sfout').addEventListener('change', function ()
+
+        {
+
+            var l2 = app.getSelected();
+
+            if (!l2)
+
+            {
+
+                return;
+
+            }
+
+            l2.sfOutMode = parseInt(this.value, 10) || 1;
+
+            app.markDirty();
+
+            updateColorBar();
+
+        });
+
+
+        // 范围条拖动
+
+        bindSfRuler();
+
 
         $('p-sframp').addEventListener('change', function ()
         {
@@ -2119,6 +2541,10 @@
     function applyTheme(light)
     {
         document.body.classList.toggle('theme-light', !!light);
+
+        // 范围条是 canvas，颜色不会随 CSS 变，切主题后重画
+        if (typeof syncSfRuler === 'function') { syncSfRuler(); }
+        if (typeof updateColorBar === 'function') { updateColorBar(); }
 
         // 按钮文案 = 点下去会变成的主题（与「单窗/双窗」的交互一致）
         var btn = document.getElementById('btn-theme');

@@ -2076,3 +2076,24 @@ button.danger,
 .tree-item.ghost-child .lname {
     font-weight: 400;
 }
+
+/* ---------- 标量场范围条 ---------- */
+/* 顶部三角 = 显示范围；贯穿竖线 = 颜色范围；两者均可拖动 */
+#p-sfhist.sf-ruler {
+    display: block;
+    width: 100%;
+    height: 64px;
+    margin-top: 2px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: transparent;
+    cursor: default;
+    touch-action: none;
+}
+
+body.theme-light #p-sfhist.sf-ruler {
+    background: transparent;
+}
+
+/* 显示范围 / 颜色范围两行：标签 4 字需要更宽 */
+#props .prop-row.range2 { grid-template-columns: 74px minmax(0, 1fr) minmax(0, 1fr) auto; }

@@ -101,7 +101,10 @@
         'uniform float uZMax;',
         'uniform float uSFMin;',
         'uniform float uSFMax;',
+        'uniform float uSCMin;',
+        'uniform float uSCMax;',
         'out vec3 vColor;',
+        'out float vOut;',
         'vec3 hsv2rgb(vec3 c)',
         '{',
         '    vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);',
@@ -149,6 +152,7 @@
         '}',
         'void main()',
         '{',
+        '    vOut = 0.0;',
         '    vec3 c = uColor;',
         '    if (uColorMode == 1)',
         '    {',
@@ -174,8 +178,17 @@
         '    }',
         '    else if (uColorMode == 5)',
         '    {',
-        '        float t = clamp((aSF - uSFMin) / max(uSFMax - uSFMin, 1e-12), 0.0, 1.0);',
-        '        c = ramp(t);',
+        '        if (aSF < uSFMin || aSF > uSFMax)',
+        '        {',
+        '            vOut = 1.0;',                      // 超出显示范围
+        '            c = vec3(0.74, 0.77, 0.82);',       // 中性灰
+        '        }',
+        '        else',
+        '        {',
+        '            vOut = 0.0;',
+        '            float t = clamp((aSF - uSCMin) / max(uSCMax - uSCMin, 1e-12), 0.0, 1.0);',
+        '            c = ramp(t);',
+        '        }',
         '    }',
         '    vColor = c;',
         '    gl_Position = uMVP * vec4(aPos, 1.0);',
@@ -188,17 +201,25 @@
         '#version 300 es',
         'precision highp float;',
         'in vec3 vColor;',
+        'in float vOut;',
         'uniform float uAlpha;',
         'uniform int uRound;',
+        'uniform int uOutMode;',
         'out vec4 fragColor;',
         'void main()',
         '{',
+        '    float a = uAlpha;',
+        '    if (vOut > 0.5)',
+        '    {',
+        '        if (uOutMode == 2) { discard; }',
+        '        a *= 0.55;',
+        '    }',
         '    if (uRound == 1)',
         '    {',
         '        vec2 d = gl_PointCoord - vec2(0.5);',
         '        if (dot(d, d) > 0.25) { discard; }',
         '    }',
-        '    fragColor = vec4(vColor, uAlpha);',
+        '    fragColor = vec4(vColor, a);',
         '}'
     ].join('\n');
 
@@ -650,7 +671,8 @@
         this.meshU = uniforms(gl, meshP, ['uMVP', 'uView', 'uColor', 'uBackColor',
             'uLightView', 'uShade', 'uBackShade', 'uTwoSided']);
         this.pointU = uniforms(gl, pointP, ['uMVP', 'uView', 'uPointSize', 'uDepthBias', 'uColorMode',
-            'uColor', 'uZMin', 'uZMax', 'uSFMin', 'uSFMax', 'uRamp', 'uAlpha', 'uRound']);
+            'uColor', 'uZMin', 'uZMax', 'uSFMin', 'uSFMax', 'uSCMin', 'uSCMax', 'uOutMode',
+                            'uRamp', 'uAlpha', 'uRound']);
         this.lineU = uniforms(gl, lineP, ['uMVP', 'uColor', 'uDepthBias']);
 
         gl.enable(gl.DEPTH_TEST);
@@ -1795,6 +1817,8 @@
         var vao = g.vao;
         var sfMin = 0;
         var sfMax = 1;
+        var scMin = 0;
+        var scMax = 1;
         if (mode === 5)
         {
             var si = layer.sfIndex || 0;
@@ -1802,11 +1826,22 @@
             vao = g.sfVao[si];
 
             var sf = layer.data.scalars[si];
+
+            // 显示范围（display）：超出即视为越界
             sfMin = (typeof layer.sfMin === 'number' && isFinite(layer.sfMin)) ? layer.sfMin : sf.min;
             sfMax = (typeof layer.sfMax === 'number' && isFinite(layer.sfMax)) ? layer.sfMax : sf.max;
             if (!(sfMax > sfMin))
             {
                 sfMax = sfMin + 1;
+            }
+
+            // 颜色范围（saturation）：色带在这段区间上铺满
+            // 留空时取数据全范围，而不是显示范围 —— 否则拖显示范围三角时颜色映射会跟着一起缩放
+            scMin = (typeof layer.sfColMin === 'number' && isFinite(layer.sfColMin)) ? layer.sfColMin : sf.min;
+            scMax = (typeof layer.sfColMax === 'number' && isFinite(layer.sfColMax)) ? layer.sfColMax : sf.max;
+            if (!(scMax > scMin))
+            {
+                scMax = scMin + 1;
             }
         }
 
@@ -1823,6 +1858,9 @@
         gl.uniform1f(this.pointU.uZMax, layer.data.bbox.max[2]);
         gl.uniform1f(this.pointU.uSFMin, sfMin);
         gl.uniform1f(this.pointU.uSFMax, sfMax);
+        gl.uniform1f(this.pointU.uSCMin, scMin);
+        gl.uniform1f(this.pointU.uSCMax, scMax);
+        gl.uniform1i(this.pointU.uOutMode, (layer.sfOutMode | 0) || 1);
         gl.uniform1i(this.pointU.uRamp, layer.sfRamp | 0);
         gl.uniform1f(this.pointU.uAlpha, alpha);
         gl.uniform1i(this.pointU.uRound, round);

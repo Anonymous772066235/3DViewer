@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.1.7" />
+<link rel="stylesheet" href="css/style.css?v=1.0.1.8" />
 </head>
 <body>
 <div id="app">
@@ -16,7 +16,7 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.1.7</span>
+            <span class="sub">mesh / point cloud compare · v1.0.1.8</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
@@ -29,6 +29,7 @@
             </div>
             <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗</button>
             <button id="btn-shot" title="导出当前画面为 PNG">截图</button>
+                <button id="btn-fit" title="按当前数据铺满视口（快捷键 F）">适应</button>
             <button id="btn-clear" title="清空所有图层">清空</button>
             <div id="plugin-menu-wrap" class="menu-wrap">
                 <button id="btn-plugins" class="menu-btn" title="插件">插件</button>
@@ -210,10 +211,20 @@
                             <select id="p-sf"></select>
                         </div>
                         <div class="prop-row range2" id="row-sfrange">
-                            <label>范围</label>
-                            <input type="text" id="p-sfmin" placeholder="自动" title="最小值（留空 = 自动）" />
-                            <input type="text" id="p-sfmax" placeholder="自动" title="最大值（留空 = 自动）" />
-                            <button id="p-sfauto" class="mini" title="恢复自动范围">自动</button>
+                            <label>显示范围</label>
+                            <input type="text" id="p-sfmin" placeholder="自动"
+                                   title="显示范围下限：小于它的点算越界（留空 = 自动）" />
+                            <input type="text" id="p-sfmax" placeholder="自动"
+                                   title="显示范围上限：大于它的点算越界（留空 = 自动）" />
+                            <button id="p-sfauto" class="mini" title="恢复为数据全范围">自动</button>
+                        </div>
+                        <div class="prop-row range2" id="row-sfcolrange">
+                            <label>颜色范围</label>
+                            <input type="text" id="p-sfcolmin" placeholder="全量"
+                                   title="色带起点：该值映射到色带最低端（留空 = 用数据全范围）" />
+                            <input type="text" id="p-sfcolmax" placeholder="全量"
+                                   title="色带终点：该值映射到色带最高端（留空 = 用数据全范围）" />
+                            <button id="p-sfcolauto" class="mini" title="恢复为数据全范围">全量</button>
                         </div>
                         <div class="prop-row" id="row-sframp">
                             <label>色带</label>
@@ -225,8 +236,16 @@
                             </select>
                         </div>
                         <div class="prop-row col" id="row-sfhist">
-                            <label>分布</label>
-                            <canvas id="p-sfhist" width="440" height="110"></canvas>
+                            <label>范围</label>
+                            <canvas id="p-sfhist" class="sf-ruler" width="440" height="104"
+                                    title="拖动上方三角手柄 = 显示范围；拖动中间竖线 = 颜色范围"></canvas>
+                        </div>
+                        <div class="prop-row" id="row-sfout">
+                            <label>越界值</label>
+                            <select id="p-sfout" title="超出显示范围的点如何绘制">
+                                <option value="1">半透明灰</option>
+                                <option value="2">不显示</option>
+                            </select>
                         </div>
                     </div>
 
@@ -501,15 +520,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.1.7"></script>
-    <script src="js/io.js?v=1.0.1.7"></script>
-    <script src="js/algo.js?v=1.0.1.7"></script>
-    <script src="js/render.js?v=1.0.1.7"></script>
+    <script src="js/core.js?v=1.0.1.8"></script>
+    <script src="js/io.js?v=1.0.1.8"></script>
+    <script src="js/algo.js?v=1.0.1.8"></script>
+    <script src="js/render.js?v=1.0.1.8"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.1.7"></script>
-    <script src="js/plugins/optimize.js?v=1.0.1.7"></script>
-    <script src="js/ui.js?v=1.0.1.7"></script>
-    <script src="js/app.js?v=1.0.1.7"></script>
+    <script src="js/plugins/registry.js?v=1.0.1.8"></script>
+    <script src="js/plugins/optimize.js?v=1.0.1.8"></script>
+    <script src="js/ui.js?v=1.0.1.8"></script>
+    <script src="js/app.js?v=1.0.1.8"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->
