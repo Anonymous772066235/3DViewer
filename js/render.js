@@ -430,6 +430,7 @@
         var Q = 1e4;
         var seen = new Map();
         var uniq = new Float32Array(tri * 9);
+        var remap = new Uint32Array(tri * 3);   // 每个输入顶点 -> 去重后下标
         var m = 0;
 
         var mnx = Infinity, mny = Infinity, mnz = Infinity;
@@ -437,6 +438,7 @@
 
         for (var i = 0; i < tri * 9; i += 3)
         {
+            var vi = i / 3;
             var x = positions[i], y = positions[i + 1], z = positions[i + 2];
 
             if (x < mnx) { mnx = x; }
@@ -453,6 +455,7 @@
             var key = (kx * 73856093) ^ (ky * 19349663) ^ (kz * 83492791);
 
             var hit = false;
+            var hitId = -1;
             var bucket = seen.get(key);
             if (bucket)
             {
@@ -463,6 +466,7 @@
                     if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
                     {
                         hit = true;
+                        hitId = u;
                         break;
                     }
                 }
@@ -481,59 +485,21 @@
                 uniq[m * 3] = x;
                 uniq[m * 3 + 1] = y;
                 uniq[m * 3 + 2] = z;
+                remap[vi] = m;
                 m++;
+            }
+            else
+            {
+                remap[vi] = hitId;
             }
         }
 
         return {
             vertCount: m,
             bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] },
-            uniqVerts: uniq.subarray(0, m * 3)
+            uniqVerts: uniq.subarray(0, m * 3),
+            remap: remap
         };
-    }
-
-    /* 唯一顶点数（按位置量化去重），用于在树上显示「点数量」 */
-    /* 从 positions 算包围盒 [minX,minY,minZ,maxX,maxY,maxZ] */
-    function bboxOf(positions)
-    {
-        var n = positions.length;
-        if (!n)
-        {
-            return null;
-        }
-
-        var mnx = Infinity, mny = Infinity, mnz = Infinity;
-        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-
-        for (var i = 0; i < n; i += 3)
-        {
-            var x = positions[i], y = positions[i + 1], z = positions[i + 2];
-            if (x < mnx) { mnx = x; }
-            if (y < mny) { mny = y; }
-            if (z < mnz) { mnz = z; }
-            if (x > mxx) { mxx = x; }
-            if (y > mxy) { mxy = y; }
-            if (z > mxz) { mxz = z; }
-        }
-
-        return [mnx, mny, mnz, mxx, mxy, mxz];
-    }
-
-    function countUniqueVerts(positions)
-    {
-        var tri = Math.floor(positions.length / 9);
-        var seen = new Set();
-        var Q = 1e4;
-
-        for (var t = 0; t < tri * 3; t++)
-        {
-            var o = t * 3;
-            seen.add(Math.round(positions[o] * Q) + ',' +
-                     Math.round(positions[o + 1] * Q) + ',' +
-                     Math.round(positions[o + 2] * Q));
-        }
-
-        return seen.size;
     }
 
     /* 顶点去重 + 索引化：非索引三角面（9 float/三角）→ (verts, idx)
@@ -568,15 +534,38 @@
                 var x = positions[o];
                 var y = positions[o + 1];
                 var z = positions[o + 2];
-                var key = Math.round(x * Q) + ',' + Math.round(y * Q) + ',' + Math.round(z * Q);
-                var id = map.get(key);
-                if (id === undefined)
+
+                // 数值哈希：避免字符串拼接与 GC（与 analyzeMesh 一致）
+                var key = (Math.round(x * Q) * 73856093) ^
+                          (Math.round(y * Q) * 19349663) ^
+                          (Math.round(z * Q) * 83492791);
+
+                var bucket = map.get(key);
+                var id = -1;
+                if (bucket)
+                {
+                    for (var b = 0; b < bucket.length; b++)
+                    {
+                        var c = bucket[b];
+                        if (verts[c * 3] === x && verts[c * 3 + 1] === y && verts[c * 3 + 2] === z)
+                        {
+                            id = c;
+                            break;
+                        }
+                    }
+                }
+                if (id < 0)
                 {
                     id = n++;
                     verts[id * 3] = x;
                     verts[id * 3 + 1] = y;
                     verts[id * 3 + 2] = z;
-                    map.set(key, id);
+                    if (!bucket)
+                    {
+                        bucket = [];
+                        map.set(key, bucket);
+                    }
+                    bucket.push(id);
                 }
                 idx[t * 3 + k] = id;
             }
@@ -701,12 +690,22 @@
             // STL 是散乱三角面（没有共享顶点信息），去重收益最大，也最安全；
             // OBJ / PLY 自带拓扑或顶点属性，保持原始顶点独立，避免误合并
             var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
-            var ix = buildIndexed(d.positions, doWeld);
 
-            // 树上要显示「点数量」：焊接时 vcount 就是唯一数，否则单独统计一次
+            // STL 焊接复用 createLayer 时 analyzeMesh 已算好的去重结果，零重算
+            var ix;
+            if (doWeld && d.uniqVerts && d.remap)
+            {
+                ix = { verts: d.uniqVerts, idx: d.remap, vcount: d.vertCount };
+            }
+            else
+            {
+                ix = buildIndexed(d.positions, doWeld);
+            }
+
+            // 树上「点数量」已由 createLayer 的 analyzeMesh 算好；这里仅在极端路径下兜底
             if (d.vertCount === undefined)
             {
-                d.vertCount = doWeld ? ix.vcount : countUniqueVerts(d.positions);
+                d.vertCount = doWeld ? ix.vcount : Math.floor(d.positions.length / 3);
             }
 
             // 空间分块：按质心分格 + 重排索引（同格三角形连续，AABB 更紧凑）
@@ -1678,7 +1677,7 @@
     };
 
     /* 拾取点标记：3D 十字，关闭深度测试，任何视角可见 */
-    Renderer.prototype.drawPickMarks = function (mvp, marks, len)
+    Renderer.prototype.drawPickMarks = function (mvp, marks, eye, fov, vh, baseLen, minPx)
     {
         if (!marks || !marks.length)
         {
@@ -1688,9 +1687,17 @@
         var n = marks.length;
         var data = new Float32Array(n * 18);
 
+        // 屏幕空间尺寸：每个标记按「自身到相机的距离」算 per-pixel 世界尺寸，
+        // 这样不同深度的标记投影到屏幕上大小一致，不会近大远小。
+        var k = 2 * Math.tan(fov * 0.5) / Math.max(vh, 1);
+
         for (var i = 0; i < n; i++)
         {
             var p = marks[i].pos;
+            var dx = eye[0] - p[0], dy = eye[1] - p[1], dz = eye[2] - p[2];
+            var dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+            var len = Math.max(baseLen, k * dist * minPx);
+
             var o = i * 18;
             data[o] = p[0] - len; data[o + 1] = p[1]; data[o + 2] = p[2];
             data[o + 3] = p[0] + len; data[o + 4] = p[1]; data[o + 5] = p[2];
@@ -2082,12 +2089,7 @@
                 // 因此加“最少 6 px”保护：放大到足够近时才真正按 1 mm 显示
                 var baseLen = this.pickMarkLen || 1;
                 var eyeP = cam.getPosition();
-                var ddx = eyeP[0] - cam.target[0];
-                var ddy = eyeP[1] - cam.target[1];
-                var ddz = eyeP[2] - cam.target[2];
-                var dist = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) || 1;
-                var perPx = 2 * dist * Math.tan(cam.fov * 0.5) / Math.max(v.h, 1);
-                this.drawPickMarks(mvp, this.pickMarks, Math.max(baseLen, perPx * 6));
+                this.drawPickMarks(mvp, this.pickMarks, eyeP, cam.fov, v.h, baseLen, 6);
             }
 
             // 编辑选区预览
@@ -2646,8 +2648,6 @@ global.MV.Renderer = Renderer;
     global.MV.render = global.MV.render || {};
     global.MV.render.bindHooks = bindRenderHooks;
     global.MV.render.installAppMethods = installGizmoMethods;
-    global.MV.render.countUniqueVerts = countUniqueVerts;
-    global.MV.render.bboxOf = bboxOf;
-    global.MV.render.analyzeMesh = analyzeMesh;
+            global.MV.render.analyzeMesh = analyzeMesh;
 
 })(window);

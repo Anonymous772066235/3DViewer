@@ -241,7 +241,10 @@
         var bbox = global.MV.math.BBox.empty();
         var w = 0;
 
-        var chunkTri = 20000;
+        // 小文件一次读入：file.slice 每次都要走一遍 Blob 复制，
+        // 20000 三角形一块对几 MB 的 STL 纯属浪费，还会带来多次 yieldToUI 的调度开销。
+        // 大文件保持分块，控制内存峰值 + 保留进度反馈。
+        var chunkTri = (file.size <= 8 * 1024 * 1024) ? Math.max(20000, total) : 20000;
         var src = 0;
 
         while (src < total)

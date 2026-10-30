@@ -625,6 +625,7 @@
                 data.vertCount = an.vertCount;
                 data.bbox = an.bbox;
                 data.uniqVerts = an.uniqVerts;
+                data.remap = an.remap;
             }
             else
             {

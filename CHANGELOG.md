@@ -1908,6 +1908,140 @@ scMax = (typeof layer.sfColMax === 'number') ? layer.sfColMax : sf.max;
 状态栏       视图已按当前数据铺满
 ```
 
+
+**1.0.1.9** — STL 导入提速
+
+**定位**：STL 导入卡顿的主因是「同一份顶点被去重了两次」，第二次还是最慢的字符串哈希。
+
+```
+parseBinarySTL    DataView 逐顶点读取（约 65 万次 getFloat32）
+createLayer       analyzeMesh：数值哈希去重（72.7k 面实测 16ms）
+uploadLayer       buildIndexed(weld=true)：字符串哈希再去重一遍  ← 卡顿源
+```
+
+`buildIndexed` 里每个顶点拼一个 `'x,y,z'` 字符串做 Map 键：
+
+```js
+var key = Math.round(x * Q) + ',' + Math.round(y * Q) + ',' + Math.round(z * Q);
+```
+
+21.8 万个顶点 = 21.8 万次字符串拼接 + Map 写入 + GC，在主线程同步执行，造成数百 ms 的明显卡顿。
+
+**修复（三处）**：
+
+1. `analyzeMesh` 额外返回 `remap`（`Uint32Array`，每个输入顶点 → 去重后下标）
+2. `createLayer` 把 `remap` 挂到 `data` 上
+3. `uploadLayer` 焊接时直接 `{ verts: uniqVerts, idx: remap, vcount: vertCount }`，**跳过 buildIndexed**
+4. `buildIndexed` 的字符串哈希兜底改成与 `analyzeMesh` 一致的数值哈希（冲突时逐点比对坐标）
+
+这样 STL 的去重只做一次（数值哈希，16ms），渲染用的索引与树显示的点数完全同源。
+
+**验证**：`analyzeMesh` 纯同步实测 16ms（72,694 面）；`check.ps1` 7 项全 PASS。
+
+> 说明：headless 下用 `performance.now()` / `Date.now()` 测总耗时不可靠——`--virtual-time-budget` 会快进 `await`（分块读取、`yieldToUI`），导致计时失真。因此只对纯同步的 `analyzeMesh` 做了计时。
+
+
+**1.0.1.9（续）** — 清理死代码
+
+函数级扫描（出现次数 == 定义次数的候选）逐一核对后，删除了 5 个确认无引用的函数：
+
+| 文件 | 删除 | 原因 |
+|---|---|---|
+| `render.js` | `bboxOf` | 返回数组格式 `[minx..maxz]`，早已被 `{min,max}` 对象取代，只剩导出无调用 |
+| `render.js` | `countUniqueVerts` | 字符串 `Set` 去重；`createLayer` 已用 `analyzeMesh` 算好 `vertCount`，`uploadLayer` 里的调用是死路径 |
+| `algo.js` | `deviceRect` | 无调用 |
+| `algo.js` | `splitPoints` | 旧的点云按矩形选区拆分，已被 `splitPointsByPlanes`（棱柱平面）取代 |
+| `core.js` | `expandArray` | `BBox` 对象方法，无调用 |
+
+同时删除了 `global.MV.render.bboxOf / countUniqueVerts` 两个导出，并把 `uploadLayer` 里那条死路径兜底从 `countUniqueVerts(d.positions)` 简化为 `Math.floor(length / 3)`（`createLayer` 保证 `vertCount` 已存在，这条几乎不会走到）。
+
+合计 **-123 行**（`render.js` -11、`algo.js` -67、`core.js` -16、其余为 1.0.1.9 的提速改动）。
+
+`check.ps1` 7 项全 PASS。
+
+
+**1.0.1.9（续 2）** — STL 解析小文件一次读入
+
+`parseBinarySTL` 原来固定每 20000 三角形切一块读取，每块之间走一遍 `file.slice()`（Blob 复制）+ `yieldToUI`（`setTimeout 0`）+ 进度回调。
+
+对几 MB 的 STL 纯属浪费：72.7k 面（3.6MB）要切 4 块、调 4 次 `slice`。现在：
+
+```js
+var chunkTri = (file.size <= 8 * 1024 * 1024) ? Math.max(20000, total) : 20000;
+```
+
+小文件一次 `readSlice` 读完整个顶点区，循环只跑一轮；大文件仍分块，保留内存峰值控制与进度反馈。
+
+`check.ps1` 7 项全 PASS。
+
+
+**1.0.1.9（续 3）** — 裁剪工具未选中图层时自动选中
+
+**现象**：没在场景树里选中图层时点「裁剪」，工具看起来没反应。
+
+**根因**：`setMode()` 里未选中就 `mode = null` 直接退出，只在状态栏留一句「请先选中…」，提示转瞬即逝，用户感知为「工具坏了」。
+
+**改法**：未选中时自动选中第一个可见的可裁剪图层（`mesh` / `points`），再进入裁剪模式；仅当完全没有可裁剪图层时才提示「请先导入」。
+
+```js
+if (!layer)
+{
+    for (var i = 0; i < a.layers.length; i++)
+    {
+        var cand = a.layers[i];
+        if ((cand.kind === 'mesh' || cand.kind === 'points') && cand.visible !== false)
+        {
+            layer = cand;
+            a.selectLayer(cand.id);
+            break;
+        }
+    }
+}
+if (!layer) { say('请先导入要裁剪的网格或点云'); ... return; }
+```
+
+**实测**（不选中 → 点裁剪）：
+
+```
+初始 selectedId = null
+点击裁剪后 mode = rect、selectedId = 1
+```
+
+网格裁剪全链路（点击 → 框选 → 预览 → 应用 → 生成 segmented/remaining）也已用探针实测通过。
+
+
+**1.0.1.9（续 4）** — 拾取十字在缩放视角时大小不一致
+
+**现象**：拾取多个点后缩放视角，几个交叉十字的大小不一样。
+
+**根因**：`drawPickMarks(mvp, marks, len)` 用**同一个世界尺寸** `len` 画所有标记的十字，而 `len` 是按「相机到视口中心（target）」的距离换算的。标记分布在模型不同深度，各自到相机的距离不同，投影到屏幕后自然近大远小。
+
+**改法**：十字改为屏幕空间尺寸——每个标记按「自身到相机的距离」独立换算 per-pixel 世界长度：
+
+```js
+// drawPickMarks(mvp, marks, eye, fov, vh, baseLen, minPx)
+var k = 2 * Math.tan(fov * 0.5) / Math.max(vh, 1);
+for (var i = 0; i < n; i++)
+{
+    var p = marks[i].pos;
+    var dist = 相机到 p 的距离;
+    var len = Math.max(baseLen, k * dist * minPx);   // 每个标记独立
+    ...
+}
+```
+
+`baseLen`（1 mm，足够近时按真实尺寸显示）与 `minPx`（6 px，远距离保底）的语义不变。
+
+**实测**（`?demo=pick` 自动拾取 3 个不同深度的点，`?zoom=0.25` 缩放）：
+
+```
+P1 黄  x 宽 7 px
+P2 绿  x 宽 7 px
+P3 蓝  x 宽 7 px（颜色阈值测得 5 px，特写确认与 P1/P2 一致）
+```
+
+三个十字屏幕大小一致。`check.ps1` 7 项全 PASS（含 pick 场景）。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

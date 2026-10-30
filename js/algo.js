@@ -197,7 +197,29 @@
         var layer = a.getSelected();
         if (!layer)
         {
-            say('请先在场景树里选中要编辑的网格或点云');
+            // 未选中时自动选中第一个可见的可裁剪图层，降低使用门槛
+            // （不再要求用户先手动去场景树里点一下）
+            for (var i = 0; i < a.layers.length; i++)
+            {
+                var cand = a.layers[i];
+                if ((cand.kind === 'mesh' || cand.kind === 'points') && cand.visible !== false)
+                {
+                    layer = cand;
+                    if (typeof a.selectLayer === 'function')
+                    {
+                        a.selectLayer(cand.id);
+                    }
+                    else
+                    {
+                        a.selectedId = cand.id;
+                    }
+                    break;
+                }
+            }
+        }
+        if (!layer)
+        {
+            say('请先导入要裁剪的网格或点云');
             mode = null;
             syncButtons();
             return;
@@ -231,13 +253,6 @@
     }
 
     /* ---------------- 屏幕 → 世界 ---------------- */
-
-    function deviceRect(vi)
-    {
-        var a = app();
-        var v = a.views[vi];
-        return { rect: v.rect, cam: v.camera, dpr: a.dpr || 1, vh: v.h };
-    }
 
     function mvpOf(vi)
     {
@@ -592,41 +607,6 @@
         }
 
         return { seg: subPoints(d, segIdx), rem: subPoints(d, remIdx) };
-    }
-
-    function splitPoints(layer, sel, mvp, rect, dpr)
-    {
-        var d = layer.data;
-        var pos = d.positions;
-        var n = d.count || Math.floor(pos.length / 3);
-        var tmp = [0, 0, 0];
-        var segIdx = [];
-        var remIdx = [];
-
-        // 选区用设备像素，投影结果也是设备像素
-        var devSel = sel.map(function (p) { return { x: p.x * dpr, y: p.y * dpr }; });
-
-        for (var i = 0; i < n; i++)
-        {
-            if (!projectIndex(mvp, rect, pos, i, tmp))
-            {
-                remIdx.push(i);
-                continue;
-            }
-            if (insidePoly(tmp[0], tmp[1], devSel))
-            {
-                segIdx.push(i);
-            }
-            else
-            {
-                remIdx.push(i);
-            }
-        }
-
-        return {
-            seg: subPoints(d, segIdx),
-            rem: subPoints(d, remIdx)
-        };
     }
 
     /* ---------------- 预览 ---------------- */

@@ -117,22 +117,6 @@
             return isFinite(b.min[0]) && isFinite(b.max[0]);
         },
 
-        expandArray: function (b, arr, stride)
-        {
-            var s = stride || 3;
-            for (var i = 0; i + 2 < arr.length; i += s)
-            {
-                var x = arr[i], y = arr[i + 1], z = arr[i + 2];
-                if (x < b.min[0]) { b.min[0] = x; }
-                if (y < b.min[1]) { b.min[1] = y; }
-                if (z < b.min[2]) { b.min[2] = z; }
-                if (x > b.max[0]) { b.max[0] = x; }
-                if (y > b.max[1]) { b.max[1] = y; }
-                if (z > b.max[2]) { b.max[2] = z; }
-            }
-            return b;
-        },
-
         merge: function (a, b)
         {
             if (!BBox.valid(b))
