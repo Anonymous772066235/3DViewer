@@ -481,8 +481,7 @@
             this.markDirty();
             // 目标分组若折叠着，先展开，否则新图层看不见
             if (global.MV.ui.expandSlot) { global.MV.ui.expandSlot(slotOut); }
-            global.MV.ui.renderTree();
-            global.MV.ui.renderProps();
+            global.MV.ui.refreshUI();
             global.MV.ui.setInfo('已把 ' + cn + ' 个顶点拷成点云（复用焊接结果，无需重算）');
             return;
         }
@@ -554,8 +553,7 @@
         this.markDirty();
 
         if (global.MV.ui.expandSlot) { global.MV.ui.expandSlot(slotOut); }
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         global.MV.ui.setInfo('已把 ' + n + ' 个顶点拷成点云图层（挂在 ' + src.name + ' 下）');
     };
 
@@ -680,8 +678,7 @@
     {
         this.clearVertexPreview();
         this.selectedId = id;
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
     };
 
     App.prototype.removeLayer = function (id)
@@ -711,8 +708,7 @@
             return;
         }
 
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         this.markDirty();
         global.MV.ui.setInfo('已移除 ' + removedCount + ' 个图层');
     };
@@ -809,8 +805,7 @@
         }
         layer.slot = slot;
 
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         this.markDirty();
         global.MV.ui.setInfo('已移动「' + layer.name + '」到 ' + slotLabelOf(slot));
     };
@@ -855,8 +850,7 @@
         this.layers.push(copy);
         this.selectedId = copy.id;
 
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         this.markDirty();
         global.MV.ui.setInfo('已拷贝「' + src.name + '」到 ' + slotLabelOf(slot));
     };
@@ -887,8 +881,7 @@
         this.selectedId = null;
         this.paletteCursor = { A: 0, B: 0, S: 0 };
         this.propsByKey = {};
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         document.getElementById('drop-hint').classList.remove('hidden');
         global.MV.ui.setInfo('已清空全部图层');
         this.markDirty();
@@ -1097,8 +1090,7 @@
 
         this.loading = false;
         global.MV.ui.setProgress(false, '');
-        global.MV.ui.renderTree();
-        global.MV.ui.renderProps();
+        global.MV.ui.refreshUI();
         this.markDirty();
 
         // 通知扩展（如孔位优化的自动触发）加载已完成
@@ -1133,8 +1125,7 @@
             if (j && j.path)
             {
                 layer.absPath = j.path;
-                global.MV.ui.renderTree();
-                global.MV.ui.renderProps();
+                global.MV.ui.refreshUI();
             }
         }).catch(function ()
         {
@@ -1366,14 +1357,6 @@
                 global.MV.ui.setInfo(msg + ' · 当前环境不支持剪贴板');
             }
         }, 'image/png');
-    };
-
-    App.prototype.levelView = function ()
-    {
-        var vi = this.settings.singleView ? 0 : (this.lastActiveView >= 0 ? this.lastActiveView : 0);
-        this.views[vi].camera.level();   // 同步时两视图共享同一相机对象，天然一致
-        this.markDirty();
-        global.MV.ui.setInfo('视角已回正（滚转归零）');
     };
 
     /* 恢复默认朝向（回到初始的斜 45° 俯视） */
@@ -1796,8 +1779,7 @@
                 }
 
                 self.selectedId = null;
-                global.MV.ui.renderTree();
-                global.MV.ui.renderProps();
+                global.MV.ui.refreshUI();
             }
         });
     };
@@ -1816,6 +1798,14 @@
         refreshTree: global.MV.ui.renderTree,
         refreshProps: global.MV.ui.renderProps,
         renderPickBar: global.MV.ui.renderPickBar,
+        // 裁剪应用后回收源图层显存
+        releaseGpu: function (layer)
+        {
+            if (global.MV.app && global.MV.app.renderer && layer)
+            {
+                global.MV.app.renderer.releaseLayer(layer);
+            }
+        },
         // 裁剪交互用的三件事：canvas、选择框 DOM、按钮状态 —— 都由界面层实现
         canvas: function () { return document.getElementById('gl'); },
         createOverlay: global.MV.ui.createSegOverlay,
@@ -1827,7 +1817,8 @@
     if (global.MV.ioBindHooks) { global.MV.ioBindHooks(uiHooks); }
     if (global.MV.render && global.MV.render.bindHooks)
     {
-        global.MV.render.bindHooks({ notify: global.MV.ui.setInfo, refreshProps: global.MV.ui.renderProps });
+        global.MV.render.bindHooks({
+            refreshTree: global.MV.ui.renderTree, notify: global.MV.ui.setInfo, refreshProps: global.MV.ui.renderProps });
     }
 
     window.addEventListener('load', function ()

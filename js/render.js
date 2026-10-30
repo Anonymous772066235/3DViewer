@@ -12,13 +12,15 @@
     /* ---- 分层契约：渲染层不直接操作界面，通过 app 注入的 hooks 通知 ---- */
     var renderHooks = {
         notify: function () {},
-        refreshProps: function () {}
+        refreshProps: function () {},
+        refreshTree: function () {}
     };
 
     function bindRenderHooks(h)
     {
         if (!h) { return; }
-        for (var k in renderHooks)
+        // 遍历传入对象，否则新增的 hook 名永远进不来（同 algo 曾经的坑）
+        for (var k in h)
         {
             if (typeof h[k] === 'function') { renderHooks[k] = h[k]; }
         }
@@ -868,9 +870,9 @@
                     (layer.name || '图层') +
                     '，多为显存不足。可缩小数据量，或用 ?maxtri= / ?maxpts= 限制后重试');
             }
-            if (global.MV.ui && global.MV.ui.renderTree)
+            if (renderHooks && renderHooks.refreshTree)
             {
-                global.MV.ui.renderTree();
+                renderHooks.refreshTree();
             }
             return;
         }
@@ -2121,13 +2123,7 @@
 
     /* ==================== 视角器（削角六面体 26 面 + X/Y/Z 箭头） ==================== */
 /* App 方法，由 app.js 在启动时调用 MV.render.installAppMethods() 安装 */
-function installGizmoMethods()
-    {
-    var App = global.MV && global.MV.App;
-    if (!App)
-    {
-        return;
-    }
+    /* ==================== 视角器：纯工具（原在 installGizmoMethods 内） ==================== */
 
     function polyNormal(p)
     {
@@ -2389,6 +2385,15 @@ function installGizmoMethods()
         if (yz) { return 'YZ 向 (0, ' + n[1].toFixed(2) + ', ' + n[2].toFixed(2) + ')'; }
         if (xz) { return 'XZ 向 (' + n[0].toFixed(2) + ', 0, ' + n[2].toFixed(2) + ')'; }
         return 'XYZ 向 (' + n[0].toFixed(2) + ', ' + n[1].toFixed(2) + ', ' + n[2].toFixed(2) + ')';
+    }
+
+
+function installGizmoMethods()
+    {
+    var App = global.MV && global.MV.App;
+    if (!App)
+    {
+        return;
     }
 
     App.prototype.drawAxisCube = function ()

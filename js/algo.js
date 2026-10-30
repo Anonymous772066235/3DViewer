@@ -15,6 +15,7 @@
         refreshTree: function () {},
         refreshProps: function () {},
         renderPickBar: function () {},
+        releaseGpu: function () {}, // 由上层释放某图层的显存（裁剪应用后回收源图层）
         canvas: null,               // 由界面层提供，返回主 canvas
         createOverlay: null,        // 由界面层创建裁剪选择框
         syncSegButtons: null        // 由界面层同步裁剪按钮状态
@@ -915,6 +916,9 @@
         a.layers.push(lRem);
 
         src.visible = false;
+
+        // 源图层已隐藏且不再参与渲染：释放其显存（data 仍在内存，重新勾选会自动重建）
+        if (hooks.releaseGpu) { hooks.releaseGpu(src); }
 
         a.selectedId = lSeg.id;
         a.renderer.setPreview(null);

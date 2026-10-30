@@ -21,9 +21,27 @@
 
     var collapsed = { A: false, B: false, S: false };
 
+    /* 树结构签名：图层集合 / 可见性 / 名称 / 颜色 / 父子关系 / 折叠 / 选中。
+     * 这些都没变时跳过整树重建（renderTree 内部会 innerHTML='' 全量重建）。 */
+    var lastTreeSign = '';
+
+    /* 元素缓存：属性面板有 ~40 个静态控件，renderProps 每次都要查一遍。
+     * 用 isConnected 兜底——节点被替换过就重新查询，不会拿到失效引用。 */
+    var EL_CACHE = {};
+
     function $(id)
     {
-        return document.getElementById(id);
+        var el = EL_CACHE[id];
+        if (el && el.isConnected)
+        {
+            return el;
+        }
+        el = document.getElementById(id);
+        if (el)
+        {
+            EL_CACHE[id] = el;
+        }
+        return el;
     }
 
     function hexToRgb(hex)
@@ -341,12 +359,36 @@
         }
     }
 
+    /* 树与属性一起刷新：二者几乎总是同步发生，合并成一个入口少一次重复建 DOM */
+    function refreshUI()
+    {
+        renderTree();
+        renderProps();
+    }
+
     function renderTree()
     {
         if (!app)
         {
             return;
         }
+
+        // 结构没变就不重建（配合 refreshUI，避免一次操作反复整树重建）
+        var sig = String(app.selectedId) + '|' + String(app.vertexPreviewId) +
+                  '|' + (collapsed.A ? 1 : 0) + (collapsed.B ? 1 : 0) + (collapsed.S ? 1 : 0);
+        for (var si = 0; si < app.layers.length; si++)
+        {
+            var SL = app.layers[si];
+            sig += '|' + SL.id + ',' + (SL.visible ? 1 : 0) + ',' + SL.kind + ',' + SL.slot +
+                   ',' + SL.name + ',' + SL.color + ',' + (SL.parentId || 0) + ',' +
+                   (SL.data ? SL.data.count : 0) + ',' + (SL.data ? SL.data.vertCount : 0);
+        }
+        if (sig === lastTreeSign)
+        {
+            return;
+        }
+        lastTreeSign = sig;
+
         var root = $('tree');
         root.innerHTML = '';
 
@@ -448,6 +490,12 @@
                     if (chk2.checked)
                     {
                         layer.shownAt = Date.now();   // 记为“最新启用”，孔位优化优先用它
+
+                        // 显存可能已被回收（如裁剪应用后释放），重新勾选时补上传
+                        if (!layer.gpu && app.renderer && !layer._uploadFailed)
+                        {
+                            app.renderer.uploadLayer(layer);
+                        }
                     }
                     app.markDirty();
                 });
@@ -1455,6 +1503,25 @@
     {
         app = appRef;
 
+
+        // 图表绑定按区域拆分，便于定位（原 593 行 init 的等价展开）
+        bindTopbar();
+        bindProps();
+        bindViewOpts();
+        bindMenus();
+        bindColorPop();
+    }
+
+    /* 强制重建树（签名缓存失效时用，如外部直接改了 layer 内部字段） */
+    function forceRenderTree()
+    {
+        lastTreeSign = '';
+        renderTree();
+    }
+
+    /* ---- bindTopbar ---- */
+    function bindTopbar()
+    {
         $('btn-load-before').addEventListener('click', function () { app.pickFiles('A'); });
         $('btn-load-after').addEventListener('click', function () { app.pickFiles('B'); });
         $('btn-load-both').addEventListener('click', function () { app.pickFiles('BOTH'); });
@@ -1526,7 +1593,11 @@
             ev.target.value = '';
             app.addFiles(files, app.pendingSlot || 'A');
         });
+    }
 
+    /* ---- bindProps ---- */
+    function bindProps()
+    {
         // 属性控件
         $('p-name').addEventListener('change', function ()
         {
@@ -1724,7 +1795,11 @@
             $('p-normallen-val').textContent = Number(l.normalLen).toFixed(1);
             app.markDirty();
         });
+    }
 
+    /* ---- bindViewOpts ---- */
+    function bindViewOpts()
+    {
         // 视图设置（复选框状态与 settings 对齐，支持 URL 预置）
         var ghostSolid = (app.settings.ghostMode | 0) === 1;
         $('opt-ghost-solid').checked = ghostSolid;
@@ -1796,7 +1871,11 @@
         {
             app.setPickInfo(false);
         });
+    }
 
+    /* ---- bindMenus ---- */
+    function bindMenus()
+    {
         // 顶栏下拉：载入 / 插件 / 工具，三者互斥，点任一项后自动收起
         var topMenus = [
             { btn: $('btn-load'), menu: $('load-menu') },
@@ -1878,7 +1957,11 @@
                 mb.classList.add('active');
             }
         }
+    }
 
+    /* ---- bindColorPop ---- */
+    function bindColorPop()
+    {
         // 配色浮层：点「配色…」展开；点浮层外或 Esc 关闭；点色块不自动关闭
         (function ()
         {
@@ -1999,11 +2082,6 @@
             app.beginPickCenter();
         });
 
-        $('btn-level').addEventListener('click', function ()
-        {
-            app.levelView();
-        });
-
         $('btn-reset-view').addEventListener('click', function ()
         {
             app.resetView();
@@ -2034,21 +2112,8 @@
             app.settings.bg = hexToRgb(this.value);
             app.markDirty();
         });
-
-        // 帮助
-        $('btn-help').addEventListener('click', function ()
-        {
-            $('help').classList.toggle('hidden');
-        });
-        $('btn-help-close').addEventListener('click', function ()
-        {
-            $('help').classList.add('hidden');
-        });
-
-        renderTree();
-        renderProps();
-        applyLayoutMode();
     }
+
 
     /* 主题：只切 body 上的 class，颜色由 CSS 变量决定 */
     function applyTheme(light)
@@ -2317,6 +2382,8 @@
     global.MV.ui = {
         init: init,
         renderTree: renderTree,
+        refreshUI: refreshUI,
+        forceRenderTree: forceRenderTree,
         renderProps: renderProps,
         setProgress: setProgress,
         setInfo: setInfo,

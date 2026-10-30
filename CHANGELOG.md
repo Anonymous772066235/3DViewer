@@ -1518,6 +1518,73 @@ r.classList.toggle('show', !!show);
 
 `check.ps1` **7 项全 PASS**。
 
+
+**1.0.1.4** — 应用裁剪后释放源图层显存
+
+**问题**：`applySplit()` 之后源图层只是 `visible = false`，GPU 上的 VAO / 顶点缓冲 / 索引缓冲全留着。裁几刀下来，显存被一堆“看不见的图层”占着。
+
+**改法**：
+
+1. `algo.applySplit()` 在 `src.visible = false` 之后发一次 `hooks.releaseGpu(src)`
+2. `app` 注入该 hook：
+
+```js
+releaseGpu: function (layer)
+{
+    global.MV.app.renderer.releaseLayer(layer);   // 删 VAO / buffer，gpu 置 null
+}
+```
+
+3. **补齐重新显示的通路**：`uploadLayer()` 原本只在导入与拷贝到对侧时调用，显存一释放，再勾选“可见”就会是空图层。现在树里的可见性复选框在 `gpu` 为空时补一次上传：
+
+```js
+if (!layer.gpu && app.renderer && !layer._uploadFailed)
+{
+    app.renderer.uploadLayer(layer);
+}
+```
+
+`data.positions` 一直留在内存里，所以这是“按需重建”，不丢数据。
+
+**验证**（`?demo=seg&segapply=1`，读释放标记）：
+
+```
+REL m gpu=null                       ← 源图层显存已释放
+树：m | m_segmented | vertices | m_remaining   ← 图层与几何数据都还在
+check.ps1 7 项全 PASS
+```
+
+
+**1.0.1.4（续）** — 代码 review 后的六项优化
+
+体检基线（10,664 行 / 8 模块）：`core / io / algo` 三层 `document=0`、`gl=0`、`MV.ui=0` 完全干净；问题集中在超长函数、重复 DOM 重建、`render` 层的两处越界。
+
+| # | 优化 | 前 | 后 |
+|---|---|---|---|
+| 1 | `ui.refreshUI()` 合并成对刷新，`app` 里 10 处 `renderTree + renderProps` 改为一次调用 | 每次操作建两遍 DOM | 一遍 |
+| 2 | `$()` 加元素缓存（`isConnected` 兜底） | `renderProps` 每次查 ~40 次 `getElementById` | 命中缓存 |
+| 3 | `ui.init()` 按区域拆分 | **593 行** | **14 行** + 5 个 bind（76 / 202 / 76 / 86 / 117） |
+| 4 | `render.js` 去掉 `MV.ui` 直连，走 `renderHooks` | 2 处越界 | **0** |
+| 5 | `renderTree()` 加结构签名缓存 | 无条件整树重建 | 字段未变即跳过 |
+| 6 | `installGizmoMethods()` 工具函数提升到模块级 | **475 行** | **213 行**（+ 262 行纯工具函数） |
+
+**顺带修的一个真 bug**：`render.js` 的 `bindRenderHooks()` 也是 `for (var k in renderHooks)` —— 只遍历自身，新增 hook 永远注入不进来（与当初 `algo.js` 的坑一模一样）。已改为遍历传入对象。
+
+**为什么 `installPickMethods`（429 行）没拆**：函数体内有 30+ 个连续计算的共享局部变量（Möller–Trumbore 求交的 `e1x/px/det/inv/u/v/t` 等），拆开必须改成参数传递或对象状态，收益为零而风险很高。已在注释里标明。
+
+**分层复查**：
+
+```
+core / io / algo   MV.ui:0  document:0  gl:0
+render             MV.ui:0  document:0  gl:466    ← 本次达标
+ui                 MV.ui:4  document:87 gl:0
+app                MV.ui:86 document:16 gl:0      ← 原 95，合并后减少
+```
+
+`check.ps1` **7 项全 PASS**（每步单独回归）。
+
+> 说明：拆分函数不会减少总行数（函数头反而多 10 行），收益在于单函数可读性与定位成本。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）
