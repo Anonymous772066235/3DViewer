@@ -188,17 +188,45 @@
         {
             this.setSyncCamera(true);
         }
-        // ?zoom= 在载入完成后生效（fitAll 会重置距离，这里统一乘一次）
-        if (this.urlZoom && this.urlZoom !== 1)
+        // ?zoom= / ?target= 在载入完成后生效（fitAll 会重置距离，这里统一乘一次）
+        // target=x,y,z 用于把镜头对准某个局部（配合 zoom 放大看细节）
+        var urlTarget = null;
+        if (params.has('target'))
         {
+            var ta = (params.get('target') || '').split(',');
+            if (ta.length >= 3)
+            {
+                var tv = [parseFloat(ta[0]), parseFloat(ta[1]), parseFloat(ta[2])];
+                if (isFinite(tv[0]) && isFinite(tv[1]) && isFinite(tv[2]))
+                {
+                    urlTarget = tv;
+                }
+            }
+        }
+        if ((this.urlZoom && this.urlZoom !== 1) || urlTarget)
+        {
+            var camApplied = false;      // 双文件加载会触发多次 mv:loaded，只应用一次
             global.addEventListener('mv:loaded', function ()
             {
+                if (camApplied)
+                {
+                    return;
+                }
+                camApplied = true;
+
                 var cams = self.settings.syncCam
                     ? [self.views[0].camera]
                     : [self.views[0].camera, self.views[1].camera];
                 for (var zi = 0; zi < cams.length; zi++)
                 {
-                    cams[zi].distance *= self.urlZoom;
+                    if (urlTarget)
+                    {
+                        cams[zi].target = [urlTarget[0], urlTarget[1], urlTarget[2]];
+                    }
+                    if (self.urlZoom && self.urlZoom !== 1)
+                    {
+                        cams[zi].distance *= self.urlZoom;
+                    }
                 }
                 self.markDirty();
             });
@@ -232,13 +260,15 @@
             });
         }
 
+        this.debug = params.get('debug') === '1';
+
+        global.MV.ui.init(this);
+
+        // 单窗必须在 ui.init 之后设置：setSingleView 会调 ui.applyLayoutMode，之前调无效
         if (params.get('single') === '1')
         {
             this.setSingleView(true);
         }
-        this.debug = params.get('debug') === '1';
-
-        global.MV.ui.init(this);
         global.MV.ui.setInfo('就绪 — 支持 STL / OBJ / PLY / 点云文本');
 
         this.bindPointer();
@@ -283,15 +313,38 @@
         requestAnimationFrame(this.tickBound);
 
         // 支持 ?url=<文件地址>&slot=A|B|BOTH 直接打开（需 http 服务）
+        // 第二个文件用 ?url2=&slot2=（双窗对比：左网格 / 右点云）
+        // 必须串行：addFiles 内部共享进度与图层状态，并行会互相覆盖
+        var selfU = this;
         var autoUrl = params.get('url');
+        var autoUrl2 = params.get('url2');
+
+        function pickSlot(v, dft)
+        {
+            var s2 = (v || dft).toUpperCase();
+            return (s2 === 'A' || s2 === 'B' || s2 === 'BOTH') ? s2 : dft;
+        }
+
         if (autoUrl)
         {
-            var slot = (params.get('slot') || 'B').toUpperCase();
-            if (slot !== 'A' && slot !== 'B' && slot !== 'BOTH')
+            this.loadFromUrl(autoUrl, pickSlot(params.get('slot'), 'B')).then(function ()
             {
-                slot = 'B';
-            }
-            this.loadFromUrl(autoUrl, slot);
+                if (autoUrl2)
+                {
+                    return selfU.loadFromUrl(autoUrl2, pickSlot(params.get('slot2'), 'A'));
+                }
+                return null;
+            }).catch(function (e)
+            {
+                if (global.MV.ui && global.MV.ui.setInfo)
+                {
+                    global.MV.ui.setInfo('载入失败：' + (e && e.message ? e.message : e));
+                }
+            });
+        }
+        else if (autoUrl2)
+        {
+            this.loadFromUrl(autoUrl2, pickSlot(params.get('slot2'), 'A')).catch(function () {});
         }
     };
 

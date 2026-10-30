@@ -1612,6 +1612,68 @@ index.html HTTP 200 len=26247
 
 服务从任意工作目录启动都正常，说明路径解析全部是动态的。
 
+
+**1.0.1.6** — README 改为发布形态
+
+仓库开源发布，README 从「开发手册」改为「对外说明」，原详细内容整体移入 `docs/GUIDE.md`。
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| README | 474 行开发文档 | **177 行**：简介、特性、快速开始、界面、操作、格式、目录、环境要求 |
+| 详细手册 | 混在 README 里 | `docs/GUIDE.md`（564 行，内容不变） |
+| 配图 | 无 | `docs/images/overview-dark.png`、`overview-light.png`（各约 115~120 KB） |
+
+**同时修一个真 bug**：`?single=1` 参数不生效。
+
+```js
+// 原来在 ui.init 之前调用，setSingleView 内部要调 ui.applyLayoutMode，此时 UI 还没建立
+if (params.get('single') === '1') { this.setSingleView(true); }
+global.MV.ui.init(this);
+```
+
+已调整为先 `ui.init`、再 `setSingleView`，`?single=1` 现在能正确切到单窗。
+
+README 里所有功能描述都逐条对照代码核实过：`?maxtri` / `?maxpts` 参数、`Ctrl+Z` 撤销、`f` / `w` / `n` / `p` / `Delete` 快捷键、双击图层聚焦、侧栏 220~620px 拖拽范围。
+
+
+**1.0.1.6（续）** — 双窗并排对比与配图
+
+README 的核心卖点从「网格 vs 点云」校正为「**两份数据并排对比**」，并补齐两个能复现该场景的 URL 参数。
+
+**① `?url2=` / `?slot2=` 双文件加载**
+
+```js
+this.loadFromUrl(autoUrl, pickSlot(params.get('slot'), 'B')).then(function ()
+{
+    if (autoUrl2) { return selfU.loadFromUrl(autoUrl2, pickSlot(params.get('slot2'), 'A')); }
+});
+```
+
+**必须串行**：`addFiles` 内部共享进度条与图层状态，第一版写成并行时 `m.stl` 被 `m_points` 覆盖，树里只剩「左侧 A 0 层」。
+
+**② `?target=x,y,z` 定点放大**
+
+`?zoom=` 原本就有（在 `mv:loaded` 里乘相机距离），缺的是指定看向哪里。补上 `target` 后可以把镜头压到孔洞密集的中段：
+
+```
+index.html?sync=1&url=m.stl&slot=A&url2=m_points.xyz&slot2=B
+            &noconfirm=1&selone=1&zoom=0.1&target=-120,0,-279
+```
+
+顺带给 `mv:loaded` 处理加了**一次性标志**——双文件加载会触发两次事件，不加的话 `zoom` 会被乘两遍。
+
+**③ 配图**
+
+| 文件 | 内容 | 体积 |
+|---|---|---|
+| `dual-window.png` | 双窗：左网格（蓝）/ 右点云（橙），`sync=1` 同角度，放大到孔口级 | 124 KB |
+| `overlay-mesh-points.png` | 同屏叠加：两者重合在单一视口 | 176 KB |
+| `overview-dark.png` / `overview-light.png` | 单窗全景，深浅两套主题 | 各约 120 KB |
+
+对比图的数据不从外部引入：直接从 `m.stl` 按 1e-4 量化提取 38,437 个唯一顶点生成 `xyz`，保证左右天然对应。
+
+放大到 `zoom=0.1` 后能看出两者的表示差异——网格是连续的面、点云是离散点阵，孔壁边缘由点排成锯齿。
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）
