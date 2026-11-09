@@ -940,9 +940,238 @@
         }
     }
 
-    function setInfo(text)
+    /* ---------------- 底部日志面板 ---------------- */
+
+    var LOG_MAX = 500;              // 历史条数上限
+    var ST_MIN_H = 24;              // 单行高度（与 CSS #st-line 一致）
+    var ST_STORE_KEY = 'viewer3d.statusHeight';
+    var logBuf = [];
+    var stHeight = ST_MIN_H;
+
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+    /* 按关键字分级：错误 → 红，取消/警告 → 黄 */
+    function classifyLog(text)
     {
-        $('st-info').textContent = text;
+        var t = text || '';
+        if (/失败|错误|异常|无效|越界|不支持|无法|没[有法]|error|Error|FAIL/.test(t))
+        {
+            return 'err';
+        }
+        if (/取消|警告|注意|跳过|请先|未找到|未就绪|未拾取|warn|Warn/.test(t))
+        {
+            return 'warn';
+        }
+        return 'info';
+    }
+
+    function makeLogRow(rec)
+    {
+        var row = document.createElement('div');
+        row.className = 'st-log-row' + (rec.kind === 'info' ? '' : ' ' + rec.kind);
+        var t = document.createElement('span');
+        t.className = 't';
+        t.textContent = rec.time;
+        var m = document.createElement('span');
+        m.textContent = rec.text;
+        row.appendChild(t);
+        row.appendChild(m);
+        return row;
+    }
+
+    function logPanelOpen()
+    {
+        var w = $('st-log-wrap');
+        return !!w && !w.classList.contains('hidden');
+    }
+
+    function scrollLogToEnd()
+    {
+        var box = $('st-log');
+        if (box) { box.scrollTop = box.scrollHeight; }
+    }
+
+    /* 追加一条历史；面板展开时同步追加 DOM */
+    function pushLog(text)
+    {
+        var d = new Date();
+        var rec = {
+            time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()),
+            text: String(text),
+            kind: classifyLog(text)
+        };
+        logBuf.push(rec);
+        if (logBuf.length > LOG_MAX) { logBuf.shift(); }
+
+        var box = $('st-log');
+        if (box && logPanelOpen())
+        {
+            box.appendChild(makeLogRow(rec));
+            while (box.childNodes.length > LOG_MAX) { box.removeChild(box.firstChild); }
+            scrollLogToEnd();
+        }
+        return rec;
+    }
+
+    function renderLogFull()
+    {
+        var box = $('st-log');
+        if (!box) { return; }
+        box.innerHTML = '';
+        var frag = document.createDocumentFragment();
+        for (var i = 0; i < logBuf.length; i++)
+        {
+            frag.appendChild(makeLogRow(logBuf[i]));
+        }
+        box.appendChild(frag);
+        scrollLogToEnd();
+    }
+
+    function stMaxHeight()
+    {
+        var vh = global.innerHeight || 800;
+        return Math.max(ST_MIN_H + 40, Math.round(vh * 0.4));
+    }
+
+    /* 应用高度：open 时渲染完整历史；persist 时写入 localStorage */
+    function applyStatusHeight(hgt, persist)
+    {
+        var maxH = stMaxHeight();
+        hgt = Math.max(ST_MIN_H, Math.min(maxH, Math.round(hgt)));
+        stHeight = hgt;
+
+        var bar = $('statusbar');
+        if (!bar) { return; }
+        bar.style.height = hgt + 'px';
+
+        var open = hgt > ST_MIN_H + 2;
+        var wrap = $('st-log-wrap');
+        if (wrap) { wrap.classList.toggle('hidden', !open); }
+        bar.classList.toggle('expanded', open);
+
+        if (open) { renderLogFull(); }
+
+        if (persist)
+        {
+            try { global.localStorage.setItem(ST_STORE_KEY, String(hgt)); } catch (e) { /* ignore */ }
+        }
+    }
+
+    function fallbackCopy(text, done)
+    {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { /* ignore */ }
+        document.body.removeChild(ta);
+        if (ok) { done(); }
+        else { setInfo('复制失败，请手动选中日志文本', true); }
+    }
+
+    function bindStatusbar()
+    {
+        var drag = $('st-drag');
+        if (!drag) { return; }
+
+        // 恢复上次高度
+        var saved = NaN;
+        try { saved = parseFloat(global.localStorage.getItem(ST_STORE_KEY)); } catch (e) { /* ignore */ }
+        if (isFinite(saved) && saved > ST_MIN_H + 2)
+        {
+            applyStatusHeight(saved, false);
+        }
+
+        var dragging = false;
+        var startY = 0;
+        var startH = 0;
+
+        drag.addEventListener('pointerdown', function (ev)
+        {
+            dragging = true;
+            startY = ev.clientY;
+            startH = stHeight;
+            try { drag.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+            ev.preventDefault();
+        });
+
+        drag.addEventListener('pointermove', function (ev)
+        {
+            if (!dragging) { return; }
+            // 向上拖 → 面板变高
+            applyStatusHeight(startH + (startY - ev.clientY), false);
+        });
+
+        function endDrag()
+        {
+            if (!dragging) { return; }
+            dragging = false;
+            applyStatusHeight(stHeight, true);   // 落定并记住
+        }
+
+        drag.addEventListener('pointerup', endDrag);
+        drag.addEventListener('pointercancel', endDrag);
+
+        // 双击：单行 ↔ 展开
+        drag.addEventListener('dblclick', function ()
+        {
+            applyStatusHeight(stHeight > ST_MIN_H + 2 ? ST_MIN_H : 220, true);
+        });
+
+        // 清空
+        var clr = $('st-clear');
+        if (clr)
+        {
+            clr.addEventListener('click', function ()
+            {
+                logBuf.length = 0;
+                var box = $('st-log');
+                if (box) { box.innerHTML = ''; }
+                setInfo('日志已清空', true);
+            });
+        }
+
+        // 复制全部
+        var cp = $('st-copy');
+        if (cp)
+        {
+            cp.addEventListener('click', function ()
+            {
+                if (!logBuf.length) { setInfo('暂无日志可复制', true); return; }
+                var arr = [];
+                for (var i = 0; i < logBuf.length; i++)
+                {
+                    arr.push(logBuf[i].time + '  ' + logBuf[i].text);
+                }
+                var txt = arr.join('\n');
+                function done() { setInfo('已复制 ' + logBuf.length + ' 条日志', true); }
+
+                if (global.navigator && navigator.clipboard && navigator.clipboard.writeText)
+                {
+                    navigator.clipboard.writeText(txt).then(done, function () { fallbackCopy(txt, done); });
+                }
+                else
+                {
+                    fallbackCopy(txt, done);
+                }
+            });
+        }
+
+        // 窗口尺寸变化时重新夹紧高度
+        global.addEventListener('resize', function ()
+        {
+            applyStatusHeight(stHeight, false);
+        });
+    }
+
+    /* 写状态栏单行；noLog 为 true 时只更新摘要、不记历史 */
+    function setInfo(text, noLog)
+    {
+        var el = $('st-info');
+        if (el) { el.textContent = text; }
+        if (!noLog) { pushLog(text); }
     }
 
     function setStats(fps, layerCount, triangles, points)
@@ -1883,6 +2112,7 @@
         bindViewOpts();
         bindMenus();
         bindColorPop();
+        bindStatusbar();
     }
 
     /* 强制重建树（签名缓存失效时用，如外部直接改了 layer 内部字段） */
@@ -2856,9 +3086,10 @@
         // 落点在画布左半 → A，右半 → B；单窗没有左右之分 → 公共场景（BOTH）
         function slotAt(clientX)
         {
+            // 单窗：落到公共槽位（与 addFiles 内部强制一致）
             if (self.settings.singleView)
             {
-                return 'BOTH';
+                return 'S';
             }
             if (!area)
             {
@@ -2879,7 +3110,7 @@
             if (zoneA)
             {
                 zoneA.style.width = single ? '100%' : '';
-                zoneA.classList.toggle('active', single ? slot === 'BOTH' : slot === 'A');
+                zoneA.classList.toggle('active', single ? (slot === 'BOTH' || slot === 'S') : slot === 'A');
             }
             if (zoneB)
             {

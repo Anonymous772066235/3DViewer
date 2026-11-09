@@ -279,7 +279,19 @@
         this.bindKeys();
 
         var self = this;
-        window.addEventListener('resize', function () { self.dirty = true; });
+
+        // 尺寸变化由事件驱动，不再每帧轮询
+        window.addEventListener('resize', function () { self.resize(); });
+
+        // ResizeObserver 覆盖非窗口级变化：侧栏拖拽、单双窗切换、面板折叠等
+        if (global.ResizeObserver)
+        {
+            this.sizeObserver = new global.ResizeObserver(function () { self.resize(); });
+            this.sizeObserver.observe(this.canvas);
+        }
+
+        // 首次测量（此时可能尚未布局完成，ResizeObserver 首帧回调会再修正一次）
+        this.resize();
 
         // 左下角视角立方体：点击面切换视角
         this.cubeCanvas = document.getElementById('axis-cube');
@@ -325,7 +337,7 @@
         function pickSlot(v, dft)
         {
             var s2 = (v || dft).toUpperCase();
-            return (s2 === 'A' || s2 === 'B' || s2 === 'BOTH') ? s2 : dft;
+            return (s2 === 'A' || s2 === 'B' || s2 === 'S' || s2 === 'BOTH') ? s2 : dft;
         }
 
         if (autoUrl)
@@ -1108,6 +1120,13 @@
         this.loading = true;
         this._abortLoad = false;
 
+        // 单窗模式没有左右之分：所有导入统一进公共槽位 S，
+        // 避免 BOTH 被展开成 A/B 两份、在树里变成两个图层。
+        if (this.settings.singleView)
+        {
+            slotMode = 'S';
+        }
+
         for (var i = 0; i < files.length; i++)
         {
             var file = files[i];
@@ -1592,7 +1611,9 @@
     {
         requestAnimationFrame(this.tickBound);
 
-        this.resize();
+        // 尺寸测量已改为事件驱动（window.resize / ResizeObserver）：
+        // 原先每帧读 clientWidth 会强制浏览器 flush 布局，144Hz 下每秒 144 次。
+        // updateRects 是纯计算，保留每帧调用以覆盖单双窗切换。
         this.updateRects();
 
         if (this.dirty)

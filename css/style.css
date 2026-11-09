@@ -666,15 +666,78 @@ button.mini {
 #statusbar {
     font-variant-numeric: tabular-nums;
     height: 24px;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-deep);
+    border-top: 1px solid var(--bg-soft);
+    color: var(--dim);
+    font-size: 12px;
+    overflow: hidden;
+}
+
+/* 顶部拖拽手柄：上下拖动改变日志面板高度 */
+#st-drag {
+    flex: 0 0 5px;
+    cursor: ns-resize;
+    background: transparent;
+}
+#st-drag:hover {
+    background: var(--accent);
+    opacity: .35;
+}
+
+/* 历史日志区（展开时显示） */
+#st-log-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    border-bottom: 1px solid var(--bg-soft);
+    overflow: hidden;
+}
+#st-log-wrap.hidden { display: none; }
+
+#st-log {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* 右侧留出按钮宽度，避免第一行文字被压住 */
+    padding: 2px 84px 4px 12px;
+    user-select: text;
+}
+
+/* 清空 / 复制：浮在日志区右上角，与第一行对齐 */
+#st-log-tools {
+    position: absolute;
+    top: 2px;
+    right: 8px;
+    display: flex;
+    gap: 2px;
+    background: var(--bg-deep);
+    padding-left: 6px;
+}
+
+.st-log-row {
+    display: flex;
+    gap: 10px;
+    line-height: 17px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.st-log-row > .t { flex: 0 0 auto; opacity: .55; }
+.st-log-row.err { color: #ff6b6b; }
+.st-log-row.warn { color: #e0a63c; }
+
+body.theme-light .st-log-row.err { color: #c62828; }
+body.theme-light .st-log-row.warn { color: #9a6a00; }
+
+/* 单行摘要（始终可见） */
+#st-line {
     flex: 0 0 24px;
     display: flex;
     align-items: center;
     gap: 18px;
     padding: 0 12px;
-    background: var(--bg-deep);
-    border-top: 1px solid var(--bg-soft);
-    color: var(--dim);
-    font-size: 12px;
 }
 
 #statusbar .grow { flex: 1 1 auto; }
