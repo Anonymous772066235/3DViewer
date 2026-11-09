@@ -1166,6 +1166,1091 @@
         });
     }
 
+    /* ---------------- 坐标变换 ---------------- */
+
+    var xformInputs = null;
+
+    function fmtMat(v)
+    {
+        if (!isFinite(v)) { return '0'; }
+        // 阈值取 toFixed(6) 的半个最小单位：否则 -1e-8 会先格式化成 "-0.000000"，
+        // 去掉尾零后留下刺眼的 "-0"
+        if (Math.abs(v) < 5e-7) { return '0'; }
+        var s = v.toFixed(6);
+        s = s.replace(/0+$/, '').replace(/\.$/, '');
+        if (s === '-0' || s === '') { return '0'; }
+        return s;
+    }
+
+    /* 每行 4 个、空格分隔，便于粘贴回表格 */
+    function matToText(m)
+    {
+        var lines = [];
+        for (var r = 0; r < 4; r++)
+        {
+            var row = [];
+            for (var c = 0; c < 4; c++) { row.push(fmtMat(m[r * 4 + c])); }
+            lines.push(row.join(' '));
+        }
+        return lines.join('\n');
+    }
+
+    function textToMat(txt)
+    {
+        var parts = String(txt || '').split(/[\s,;]+/).filter(function (x) { return x !== ''; });
+        if (parts.length !== 16) { return null; }
+        var m = new Float64Array(16);
+        for (var i = 0; i < 16; i++)
+        {
+            var v = parseFloat(parts[i]);
+            if (!isFinite(v)) { return null; }
+            m[i] = v;
+        }
+        return m;
+    }
+
+    function identityMat()
+    {
+        var m = new Float64Array(16);
+        m[0] = m[5] = m[10] = m[15] = 1;
+        return m;
+    }
+
+    /* 4×4 求逆：转成列主序 → 伴随矩阵法 → 转回行主序 */
+    function mat4Invert(m)
+    {
+        // 转置（行主序 -> 列主序）
+        var a = [
+            m[0], m[4], m[8],  m[12],
+            m[1], m[5], m[9],  m[13],
+            m[2], m[6], m[10], m[14],
+            m[3], m[7], m[11], m[15]
+        ];
+
+        var a00 = a[0],  a01 = a[1],  a02 = a[2],  a03 = a[3];
+        var a10 = a[4],  a11 = a[5],  a12 = a[6],  a13 = a[7];
+        var a20 = a[8],  a21 = a[9],  a22 = a[10], a23 = a[11];
+        var a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+
+        var b00 = a00 * a11 - a01 * a10;
+        var b01 = a00 * a12 - a02 * a10;
+        var b02 = a00 * a13 - a03 * a10;
+        var b03 = a01 * a12 - a02 * a11;
+        var b04 = a01 * a13 - a03 * a11;
+        var b05 = a02 * a13 - a03 * a12;
+        var b06 = a20 * a31 - a21 * a30;
+        var b07 = a20 * a32 - a22 * a30;
+        var b08 = a20 * a33 - a23 * a30;
+        var b09 = a21 * a32 - a22 * a31;
+        var b10 = a21 * a33 - a23 * a31;
+        var b11 = a22 * a33 - a23 * a32;
+
+        var det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+        if (!det || !isFinite(det))
+        {
+            return null;
+        }
+        var id = 1 / det;
+
+        var o = [
+            ( a11 * b11 - a12 * b10 + a13 * b09) * id,
+            (-a01 * b11 + a02 * b10 - a03 * b09) * id,
+            ( a31 * b05 - a32 * b04 + a33 * b03) * id,
+            (-a21 * b05 + a22 * b04 - a23 * b03) * id,
+            (-a10 * b11 + a12 * b08 - a13 * b07) * id,
+            ( a00 * b11 - a02 * b08 + a03 * b07) * id,
+            (-a30 * b05 + a32 * b02 - a33 * b01) * id,
+            ( a20 * b05 - a22 * b02 + a23 * b01) * id,
+            ( a10 * b10 - a11 * b08 + a13 * b06) * id,
+            (-a00 * b10 + a01 * b08 - a03 * b06) * id,
+            ( a30 * b04 - a31 * b02 + a33 * b00) * id,
+            (-a20 * b04 + a21 * b02 - a23 * b00) * id,
+            (-a10 * b09 + a11 * b07 - a12 * b06) * id,
+            ( a00 * b09 - a01 * b07 + a02 * b06) * id,
+            (-a30 * b03 + a31 * b01 - a32 * b00) * id,
+            ( a20 * b03 - a21 * b01 + a22 * b00) * id
+        ];
+
+        // 转回行主序
+        return new Float64Array([
+            o[0], o[4], o[8],  o[12],
+            o[1], o[5], o[9],  o[13],
+            o[2], o[6], o[10], o[14],
+            o[3], o[7], o[11], o[15]
+        ]);
+    }
+
+    function readXformMat()
+    {
+        if (!xformInputs) { return null; }
+        var m = new Float64Array(16);
+        for (var i = 0; i < 16; i++)
+        {
+            var v = parseFloat(xformInputs[i].value);
+            if (!isFinite(v))
+            {
+                xformInfo('第 ' + (i + 1) + ' 个值无效', true);
+                return null;
+            }
+            m[i] = v;
+        }
+        return m;
+    }
+
+    function writeXformMat(m)
+    {
+        if (!xformInputs) { return; }
+        for (var i = 0; i < 16; i++) { xformInputs[i].value = fmtMat(m[i]); }
+    }
+
+    function xformInfo(text, isErr)
+    {
+        var el = $('xform-info');
+        if (!el) { return; }
+        el.textContent = text || '';
+        el.className = 'xform-info' + (isErr ? ' err' : ' ok');
+    }
+
+    function buildXformGrid()
+    {
+        var box = $('xform-grid');
+        if (!box || xformInputs) { return; }
+        xformInputs = [];
+        for (var i = 0; i < 16; i++)
+        {
+            var inp = document.createElement('input');
+            inp.type = 'text';
+            inp.spellcheck = false;
+            inp.autocomplete = 'off';
+            inp.title = 'm' + Math.floor(i / 4) + Math.floor(i % 4);
+            box.appendChild(inp);
+            xformInputs.push(inp);
+        }
+    }
+
+    /* 数值 bbox（与 data.bbox 的 {min,max} 结构一致） */
+    function bboxOfPositions(pos)
+    {
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+        for (var i = 0; i < pos.length; i += 3)
+        {
+            var x = pos[i], y = pos[i + 1], z = pos[i + 2];
+            if (x < mnx) { mnx = x; }
+            if (y < mny) { mny = y; }
+            if (z < mnz) { mnz = z; }
+            if (x > mxx) { mxx = x; }
+            if (y > mxy) { mxy = y; }
+            if (z > mxz) { mxz = z; }
+        }
+        if (!isFinite(mnx)) { return null; }
+        return { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] };
+    }
+
+    /* 对一组 XYZ 顶点施加 4×4（行主序，列向量） */
+    function xformPositions(arr, m)
+    {
+        for (var i = 0; i < arr.length; i += 3)
+        {
+            var x = arr[i], y = arr[i + 1], z = arr[i + 2];
+            arr[i]     = m[0] * x + m[1] * y + m[2] * z + m[3];
+            arr[i + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
+            arr[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
+        }
+    }
+
+    /* 法向只受 3×3 部分影响，变换后归一化 */
+    function xformNormals(arr, m)
+    {
+        for (var i = 0; i < arr.length; i += 3)
+        {
+            var x = arr[i], y = arr[i + 1], z = arr[i + 2];
+            var nx = m[0] * x + m[1] * y + m[2] * z;
+            var ny = m[4] * x + m[5] * y + m[6] * z;
+            var nz = m[8] * x + m[9] * y + m[10] * z;
+            var len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+            arr[i] = nx / len;
+            arr[i + 1] = ny / len;
+            arr[i + 2] = nz / len;
+        }
+    }
+
+    /* 把矩阵应用到图层：改 data + 重建 GPU */
+    function applyXformToLayer(m, label)
+    {
+        var layer = app ? app.getSelected() : null;
+        if (!layer || !layer.data || !layer.data.positions)
+        {
+            xformInfo('请先在场景树里选中图层', true);
+            return false;
+        }
+
+        var d = layer.data;
+        var before = bboxOfPositions(d.positions);
+
+        xformPositions(d.positions, m);
+        if (d.uniqVerts) { xformPositions(d.uniqVerts, m); }
+        if (d.normals) { xformNormals(d.normals, m); }
+
+        d.bbox = bboxOfPositions(d.positions) || d.bbox;
+
+        // GPU 缓冲依赖顶点，必须重建
+        if (app.renderer)
+        {
+            if (layer.gpu) { app.renderer.releaseLayer(layer); }
+            layer.gpu = null;
+            app.renderer.uploadLayer(layer);
+        }
+
+        app.markDirty();
+        renderProps();
+
+        var after = d.bbox;
+        var msg = label + '：' + layer.name + '\n';
+        if (before && after)
+        {
+            msg += 'X [' + before.min[0].toFixed(2) + ', ' + before.max[0].toFixed(2) + '] → [' +
+                   after.min[0].toFixed(2) + ', ' + after.max[0].toFixed(2) + ']\n';
+            msg += 'Y [' + before.min[1].toFixed(2) + ', ' + before.max[1].toFixed(2) + '] → [' +
+                   after.min[1].toFixed(2) + ', ' + after.max[1].toFixed(2) + ']\n';
+            msg += 'Z [' + before.min[2].toFixed(2) + ', ' + before.max[2].toFixed(2) + '] → [' +
+                   after.min[2].toFixed(2) + ', ' + after.max[2].toFixed(2) + ']';
+        }
+        xformInfo(msg, false);
+        setInfo(label + '已应用到 ' + layer.name);
+        return true;
+    }
+
+    function openXformDialog()
+    {
+        buildXformGrid();
+        var layer = app ? app.getSelected() : null;
+        $('xform-layer').textContent = layer ? (layer.name + '（' + layer.kind + '）') : '（未选中）';
+        if (xformInputs && xformInputs[0].value === '') { writeXformMat(identityMat()); }
+        regFillSelects();
+        icpFillSelects();
+        $('xform').classList.remove('hidden');
+        xformInfo('');
+    }
+
+    /* ---------------- 手动点对配准（Horn 四元数法） ---------------- */
+
+    var regMode = false;          // 是否处于选点状态
+    var regPairs = [];            // [{ s: 目标点(移动), d: 参考点(固定) }]
+    var regPendingRef = null;     // 已选的参考点，等待对应目标点
+
+    function fmt3p(p)
+    {
+        return p[0].toFixed(2) + ', ' + p[1].toFixed(2) + ', ' + p[2].toFixed(2);
+    }
+
+    /* 4×4 对称矩阵的最大特征值对应的特征向量（Jacobi 旋转法） */
+    function jacobiLargestEigenVec(Nin)
+    {
+        var n = 4;
+        var A = [];
+        var V = [];
+        var i, j, k, p, q;
+
+        for (i = 0; i < n; i++)
+        {
+            A.push([Nin[i][0], Nin[i][1], Nin[i][2], Nin[i][3]]);
+            var row = [0, 0, 0, 0];
+            row[i] = 1;
+            V.push(row);
+        }
+
+        for (var sweep = 0; sweep < 60; sweep++)
+        {
+            var off = 0;
+            for (i = 0; i < n; i++)
+            {
+                for (j = i + 1; j < n; j++) { off += A[i][j] * A[i][j]; }
+            }
+            if (off < 1e-26) { break; }
+
+            for (p = 0; p < n - 1; p++)
+            {
+                for (q = p + 1; q < n; q++)
+                {
+                    if (Math.abs(A[p][q]) < 1e-20) { continue; }
+
+                    var theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+                    var t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+                    var c = 1 / Math.sqrt(t * t + 1);
+                    var sn = t * c;
+
+                    for (k = 0; k < n; k++)
+                    {
+                        var akp = A[k][p], akq = A[k][q];
+                        A[k][p] = c * akp - sn * akq;
+                        A[k][q] = sn * akp + c * akq;
+                    }
+                    for (k = 0; k < n; k++)
+                    {
+                        var apk = A[p][k], aqk = A[q][k];
+                        A[p][k] = c * apk - sn * aqk;
+                        A[q][k] = sn * apk + c * aqk;
+                    }
+                    for (k = 0; k < n; k++)
+                    {
+                        var vkp = V[k][p], vkq = V[k][q];
+                        V[k][p] = c * vkp - sn * vkq;
+                        V[k][q] = sn * vkp + c * vkq;
+                    }
+                }
+            }
+        }
+
+        var bi = 0;
+        for (i = 1; i < n; i++) { if (A[i][i] > A[bi][bi]) { bi = i; } }
+
+        return [V[0][bi], V[1][bi], V[2][bi], V[3][bi]];
+    }
+
+    /* 求把 src 对齐到 dst 的刚体变换（4×4 行主序）
+     * pairs: [{ s: [x,y,z], d: [x,y,z] }]
+     * 用 Horn 的四元数法：最小化 sum |R·s + t − d|² */
+    function solveRigid(pairs)
+    {
+        var n = pairs.length;
+        if (n < 3) { return null; }
+
+        var sc = [0, 0, 0], dc = [0, 0, 0];
+        for (var i = 0; i < n; i++)
+        {
+            sc[0] += pairs[i].s[0]; sc[1] += pairs[i].s[1]; sc[2] += pairs[i].s[2];
+            dc[0] += pairs[i].d[0]; dc[1] += pairs[i].d[1]; dc[2] += pairs[i].d[2];
+        }
+        for (var k = 0; k < 3; k++) { sc[k] /= n; dc[k] /= n; }
+
+        // 协方差 S = Σ (s − sc)(d − dc)ᵀ
+        var S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        for (i = 0; i < n; i++)
+        {
+            var a0 = pairs[i].s[0] - sc[0], a1 = pairs[i].s[1] - sc[1], a2 = pairs[i].s[2] - sc[2];
+            var b0 = pairs[i].d[0] - dc[0], b1 = pairs[i].d[1] - dc[1], b2 = pairs[i].d[2] - dc[2];
+            S[0][0] += a0 * b0; S[0][1] += a0 * b1; S[0][2] += a0 * b2;
+            S[1][0] += a1 * b0; S[1][1] += a1 * b1; S[1][2] += a1 * b2;
+            S[2][0] += a2 * b0; S[2][1] += a2 * b1; S[2][2] += a2 * b2;
+        }
+
+        var Sxx = S[0][0], Sxy = S[0][1], Sxz = S[0][2];
+        var Syx = S[1][0], Syy = S[1][1], Syz = S[1][2];
+        var Szx = S[2][0], Szy = S[2][1], Szz = S[2][2];
+
+        // Horn 的对称 4×4 矩阵
+        var N = [
+            [ Sxx + Syy + Szz, Syz - Szy,       Szx - Sxz,       Sxy - Syx ],
+            [ Syz - Szy,       Sxx - Syy - Szz, Sxy + Syx,       Szx + Sxz ],
+            [ Szx - Sxz,       Sxy + Syx,      -Sxx + Syy - Szz, Syz + Szy ],
+            [ Sxy - Syx,       Szx + Sxz,       Syz + Szy,      -Sxx - Syy + Szz ]
+        ];
+
+        // Jacobi 特征分解：4×4 对称矩阵，确定性求解，避免幂迭代不收敛
+        var best = jacobiLargestEigenVec(N);
+
+        if (!best) { return null; }
+
+        var w = best[0], x = best[1], y = best[2], z = best[3];
+        var R = [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
+            [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)]
+        ];
+
+        var t = [
+            dc[0] - (R[0][0] * sc[0] + R[0][1] * sc[1] + R[0][2] * sc[2]),
+            dc[1] - (R[1][0] * sc[0] + R[1][1] * sc[1] + R[1][2] * sc[2]),
+            dc[2] - (R[2][0] * sc[0] + R[2][1] * sc[1] + R[2][2] * sc[2])
+        ];
+
+        var m = new Float64Array(16);
+        m[0] = R[0][0]; m[1] = R[0][1]; m[2] = R[0][2];  m[3] = t[0];
+        m[4] = R[1][0]; m[5] = R[1][1]; m[6] = R[1][2];  m[7] = t[1];
+        m[8] = R[2][0]; m[9] = R[2][1]; m[10] = R[2][2]; m[11] = t[2];
+        m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
+
+        // 残差 RMS
+        var rms = 0;
+        for (i = 0; i < n; i++)
+        {
+            var p = pairs[i].s;
+            var ex = (R[0][0] * p[0] + R[0][1] * p[1] + R[0][2] * p[2] + t[0]) - pairs[i].d[0];
+            var ey = (R[1][0] * p[0] + R[1][1] * p[1] + R[1][2] * p[2] + t[1]) - pairs[i].d[1];
+            var ez = (R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2] + t[2]) - pairs[i].d[2];
+            rms += ex * ex + ey * ey + ez * ez;
+        }
+        rms = Math.sqrt(rms / n);
+
+        return { mat: m, rms: rms };
+    }
+
+    function fillLayerSelects(refSel, dstSel)
+    {
+        if (!refSel || !dstSel || !app) { return; }
+
+        var cands = [];
+        for (var i = 0; i < app.layers.length; i++)
+        {
+            var L = app.layers[i];
+            if (L.visible && (L.kind === 'mesh' || L.kind === 'points')) { cands.push(L); }
+        }
+
+        function fill(sel, keepValue)
+        {
+            sel.innerHTML = '';
+            for (var k = 0; k < cands.length; k++)
+            {
+                var o = document.createElement('option');
+                o.value = String(cands[k].id);
+                o.textContent = cands[k].name;
+                sel.appendChild(o);
+            }
+            if (keepValue) { sel.value = keepValue; }
+        }
+
+        var prevRef = refSel.value;
+        var prevDst = dstSel.value;
+        fill(refSel, prevRef);
+        fill(dstSel, prevDst);
+
+        // 默认：目标层 = 当前选中层；参考层 = 另一个
+        var sel = app.getSelected();
+        if (sel)
+        {
+            dstSel.value = String(sel.id);
+            for (var m = 0; m < cands.length; m++)
+            {
+                if (cands[m].id !== sel.id) { refSel.value = String(cands[m].id); break; }
+            }
+        }
+    }
+
+    function regFillSelects() { fillLayerSelects($('reg-ref'), $('reg-dst')); }
+    function icpFillSelects() { fillLayerSelects($('icp-ref'), $('icp-dst')); }
+
+    function regRender()
+    {
+        var el = $('reg-list');
+        if (!el) { return; }
+        var lines = [];
+        for (var i = 0; i < regPairs.length; i++)
+        {
+            lines.push((i + 1) + '. 目标 (' + fmt3p(regPairs[i].s) + ') → 参考 (' + fmt3p(regPairs[i].d) + ')');
+        }
+        if (regPendingRef)
+        {
+            lines.push('● 参考点 (' + fmt3p(regPendingRef) + ')，请点击目标层上的对应位置');
+        }
+        el.textContent = lines.length ? lines.join('\n') : '尚未选点';
+    }
+
+    function regPick(cx, cy)
+    {
+        if (!app || !app.rayPick) { return; }
+        var hit = app.rayPick(cx, cy);
+        if (!hit || !hit.layer) { setInfo('未命中数据'); return; }
+
+        var refId = parseInt($('reg-ref').value, 10);
+        var dstId = parseInt($('reg-dst').value, 10);
+
+        if (hit.layer.id === refId)
+        {
+            regPendingRef = hit.pos.slice();
+            setInfo('参考点已选：' + fmt3p(regPendingRef) + '，请点击目标层的对应位置');
+            regRender();
+            return;
+        }
+
+        if (hit.layer.id === dstId)
+        {
+            if (!regPendingRef)
+            {
+                setInfo('请先点击参考层上的点');
+                return;
+            }
+            regPairs.push({ s: hit.pos.slice(), d: regPendingRef });
+            regPendingRef = null;
+            setInfo('已配对 ' + regPairs.length + ' 组' + (regPairs.length >= 3 ? '，可点「计算矩阵」' : '，至少需要 3 组'));
+            regRender();
+            return;
+        }
+
+        setInfo('点到了其它图层，请点在参考层或目标层上');
+    }
+
+    function regSolve()
+    {
+        if (regPairs.length < 3)
+        {
+            xformInfo('至少需要 3 对点（当前 ' + regPairs.length + ' 对）', true);
+            return;
+        }
+        var res = solveRigid(regPairs);
+        if (!res)
+        {
+            xformInfo('求解失败：点对可能共线或重合', true);
+            return;
+        }
+        writeXformMat(res.mat);
+        xformInfo('点对配准完成：' + regPairs.length + ' 对，RMS = ' + res.rms.toFixed(4) +
+            '\n点「应用」把矩阵作用到目标图层', false);
+        setInfo('配准矩阵已计算（RMS ' + res.rms.toFixed(4) + '）');
+    }
+
+    var regCanvasBound = false;
+
+    function regBindCanvas()
+    {
+        var cv = document.getElementById('gl');
+        if (!cv || regCanvasBound) { return; }
+        regCanvasBound = true;
+
+        var down = null;
+
+        cv.addEventListener('pointerdown', function (e)
+        {
+            if (!regMode || e.button !== 0) { return; }
+            down = { x: e.clientX, y: e.clientY };
+        }, true);
+
+        cv.addEventListener('pointerup', function (e)
+        {
+            if (!regMode || !down) { return; }
+            var dx = e.clientX - down.x;
+            var dy = e.clientY - down.y;
+            down = null;
+            // 位移超过 4px 视为旋转，不取点
+            if (dx * dx + dy * dy > 16) { return; }
+            regPick(e.clientX, e.clientY);
+        }, true);
+    }
+
+    /* ---------------- ICP 配准（Symmetric） ---------------- */
+
+    function findLayerById(id)
+    {
+        if (!app) { return null; }
+        for (var i = 0; i < app.layers.length; i++)
+        {
+            if (app.layers[i].id === id) { return app.layers[i]; }
+        }
+        return null;
+    }
+
+    function clampInt(v, lo, hi, dft)
+    {
+        var n = parseInt(v, 10);
+        if (!isFinite(n)) { return dft; }
+        return Math.max(lo, Math.min(hi, n));
+    }
+
+    /* 从图层取出配准用的点集与法向 */
+    function icpSample(lay)
+    {
+        var d = lay.data;
+        if (!d || !d.positions) { return null; }
+
+        if (lay.kind === 'points')
+        {
+            return {
+                pos: d.positions,
+                nrm: d.normals || null,
+                count: d.count || Math.floor(d.positions.length / 3)
+            };
+        }
+
+        // 网格：优先用去重顶点 + 顶点法向
+        if (d.uniqVerts && d.remap && d.vertCount)
+        {
+            var n1 = global.MV.icp.computeVertexNormals(d.positions, d.remap, d.vertCount);
+            return { pos: d.uniqVerts, nrm: n1.normals, count: d.vertCount };
+        }
+
+        var n2 = global.MV.icp.computeVertexNormals(d.positions, null, null);
+        return { pos: d.positions, nrm: n2.normals, count: n2.count };
+    }
+
+    function icpRun()
+    {
+        if (!app || !global.MV.icp) { return; }
+
+        var refSel = $('icp-ref');
+        var dstSel = $('icp-dst');
+        var refId = parseInt(refSel ? refSel.value : '', 10);
+        var dstId = parseInt(dstSel ? dstSel.value : '', 10);
+
+        if (!isFinite(refId) || !isFinite(dstId))
+        {
+            xformInfo('请先选择参考层与目标层', true);
+            return;
+        }
+        if (refId === dstId)
+        {
+            xformInfo('参考层与目标层不能是同一个图层', true);
+            return;
+        }
+
+        var refLay = findLayerById(refId);
+        var dstLay = findLayerById(dstId);
+        if (!refLay || !dstLay)
+        {
+            xformInfo('图层无效', true);
+            return;
+        }
+
+        var fixed = icpSample(refLay);
+        var moving = icpSample(dstLay);
+        if (!fixed || !moving)
+        {
+            xformInfo('图层缺少可配准的数据', true);
+            return;
+        }
+
+        var maxIter = clampInt($('icp-iter').value, 1, 500, 40);
+        var stride = clampInt($('icp-stride').value, 1, 64, 4);
+        var thresh = parseFloat($('icp-thresh').value);
+        if (!isFinite(thresh)) { thresh = 0.3; }
+
+        var info = $('icp-info');
+        var solver = null;
+        try
+        {
+            solver = global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm,
+                { maxIter: maxIter, stride: stride, normalThresh: thresh, tol: 1e-7 });
+        }
+        catch (e)
+        {
+            if (info) { info.textContent = '出错：' + e.message; }
+            xformInfo('ICP 出错：' + e.message, true);
+            return;
+        }
+
+        if (!solver)
+        {
+            if (info) { info.textContent = '配准失败：数据不足'; }
+            xformInfo('ICP 失败', true);
+            return;
+        }
+
+        if (info) { info.textContent = '开始…'; }
+        setInfo('ICP 计算中…');
+
+        var t0 = Date.now();
+
+        // 每帧 2 轮：单轮约几十毫秒，2 轮仍在浏览器可响应范围内
+        function tick()
+        {
+            var r = null;
+            for (var k = 0; k < 2; k++)
+            {
+                r = solver.step();
+                if (r.done) { break; }
+            }
+
+            if (!r.done)
+            {
+                if (info)
+                {
+                    info.textContent = '迭代 ' + r.iters + ' / ' + maxIter +
+                        '   RMS ' + r.rms.toFixed(4) + '   点 ' + r.used;
+                }
+                setTimeout(tick, 0);
+                return;
+            }
+
+            var res = solver.result();
+            var dt = Date.now() - t0;
+
+            writeXformMat(res.mat);
+
+            var txt = '迭代 ' + res.iters + ' 次，RMS = ' + res.rms.toFixed(4) +
+                      '\n参与点 ' + res.used + '，' +
+                      (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
+                      '\n耗时 ' + dt + ' ms';
+            if (info) { info.textContent = txt; }
+
+            xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
+                '\n点「应用」把矩阵作用到「' + dstLay.name + '」', res.rms > 1);
+            setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
+        }
+
+        setTimeout(tick, 30);
+    }
+
+    /* ---------------- 对称翻转检查 ---------------- */
+
+    var SYM_VARIANTS = [
+        { name: '原始',   m: [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1] },
+        { name: '镜像X',  m: [-1, 0, 0, 0, 0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1] },
+        { name: '镜像Y',  m: [1, 0, 0, 0,  0, -1, 0, 0, 0, 0, 1, 0,  0, 0, 0, 1] },
+        { name: '镜像Z',  m: [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, -1, 0, 0, 0, 0, 1] }
+    ];
+
+    function mat4Mul(a, b)
+    {
+        var o = new Float64Array(16);
+        for (var r = 0; r < 4; r++)
+        {
+            for (var c = 0; c < 4; c++)
+            {
+                var sum = 0;
+                for (var k = 0; k < 4; k++) { sum += a[r * 4 + k] * b[k * 4 + c]; }
+                o[r * 4 + c] = sum;
+            }
+        }
+        return o;
+    }
+
+    function xformPoints(src, m, out)
+    {
+        for (var i = 0; i < src.length; i += 3)
+        {
+            var x = src[i], y = src[i + 1], z = src[i + 2];
+            out[i]     = m[0] * x + m[1] * y + m[2] * z + m[3];
+            out[i + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
+            out[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
+        }
+    }
+
+    /* 对目标层做 X/Y/Z 镜像后各跑一次 ICP，比较 RMS 判断是否为镜像件。
+     * 原理：真实手性正确的数据，原始变体应当最优；若某个镜像变体明显更好，
+     * 说明数据本身是镜像出来的（Geomagic 的「翻转检查」思路）。 */
+    function symRun()
+    {
+        if (!app || !global.MV.icp) { return; }
+
+        var refId = parseInt($('icp-ref').value, 10);
+        var dstId = parseInt($('icp-dst').value, 10);
+        if (!isFinite(refId) || !isFinite(dstId))
+        {
+            xformInfo('请先在上方 ICP 区块选择参考层与目标层', true);
+            return;
+        }
+        if (refId === dstId)
+        {
+            xformInfo('参考层与目标层不能相同', true);
+            return;
+        }
+
+        var fixed = icpSample(findLayerById(refId));
+        var moving = icpSample(findLayerById(dstId));
+        if (!fixed || !moving)
+        {
+            xformInfo('图层缺少可配准的数据', true);
+            return;
+        }
+
+        // 完全沿用 ICP 区块的参数，不再暗中改动，避免行为与预期不符
+        var maxIter = clampInt($('icp-iter').value, 1, 200, 40);
+        var stride = clampInt($('icp-stride').value, 1, 64, 4);
+
+        // 镜像会反转手性，源法向与目标法向大面积反向；
+        // 若沿用法向一致性阈值会把对应点几乎全剔掉（该变体直接失败），
+        // 因此镜像变体不做方向筛选。
+        var thresh = -2;
+
+        var info = $('sym-info');
+        var results = [];
+        var vi = 0;
+        var solver = null;
+        var cur = null;
+        var t0 = Date.now();
+
+        function finish()
+        {
+            var base = null;
+            var best = null;
+            var i;
+
+            for (i = 0; i < results.length; i++)
+            {
+                if (results[i].name === '原始') { base = results[i]; }
+                if (!best || results[i].rms < best.rms) { best = results[i]; }
+            }
+
+            var out = [];
+            for (i = 0; i < results.length; i++)
+            {
+                var r = results[i];
+                var val = (r.rms === Infinity) ? '失败  ' : r.rms.toFixed(4);
+                out.push(r.name + '  ' + val + (r === best ? '   ← 最小' : ''));
+            }
+
+            var mirrored = !!(base && best && best.name !== '原始' &&
+                              base.rms !== Infinity && best.rms < base.rms * 0.5);
+
+            var verdict;
+            if (!base || base.rms === Infinity)
+            {
+                verdict = '原始数据配准失败，无法判断';
+            }
+            else if (mirrored)
+            {
+                verdict = '疑似镜像件：' + best.name + ' 的 RMS 仅为原始的 ' +
+                          (best.rms / base.rms * 100).toFixed(1) + '%';
+            }
+            else
+            {
+                verdict = '未发现镜像特征（原始 RMS ' + base.rms.toFixed(4) + '）';
+            }
+
+            out.push('');
+            out.push(verdict);
+            out.push('（' + SYM_VARIANTS.length + ' 个变体 × 最多 ' + maxIter + ' 轮，' +
+                     (Date.now() - t0) + ' ms）');
+            if (info) { info.textContent = out.join('\n'); }
+
+            xformInfo(verdict, mirrored);
+            setInfo(verdict);
+
+            if (best && best.mat) { writeXformMat(best.mat); }
+        }
+
+        function tick()
+        {
+            // 还没开始当前变体：准备点集与求解器
+            if (!solver)
+            {
+                if (vi >= SYM_VARIANTS.length) { finish(); return; }
+
+                cur = SYM_VARIANTS[vi];
+                var src = new Float32Array(moving.pos.length);
+                xformPoints(moving.pos, cur.m, src);
+
+                var nrm = null;
+                if (moving.nrm)
+                {
+                    nrm = new Float32Array(moving.nrm.length);
+                    xformPoints(moving.nrm, cur.m, nrm);
+                }
+
+                try
+                {
+                    solver = global.MV.icp.createSolver(src, nrm, fixed.pos, fixed.nrm,
+                        { maxIter: maxIter, stride: stride, normalThresh: thresh, tol: 1e-7 });
+                }
+                catch (e)
+                {
+                    solver = null;
+                }
+
+                if (!solver)
+                {
+                    results.push({ name: cur.name, mirror: cur.m, rms: Infinity, iters: 0, mat: null });
+                    solver = null;
+                    vi++;
+                    setTimeout(tick, 0);
+                    return;
+                }
+            }
+
+            var r = solver.step();
+
+            if (r.done)
+            {
+                var res = solver.result();
+                results.push({
+                    name: cur.name,
+                    mirror: cur.m,
+                    rms: res.rms,
+                    iters: res.iters,
+                    mat: mat4Mul(res.mat, cur.m)
+                });
+                solver = null;
+                cur = null;
+                vi++;
+            }
+            else if (info)
+            {
+                info.textContent = '变体 ' + (vi + 1) + '/' + SYM_VARIANTS.length +
+                    ' ' + cur.name + '   迭代 ' + r.iters + '/' + maxIter +
+                    '   RMS ' + r.rms.toFixed(3);
+            }
+
+            setTimeout(tick, 0);
+        }
+
+        if (info) { info.textContent = '准备中…'; }
+        setInfo('对称检查中…');
+        setTimeout(tick, 30);
+    }
+
+    function bindXform()
+    {
+        buildXformGrid();
+
+        var open = $('btn-xform');
+        if (open) { open.addEventListener('click', openXformDialog); }
+
+        var close = $('xform-close');
+        if (close)
+        {
+            close.addEventListener('click', function () { $('xform').classList.add('hidden'); });
+        }
+
+        // 点遮罩空白处关闭
+        var dlg = $('xform');
+        if (dlg)
+        {
+            dlg.addEventListener('click', function (ev)
+            {
+                if (ev.target === dlg) { dlg.classList.add('hidden'); }
+            });
+        }
+
+        var idBtn = $('xform-identity');
+        if (idBtn)
+        {
+            idBtn.addEventListener('click', function ()
+            {
+                writeXformMat(identityMat());
+                xformInfo('已重置为单位阵');
+            });
+        }
+
+        var cpBtn = $('xform-copy');
+        if (cpBtn)
+        {
+            cpBtn.addEventListener('click', function ()
+            {
+                var m = readXformMat();
+                if (!m) { return; }
+                var txt = matToText(m);
+                function done() { xformInfo('已复制 4×4 矩阵到剪贴板'); }
+                if (global.navigator && navigator.clipboard && navigator.clipboard.writeText)
+                {
+                    navigator.clipboard.writeText(txt).then(done, function () { fallbackCopy(txt, done); });
+                }
+                else
+                {
+                    fallbackCopy(txt, done);
+                }
+            });
+        }
+
+        var pstBtn = $('xform-paste');
+        if (pstBtn)
+        {
+            pstBtn.addEventListener('click', function ()
+            {
+                if (!(global.navigator && navigator.clipboard && navigator.clipboard.readText))
+                {
+                    xformInfo('浏览器不支持读取剪贴板，请手动粘贴到输入框', true);
+                    return;
+                }
+                navigator.clipboard.readText().then(function (txt)
+                {
+                    var m = textToMat(txt);
+                    if (!m) { xformInfo('剪贴板内容不是 16 个数', true); return; }
+                    writeXformMat(m);
+                    xformInfo('已从剪贴板读入矩阵');
+                }, function ()
+                {
+                    xformInfo('读取剪贴板被拒绝，请手动粘贴', true);
+                });
+            });
+        }
+
+        var invBtn = $('xform-inv');
+        if (invBtn)
+        {
+            invBtn.addEventListener('click', function ()
+            {
+                var m = readXformMat();
+                if (!m) { return; }
+                var inv = mat4Invert(m);
+                if (!inv)
+                {
+                    xformInfo('矩阵不可逆（行列式为 0）', true);
+                    return;
+                }
+                if (applyXformToLayer(inv, '反变换'))
+                {
+                    xformInfo('已应用逆矩阵（回到变换前）\n\n' + matToText(inv), false);
+                }
+            });
+        }
+
+        var apBtn = $('xform-apply');
+        if (apBtn)
+        {
+            apBtn.addEventListener('click', function ()
+            {
+                var m = readXformMat();
+                if (!m) { return; }
+                applyXformToLayer(m, '变换');
+            });
+        }
+
+        // ---- 配准 Tab 切换 ----
+        var tabBtns = document.querySelectorAll('.xform-tab');
+        for (var ti = 0; ti < tabBtns.length; ti++)
+        {
+            (function (btn)
+            {
+                btn.addEventListener('click', function ()
+                {
+                    var name = btn.getAttribute('data-pane');
+                    var i2;
+                    var allTabs = document.querySelectorAll('.xform-tab');
+                    for (i2 = 0; i2 < allTabs.length; i2++)
+                    {
+                        allTabs[i2].classList.toggle('active', allTabs[i2] === btn);
+                    }
+                    var panes = document.querySelectorAll('.xform-pane');
+                    for (i2 = 0; i2 < panes.length; i2++)
+                    {
+                        panes[i2].classList.toggle('active',
+                            panes[i2].getAttribute('data-pane') === name);
+                    }
+                });
+            })(tabBtns[ti]);
+        }
+
+        // ---- 点对配准 ----
+        regBindCanvas();
+
+        var regStart = $('reg-start');
+        if (regStart)
+        {
+            regStart.addEventListener('click', function ()
+            {
+                regMode = !regMode;
+                regPendingRef = null;
+                regStart.textContent = regMode ? '停止选点' : '开始选点';
+                setInfo(regMode
+                    ? '配准选点：先点参考层，再点目标层的对应位置（拖动仍可旋转）'
+                    : '已停止选点');
+                regRender();
+            });
+        }
+
+        var regClear = $('reg-clear');
+        if (regClear)
+        {
+            regClear.addEventListener('click', function ()
+            {
+                regPairs.length = 0;
+                regPendingRef = null;
+                regRender();
+                setInfo('已清空点对');
+            });
+        }
+
+        var regSolveBtn = $('reg-solve');
+        if (regSolveBtn) { regSolveBtn.addEventListener('click', regSolve); }
+
+        // ---- ICP ----
+        var icpBtn = $('icp-run');
+        if (icpBtn) { icpBtn.addEventListener('click', icpRun); }
+
+        // ---- 对称翻转检查 ----
+        var symBtn = $('sym-run');
+        if (symBtn) { symBtn.addEventListener('click', symRun); }
+    }
+
     /* 写状态栏单行；noLog 为 true 时只更新摘要、不记历史 */
     function setInfo(text, noLog)
     {
@@ -2113,6 +3198,7 @@
         bindMenus();
         bindColorPop();
         bindStatusbar();
+        bindXform();
     }
 
     /* 强制重建树（签名缓存失效时用，如外部直接改了 layer 内部字段） */
@@ -3043,6 +4129,7 @@
         renderProps: renderProps,
         setProgress: setProgress,
         setInfo: setInfo,
+        solveRigid: solveRigid,
         setStats: setStats,
         showConfirm: showConfirm,
         showColumnDialog: showColumnDialog,

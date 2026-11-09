@@ -2198,6 +2198,21 @@ seg/rem 中不在原始顶点集合里的顶点：0 个
 2. 单窗模式下导入统一进公共槽位 S，不再被 BOTH 展开成 A/B 两份图层
 3. resize 移出每帧 tick，改由 window.resize + ResizeObserver 驱动，消除每帧读取 clientWidth 造成的强制布局刷新
 
+**1.0.2.2** — 配准工具：坐标变换 / 点对配准 / ICP / 对称检查
+
+1. 坐标变换：4×4 矩阵可编辑并应用，同步改写 positions / normals / uniqVerts / bbox 并重建 GPU；点「反变换」用逆矩阵回到变换前；支持矩阵复制粘贴与单位阵复位
+2. 手动点对配准：在参考层与目标层上交替点选，≥3 对后由 Horn 四元数法 + Jacobi 特征分解求刚体变换（4×4 对称矩阵精确求解，实测精度 1e-14）；画布选点用位移阈值区分「点击」与「旋转视角」
+3. 新增 KD-tree（`js/kdtree.js`）：点数据只引用不拷贝，索引用 Int32Array，节点用平行类型化数组，查询状态放模块级避免闭包；提供 nearest / nearestIndex / radius
+4. 新增 Symmetric ICP（`js/icp.js`）：参考 Rusinkiewicz《A Symmetric Objective Function for ICP》，每个对应点同时投影到目标法向与源法向，线性化后累加成 6×6 正规方程用 Cholesky 求解；无法向时退化为点到点
+5. 对称翻转检查：对目标层做 X/Y/Z 镜像后各跑一次 ICP 比较 RMS，若镜像变体明显优于原始则判定疑似镜像件（Geomagic 的翻转检查思路）
+6. 面板改为 Tab 布局（点对配准 / ICP / 对称检查），矩阵区常驻
+7. ICP 拆成按轮驱动的状态机（`createSolver().step()`），界面每帧跑 2 轮后让出主线程，进度实时刷新，消除长时间同步计算导致的「页面无响应」
+
+**修掉的两个关键 bug**
+
+- `addRow6` 只填了 6×6 正规方程的**上三角**，而 Cholesky 读的是下三角，等于解了残缺的方程组 —— ICP 残差每轮指数级放大（4.9 → 4.6e19）。改为填满整个矩阵后立即收敛
+- KD-tree 节点数组容量按 `2n/LEAF` 估算，而完全平衡树最坏接近 `4n/LEAF`；`Int8Array` 越界赋值是静默失败的，导致 `nodeDim[node]` 读到 `undefined`、`undefined < 0` 为假被当成内部节点，`nearestRec` 无限递归爆栈
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）
