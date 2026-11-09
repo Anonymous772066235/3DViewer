@@ -2042,6 +2042,156 @@ P3 蓝  x 宽 7 px（颜色阈值测得 5 px，特写确认与 P1/P2 一致）
 
 三个十字屏幕大小一致。`check.ps1` 7 项全 PASS（含 pick 场景）。
 
+
+**1.0.1.9（续 5）** — 裁剪模式按钮重复点击不再退出
+
+**现象**：进入裁剪后，再点一次编辑栏的「矩形选择」会退出裁剪状态。
+
+**根因**：编辑栏按钮绑的是 `toggleMode('rect')`，其实现是 `setMode(mode === m ? null : m)` —— 已在 rect 时再点等于 `setMode(null)`，即退出。
+
+**改法**：
+
+```js
+// 按钮绑定：toggleMode -> setMode（切换到目标模式，不再 toggle）
+on('seg-btn-rect', function () { A.setMode('rect'); });
+on('seg-btn-poly', function () { A.setMode('poly'); });
+
+// setMode 幂等：已是目标模式则直接返回，避免清空已有选区
+function setMode(m) {
+    if (mode === m) { return; }
+    ...
+}
+```
+
+**实测**：
+
+```
+点「裁剪」      mode = rect
+点「矩形选择」  mode = rect   ← 保持
+再点「矩形选择」 mode = rect   ← 保持
+点「多边形选择」 mode = poly   ← 切换
+切回「矩形选择」 mode = rect   ← 切回
+```
+
+退出裁剪仍靠「退出裁剪」按钮或 Esc（`setMode(null)`）。
+
+
+**1.0.1.9（续 6）** — 导入新数据不再改变相机视角
+
+**现象**：导入第二个数据时，相机会跳去适配新内容，打断正在看的画面。
+
+**根因**：`loadOne()` 里用「**该视图此前是否为空**」判断要不要适配：
+
+```js
+var before = [B.valid(computeBBox(views[0].slots)), B.valid(computeBBox(views[1].slots))];
+if (!before[0]) { this.fitView(0, false); }   // 视图 0 原来没数据 → 适配
+if (!before[1] && !singleView) { this.fitView(1, false); }
+```
+
+双窗下往「原本空着的那一窗」导入，该窗就会重新适配；单窗时若先前的 slots 组合不同也会触发。
+
+**改法**：判断标准改为「**导入前是否完全没有图层**」，只有首次导入才适配：
+
+```js
+var wasEmpty = this.layers.length === 0;
+
+// 仅在首次导入时自动适配；之后导入保持当前视角
+if (wasEmpty)
+{
+    this.fitView(0, false);
+    if (!this.settings.singleView) { this.fitView(1, false); }
+}
+```
+
+需要重新取景时点顶栏「适应」（或在双窗场景点对应视图的适应）。
+
+**实测**（`?url=m.stl&url2=tiny.xyz&single=1`，第二个文件是位于 (1000,1000,1000) 的远端点云）：
+
+```
+图层 = m | tiny
+相机 target = [131.2, 13.8, -285.6]   ← 仍停在 m.stl 的范围
+判定 PASS — 相机保持第一个文件的视角
+```
+
+
+**1.0.1.9（续 7）** — 双窗叠加对面模型时的绘制顺序
+
+**问题**：实体模式（`ghostMode=1`）下，`ghost` 也被塞进不透明列表，与主图共用一个列表，顺序完全由 `this.layers` 的**导入顺序**决定，主图和 ghost 是交错的。
+
+而 `gl.depthFunc(gl.LEQUAL)` 的语义是「深度 ≤ 缓冲值即通过」，**同深度的后画者会覆盖先画者**。两者重合（点云叠在网格上、同一工件的两版数据）时，顺序直接决定谁可见。
+
+以 `layers = [m@A, m@B]` 推导：
+
+| 视图 | 修复前列表 | 实际效果 |
+|---|---|---|
+| 左（slots 含 A） | `[主A, ghostB]` | ghost 后画 → **叠加层压住主图** ✗ |
+| 右（slots 含 B） | `[ghostA, 主B]` | 主图后画 → 正确 ✓ |
+
+即两窗中恰好一窗是对的，具体哪窗错取决于导入顺序。
+
+**改法**：`buildContext()` 里明确分两轮构建——先推 ghost，再推主图：
+
+```js
+// 第一轮：叠加的对面模型
+for (...) if (!v.slots[l.slot] && ghost && l.slot !== 'S') list.push({ layer: l, ghost: true });
+// 第二轮：本视图主图（后画 = 在上）
+for (...) if (v.slots[l.slot]) list.push({ layer: l, ghost: false });
+```
+
+两个视图的主图本身不同（左 A / 右 B），因此列表内容顺序天然相反，但都满足「ghost 在前、主图在后」。
+
+**实测**（`?url=m.stl&slot=A&url2=m.stl&slot2=B&ghostmode=1`，调 `buildContext()` 读实际列表）：
+
+```
+视图0: [ghost]m@B -> [主]m@A   PASS
+视图1: [ghost]m@A -> [主]m@B   PASS
+```
+
+
+**1.0.1.9（续 8）** — 网格裁剪改为整体判定，不再切割面片
+
+**原做法**：`splitMesh()` 对每个三角形用 `clipPoly()` 逐平面裁剪，再用 `emitPoly()` 扇形三角化。这会：
+
+- 在选区边界处**插入交点顶点**，改变面片拓扑；
+- 原三角形被切成多个小三角形，**面数增加**；
+- 每个三角形都要走多边形裁剪 + 三角化，开销大。
+
+**改法**：改为按**三角形质心**整体判定归属，原始三角形原样复制到一侧：
+
+```js
+var cx = (pos[o] + pos[o+3] + pos[o+6]) / 3;   // 质心
+// 对所有平面满足 n·v <= d 即落在选区内
+var dst = inside ? segOut : remOut;
+dst.push(pos[o], ..., pos[o+8]);               // 三个顶点原样复制
+```
+
+- 顶点数恒等于 `面数 × 3`，**拓扑完全不变**；
+- 面数守恒，不产生新顶点；
+- 少了一层多边形裁剪与三角化，速度更快；
+- 代价：选区边界以三角形为粒度（边界处整片三角形归入某一侧）。
+
+点云本来就是逐点判定（`splitPointsByPlanes`），无需改动。
+
+**顺带清理**：`clipPoly` / `pushTri` / `emitPoly` 已无调用，删除（-46 行）。
+
+**实测**（`?demo=seg&segapply=1`，m.stl 共 111,009 面）：
+
+```
+seg 面数 = 64098
+rem 面数 = 46911
+合计     = 111009      ← 与原始面数完全相等
+seg/rem 中不在原始顶点集合里的顶点：0 个
+顶点数 = 面数 × 3 ：true
+判定 PASS — 无新交点，拓扑未变
+```
+
+**1.0.2.0** — 裁剪判定、相机保持与叠加顺序
+
+1. 裁剪模式按钮重复点击不再退出：`seg-btn-rect` / `seg-btn-poly` 从 `toggleMode` 改为 `setMode`，`setMode` 加幂等保护（已是目标模式则直接返回，不清空已有选区）
+2. 导入新数据不再改变相机视角：判据从「该视图此前为空」改为「导入前完全没有图层」，仅首次导入自动适配
+3. 双窗叠加顺序：`buildContext` 分两轮构建，ghost 先画、主图后画（`depthFunc` 为 `LEQUAL`，同深度后画者覆盖），保证每窗主图压在对面模型之上
+4. 网格裁剪改为朴素整体判定：按三角形质心归属、原样复制顶点，不再切割面片（删除 `clipPoly` / `pushTri` / `emitPoly`）
+
 ---
 
 ## 附录 A：当前文件规模（2026-10-28 11:03）

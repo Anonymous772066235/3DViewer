@@ -1223,7 +1223,8 @@
     App.prototype.loadOne = async function (file, slots, limitOpts)
     {
         var self = this;
-        var before = [B.valid(this.computeBBox(this.views[0].slots)), B.valid(this.computeBBox(this.views[1].slots))];
+        // 只有「导入前完全没有图层」才自动适配视角；之后导入一律保持当前相机
+        var wasEmpty = this.layers.length === 0;
 
         global.MV.ui.setProgress(true, '读取 ' + file.name, 0);
 
@@ -1371,14 +1372,14 @@
         this.selectedId = null;
         }
 
-        // 仅在视图此前为空时自动适配，避免打断已有视角
-        if (!before[0])
+        // 仅在首次导入（此前没有任何图层）时自动适配；之后导入保持当前视角，不打断正在看的画面
+        if (wasEmpty)
         {
             this.fitView(0, false);
-        }
-        if (!before[1] && !this.settings.singleView)
-        {
-            this.fitView(1, false);
+            if (!this.settings.singleView)
+            {
+                this.fitView(1, false);
+            }
         }
 
         document.getElementById('drop-hint').classList.add('hidden');
@@ -1497,20 +1498,32 @@
             var v = this.views[vi];
             var list = [];
 
-            for (var li = 0; li < this.layers.length; li++)
+            // 绘制顺序很重要：depthFunc 是 LEQUAL，同深度的后画者覆盖先画者。
+            // 因此先推 ghost（对面模型），再推本视图主图 —— 保证每窗的主图始终压在叠加层之上。
+            // 两窗的「主图」本身不同（左 A / 右 B），所以两个列表的内容顺序天然相反。
+            var li, l;
+
+            // 第一轮：叠加的对面模型
+            for (li = 0; li < this.layers.length; li++)
             {
-                var l = this.layers[li];
-                if (!l.visible)
+                l = this.layers[li];
+                if (!l.visible || v.slots[l.slot])
                 {
                     continue;
                 }
-                if (v.slots[l.slot])
-                {
-                    list.push({ layer: l, ghost: false });
-                }
-                else if (this.settings.ghost && l.slot !== 'S')
+                if (this.settings.ghost && l.slot !== 'S')
                 {
                     list.push({ layer: l, ghost: true });
+                }
+            }
+
+            // 第二轮：本视图主图（后画 = 在上）
+            for (li = 0; li < this.layers.length; li++)
+            {
+                l = this.layers[li];
+                if (l.visible && v.slots[l.slot])
+                {
+                    list.push({ layer: l, ghost: false });
                 }
             }
 
@@ -1959,8 +1972,8 @@
             }
 
             on('btn-seg', function () { A.setMode('rect'); });
-            on('seg-btn-rect', function () { A.toggleMode('rect'); });
-            on('seg-btn-poly', function () { A.toggleMode('poly'); });
+            on('seg-btn-rect', function () { A.setMode('rect'); });
+            on('seg-btn-poly', function () { A.setMode('poly'); });
             on('seg-btn-preview', function () { A.togglePreview(); });
             on('seg-btn-append', function () { A.beginAppend(); });
             on('seg-btn-apply', function () { A.applySplit(); });

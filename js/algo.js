@@ -170,6 +170,11 @@
 
     function setMode(m)
     {
+        // 幂等：已是目标模式则不变，避免重复点「矩形选择」清空已有选区或退出
+        if (mode === m)
+        {
+            return;
+        }
         ensureOverlay();
         mode = m;
 
@@ -357,7 +362,7 @@
             var d0 = dirOf(sel[i]);
             var d1 = dirOf(sel[(i + 1) % sel.length]);
             var n = V.normalize(V.cross(d0, d1));
-            // clipPoly 保留 dot(n,p) <= d 的一侧（内侧），所以 n 必须指向多边形外侧：
+            // 内侧判据为 dot(n,p) <= d，所以 n 必须指向多边形外侧：
             // 与“中心方向”同向时取反
             if (V.dot(n, center) > 0)
             {
@@ -366,50 +371,6 @@
             planes.push({ n: n, d: V.dot(n, eye) });
         }
         return planes;
-    }
-
-    /* ---------------- 几何切分 ---------------- */
-
-    function clipPoly(polyV, n, d, keepInside)
-    {
-        var sgn = keepInside ? 1 : -1;
-        var out = [];
-        var len = polyV.length;
-        for (var i = 0; i < len; i++)
-        {
-            var a = polyV[i];
-            var b = polyV[(i + 1) % len];
-            var da = (n[0] * a[0] + n[1] * a[1] + n[2] * a[2] - d) * sgn;
-            var db = (n[0] * b[0] + n[1] * b[1] + n[2] * b[2] - d) * sgn;
-            if (da <= 0)
-            {
-                out.push(a);
-            }
-            if ((da < 0 && db > 0) || (da > 0 && db < 0))
-            {
-                var t = da / (da - db);
-                out.push([
-                    a[0] + (b[0] - a[0]) * t,
-                    a[1] + (b[1] - a[1]) * t,
-                    a[2] + (b[2] - a[2]) * t
-                ]);
-            }
-        }
-        return out;
-    }
-
-    function pushTri(out, a, b, c)
-    {
-        out.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-    }
-
-    /* 扇形三角化（交点多边形对凸选区是凸的，差集碎片同样凸） */
-    function emitPoly(out, polyV)
-    {
-        for (var i = 1; i + 1 < polyV.length; i++)
-        {
-            pushTri(out, polyV[0], polyV[i], polyV[i + 1]);
-        }
     }
 
     function bboxOf(pos)
@@ -432,75 +393,53 @@
         return { min: min, max: max };
     }
 
+    /* 网格按棱柱选区拆分：按三角形「质心」整体判定归属，不做几何切割。
+     *
+     * 与逐平面裁剪 + 三角化的做法不同，这里原始三角形原样复制到 seg 或 rem 一侧：
+     *   - 顶点数恒等于 面数 × 3，拓扑完全不变，不会产生新的交点顶点；
+     *   - 代价是选区边界以三角形为粒度（边界处整片三角形归入某一侧）。
+     *
+     * 判据：质心对所有平面都满足 n·v <= d 即视为落在选区内。
+     * 面片与选区判定所需的平面表示与点云拆分（splitPointsByPlanes）一致。 */
     function splitMesh(layer, planes)
     {
         var pos = layer.data.positions;
         var tri = Math.floor(pos.length / 9);
         var segOut = [];
         var remOut = [];
-        var triV = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        var np = planes.length;
 
         for (var t = 0; t < tri; t++)
         {
             var o = t * 9;
-            triV[0][0] = pos[o]; triV[0][1] = pos[o + 1]; triV[0][2] = pos[o + 2];
-            triV[1][0] = pos[o + 3]; triV[1][1] = pos[o + 4]; triV[1][2] = pos[o + 5];
-            triV[2][0] = pos[o + 6]; triV[2][1] = pos[o + 7]; triV[2][2] = pos[o + 8];
 
-            // 交集：依次对每个平面保留内侧
-            var inter = triV;
-            var cut = false;
-            for (var p = 0; p < planes.length; p++)
+            // 质心
+            var cx = (pos[o] + pos[o + 3] + pos[o + 6]) / 3;
+            var cy = (pos[o + 1] + pos[o + 4] + pos[o + 7]) / 3;
+            var cz = (pos[o + 2] + pos[o + 5] + pos[o + 8]) / 3;
+
+            var inside = true;
+            for (var p = 0; p < np; p++)
             {
-                inter = clipPoly(inter, planes[p].n, planes[p].d, true);
-                if (inter.length < 3)
+                var nm = planes[p].n;
+                if (nm[0] * cx + nm[1] * cy + nm[2] * cz > planes[p].d)
                 {
+                    inside = false;
                     break;
                 }
             }
-            if (inter.length >= 3)
-            {
-                emitPoly(segOut, inter);
-                cut = true;
-            }
 
-            // 差集：逐平面把“外侧”碎片收集起来
-            var pieces = [];
-            var cur = [triV];
-            for (var q = 0; q < planes.length && cur.length; q++)
-            {
-                var nxt = [];
-                for (var ci = 0; ci < cur.length; ci++)
-                {
-                    var inPart = clipPoly(cur[ci], planes[q].n, planes[q].d, true);
-                    var outPart = clipPoly(cur[ci], planes[q].n, planes[q].d, false);
-                    if (inPart.length >= 3)
-                    {
-                        nxt.push(inPart);
-                    }
-                    if (outPart.length >= 3)
-                    {
-                        pieces.push(outPart);
-                    }
-                }
-                cur = nxt;
-            }
-            for (var pi = 0; pi < pieces.length; pi++)
-            {
-                emitPoly(remOut, pieces[pi]);
-            }
-
-            if (!cut)
-            {
-                // 完全在选区外：整三角形归 remaining（上面的差集已包含）
-            }
+            var dst = inside ? segOut : remOut;
+            dst.push(pos[o], pos[o + 1], pos[o + 2],
+                     pos[o + 3], pos[o + 4], pos[o + 5],
+                     pos[o + 6], pos[o + 7], pos[o + 8]);
         }
 
         return {
             seg: {
                 kind: 'mesh',
                 positions: new Float32Array(segOut),
-                count: segOut.length / 9,          // uploadLayer 用它作为 triCount
+                count: segOut.length / 9,
                 format: layer.data.format || 'MESH'
             },
             rem: {
