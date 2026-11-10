@@ -2351,4 +2351,118 @@ body.theme-light #p-sfhist.sf-ruler {
     padding-top: 0;
     margin-bottom: 0;
 }
+/* 预览开关 */
+.xform-preview {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--dim);
+    margin: -4px 0 10px 0;
+    cursor: pointer;
+    user-select: none;
+}
+.xform-preview input {
+    margin: 0;
+    cursor: pointer;
+}
+/* ===== 变换面板：靠左停靠，不遮挡右侧 3D 视图 =====
+ * 单窗模式下视口占满 view-area，居中的对话框正好盖住模型，
+ * 遮罩还会把预览压暗。这里改成靠左、透明遮罩、点击穿透到视图。 */
+#xform.modal {
+    background: transparent;
+    justify-content: flex-start;
+    align-items: flex-start;
+    /* 遮罩不拦截鼠标：对话框以外的地方仍可旋转 / 缩放 / 拾取 */
+    pointer-events: none;
+    padding: 16px;
+    box-sizing: border-box;
+}
+#xform .modal-box {
+    pointer-events: auto;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+}
+/* ===== 坐标变换（侧栏常驻） ===== */
+#xform.panel {
+    padding: 8px 10px 12px;
+}
+#xform .xform-side {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+}
+#xform .xform-head {
+    font-size: 11px;
+    color: var(--dim);
+}
+#xform .xform-grid {
+    gap: 3px;
+}
+#xform .xform-grid input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 3px 1px;
+    font-size: 11px;
+    text-align: center;
+}
+/* 侧栏窄，矩阵整体按容器宽度等分四列 */
+#xform .xform-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: 100%;
+}
+#xform .xform-reg-row {
+    flex-wrap: wrap;
+    gap: 4px;
+    row-gap: 5px;
+}
+/* 下拉框不能给 min-width: 0 —— 会被 flex 压成几乎零宽，点都点不到。
+ * 参考/目标各占一半，参数输入框固定小宽度。 */
+#xform .xform-reg-row select {
+    flex: 1 1 58px;
+    min-width: 52px;
+    max-width: 100%;
+}
+#xform .xform-reg-row input {
+    flex: 0 0 44px;
+    min-width: 38px;
+}
+#xform .xform-panes {
+    height: auto;
+    max-height: 260px;
+    min-height: 130px;      /* flex 容器里会被压成 0，必须给下限 */
+    flex: 0 0 auto;
+    overflow-y: auto;
+}
+#xform .xform-actions {
+    flex-wrap: wrap;
+    gap: 4px;
+}
+#xform .xform-actions button {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+/* 侧栏里的下拉：补深色底，避免深色主题下出现刺眼的白框 */
+#xform .xform-reg-row select {
+    background: var(--bg-input, #14181f);
+    color: var(--text, #dfe3e8);
+    border: 1px solid var(--line, #2a3038);
+    border-radius: 3px;
+    height: 22px;
+}
+#xform .xform-reg-row select option {
+    background: #14181f;
+    color: #dfe3e8;
+}
+/* 没有图层时下拉保持空白：隐藏箭头与边框，只占位不影响布局 */
+#xform .xform-reg-row select:empty {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background: transparent;
+    border-color: transparent;
+    pointer-events: none;
+}
 

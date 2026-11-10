@@ -1559,8 +1559,50 @@
         return ctx;
     };
 
+    /* 兜底自愈：任何图层缺 bbox 都就地补算。
+     * 渲染、拾取、视锥剔除、适应视图都依赖它；缺一个就会让整帧抛错，
+     * 画面冻结在上一帧 —— 从现象上看就是"某个图层怎么都不显示"。 */
+    App.prototype.healBBoxes = function ()
+    {
+        var fixed = 0;
+
+        for (var i = 0; i < this.layers.length; i++)
+        {
+            var L = this.layers[i];
+            var d = L ? L.data : null;
+            if (!d || !d.positions || d.positions.length < 3) { continue; }
+
+            if (d.bbox && d.bbox.min && d.bbox.max && isFinite(d.bbox.min[0])) { continue; }
+
+            var mnx = Infinity, mny = Infinity, mnz = Infinity;
+            var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+            var p = d.positions;
+
+            for (var k = 0; k < p.length; k += 3)
+            {
+                var x = p[k], y = p[k + 1], z = p[k + 2];
+                if (x < mnx) { mnx = x; }
+                if (y < mny) { mny = y; }
+                if (z < mnz) { mnz = z; }
+                if (x > mxx) { mxx = x; }
+                if (y > mxy) { mxy = y; }
+                if (z > mxz) { mxz = z; }
+            }
+
+            if (isFinite(mnx))
+            {
+                d.bbox = { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] };
+                fixed++;
+            }
+        }
+        return fixed;
+    };
+
     App.prototype.renderFrame = function ()
     {
+        // 入口处再兜一次：无论谁调用 renderFrame，缺 bbox 都不会崩
+        this.healBBoxes();
+
         if (!this.renderer || !this.renderer.ready)
         {
             return;
@@ -1619,6 +1661,7 @@
         if (this.dirty)
         {
             this.renderer.pickMarks = this.pickPoints;
+            this.healBBoxes();
             this.renderFrame();
             this.dirty = false;
         }

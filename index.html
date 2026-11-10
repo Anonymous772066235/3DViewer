@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.2.2" />
+<link rel="stylesheet" href="css/style.css?v=1.0.2.3" />
 </head>
 <body>
 <div id="app">
@@ -16,7 +16,7 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.2.2</span>
+            <span class="sub">mesh / point cloud compare · v1.0.2.3</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
@@ -70,6 +70,7 @@
             <div class="panel-tabs">
                 <span class="tab active" data-tab="props">图层属性</span>
                 <span class="tab" data-tab="view">视图设置</span>
+                <span class="tab" data-tab="xform">坐标变换</span>
             </div>
 
             <section class="panel" data-tab="props">
@@ -323,7 +324,93 @@
                 </div>
             </section>
 
-        </aside>
+        <section class="panel tab-hidden" id="xform" data-tab="xform">
+                <div class="xform-side">
+                    <div class="xform-head">
+            目标图层：<b id="xform-layer">（未选中）</b>
+        </div>
+
+        <div id="xform-grid" class="xform-grid"></div>
+
+        <label class="xform-preview" title="勾选后编辑矩阵会立刻反映到视图，不写入数据">
+            <input type="checkbox" id="xform-preview-on" checked>
+            实时预览（不改动数据）
+        </label>
+
+        <div class="xform-tabs">
+            <button class="xform-tab active" data-pane="pairs">点对配准</button>
+            <button class="xform-tab" data-pane="icp">ICP</button>
+            <button class="xform-tab" data-pane="sym">对称检查</button>
+        </div>
+
+        <div class="xform-panes">
+        <div class="xform-pane active" data-pane="pairs">
+        <div class="xform-reg">
+            <div class="xform-reg-title">点对配准</div>
+            <div class="xform-reg-row">
+                <span>参考</span><select id="reg-ref" title="固定不动的图层"></select>
+                <span>目标</span><select id="reg-dst" title="将被移动的图层"></select>
+            </div>
+            <div class="xform-actions xform-reg-actions">
+                <button id="reg-start">开始选点</button>
+                <button id="reg-clear">清空</button>
+                <button id="reg-solve">计算矩阵</button>
+            </div>
+            <div id="reg-list" class="xform-reg-list">尚未选点</div>
+        </div>
+
+        </div>
+        <div class="xform-pane" data-pane="icp">
+        <div class="xform-reg xform-icp">
+            <div class="xform-reg-title">ICP 配准（Symmetric）</div>
+            <div class="xform-reg-row">
+                <span>参考</span><select id="icp-ref" title="固定不动的图层"></select>
+                <span>目标</span><select id="icp-dst" title="将被移动的图层"></select>
+            </div>
+            <div class="xform-reg-row xform-icp-params">
+                <span>迭代</span><input id="icp-iter" type="text" value="40" title="最大迭代次数">
+                <span>采样</span><input id="icp-stride" type="text" value="4" title="源点采样步长，越大越快">
+                <span>法向</span><input id="icp-thresh" type="text" value="0.3" title="法向一致度下限（cos），0.3 ≈ 72°">
+            </div>
+            <div class="xform-reg-row xform-icp-params">
+                <span>距离</span><input id="icp-maxdist" type="text" value="0" title="对应点距离上限，0 = 不限；部分重叠时设小值更稳">
+                <span>容差</span><input id="icp-tol" type="text" value="1e-7" title="收敛容差：相邻两轮 RMS 变化小于它即停止">
+            </div>
+            <div class="xform-actions xform-reg-actions">
+                <button id="icp-run">运行 ICP</button>
+            </div>
+            <div id="icp-info" class="xform-reg-list">未运行</div>
+        </div>
+
+        </div>
+        <div class="xform-pane" data-pane="sym">
+        <div class="xform-reg xform-sym">
+            <div class="xform-reg-title">对称翻转检查</div>
+            <div class="xform-actions xform-reg-actions">
+                <button id="sym-run" title="对参考层做 X/Y/Z 镜像后各跑一次 ICP，比较 RMS 判断是否为镜像件">运行检查</button>
+            </div>
+            <div id="sym-info" class="xform-reg-list">未运行</div>
+        </div>
+        </div>
+        </div>
+
+        <div class="xform-note">
+            v' = M · v（行主序，第 4 列为平移）；应用后直接改写顶点，点「反变换」用逆矩阵还原
+        </div>
+
+        <div class="xform-actions">
+            <button id="xform-identity">单位阵</button>
+            <button id="xform-copy">复制</button>
+            <button id="xform-paste">粘贴</button>
+            <button id="xform-inv">反变换</button>
+            <button id="xform-apply" class="primary">应用</button>
+        </div>
+
+        <div id="xform-info" class="xform-info"></div>
+                </div>
+            </section>
+
+            </aside>
 
         <div id="sidebar-resizer" title="拖动调整侧栏宽度"></div>
 
@@ -462,89 +549,6 @@
 
 </div>
 
-<!-- 坐标变换 -->
-<div id="xform" class="modal hidden">
-    <div class="modal-box xform-box">
-        <div class="modal-title">
-            <span>坐标变换</span>
-            <button id="xform-close" class="link">关闭</button>
-        </div>
-
-        <div class="xform-head">
-            目标图层：<b id="xform-layer">（未选中）</b>
-        </div>
-
-        <div id="xform-grid" class="xform-grid"></div>
-
-        <div class="xform-tabs">
-            <button class="xform-tab active" data-pane="pairs">点对配准</button>
-            <button class="xform-tab" data-pane="icp">ICP</button>
-            <button class="xform-tab" data-pane="sym">对称检查</button>
-        </div>
-
-        <div class="xform-panes">
-        <div class="xform-pane active" data-pane="pairs">
-        <div class="xform-reg">
-            <div class="xform-reg-title">点对配准</div>
-            <div class="xform-reg-row">
-                <span>参考</span><select id="reg-ref" title="固定不动的图层"></select>
-                <span>目标</span><select id="reg-dst" title="将被移动的图层"></select>
-            </div>
-            <div class="xform-actions xform-reg-actions">
-                <button id="reg-start">开始选点</button>
-                <button id="reg-clear">清空</button>
-                <button id="reg-solve">计算矩阵</button>
-            </div>
-            <div id="reg-list" class="xform-reg-list">尚未选点</div>
-        </div>
-
-        </div>
-        <div class="xform-pane" data-pane="icp">
-        <div class="xform-reg xform-icp">
-            <div class="xform-reg-title">ICP 配准（Symmetric）</div>
-            <div class="xform-reg-row">
-                <span>参考</span><select id="icp-ref" title="固定不动的图层"></select>
-                <span>目标</span><select id="icp-dst" title="将被移动的图层"></select>
-            </div>
-            <div class="xform-reg-row xform-icp-params">
-                <span>迭代</span><input id="icp-iter" type="text" value="40" title="最大迭代次数">
-                <span>采样</span><input id="icp-stride" type="text" value="4" title="源点采样步长，越大越快">
-                <span>法向</span><input id="icp-thresh" type="text" value="0.3" title="法向一致度下限（cos），0.3 ≈ 72°">
-            </div>
-            <div class="xform-actions xform-reg-actions">
-                <button id="icp-run">运行 ICP</button>
-            </div>
-            <div id="icp-info" class="xform-reg-list">未运行</div>
-        </div>
-
-        </div>
-        <div class="xform-pane" data-pane="sym">
-        <div class="xform-reg xform-sym">
-            <div class="xform-reg-title">对称翻转检查</div>
-            <div class="xform-actions xform-reg-actions">
-                <button id="sym-run" title="对参考层做 X/Y/Z 镜像后各跑一次 ICP，比较 RMS 判断是否为镜像件">运行检查</button>
-            </div>
-            <div id="sym-info" class="xform-reg-list">未运行</div>
-        </div>
-        </div>
-        </div>
-
-        <div class="xform-note">
-            v' = M · v（行主序，第 4 列为平移）；应用后直接改写顶点，点「反变换」用逆矩阵还原
-        </div>
-
-        <div class="xform-actions">
-            <button id="xform-identity">单位阵</button>
-            <button id="xform-copy">复制</button>
-            <button id="xform-paste">粘贴</button>
-            <button id="xform-inv">反变换</button>
-            <button id="xform-apply" class="primary">应用</button>
-        </div>
-
-        <div id="xform-info" class="xform-info"></div>
-    </div>
-</div>
-
 <!-- 二次确认弹窗 -->
 <div id="modal" class="modal hidden">
     <div class="modal-box">
@@ -614,17 +618,17 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.2.2"></script>
-    <script src="js/kdtree.js?v=1.0.2.2"></script>
-    <script src="js/icp.js?v=1.0.2.2"></script>
-    <script src="js/io.js?v=1.0.2.2"></script>
-    <script src="js/algo.js?v=1.0.2.2"></script>
-    <script src="js/render.js?v=1.0.2.2"></script>
+    <script src="js/core.js?v=1.0.2.3"></script>
+    <script src="js/kdtree.js?v=1.0.2.3"></script>
+    <script src="js/icp.js?v=1.0.2.3"></script>
+    <script src="js/io.js?v=1.0.2.3"></script>
+    <script src="js/algo.js?v=1.0.2.3"></script>
+    <script src="js/render.js?v=1.0.2.3"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.2.2"></script>
-    <script src="js/plugins/optimize.js?v=1.0.2.2"></script>
-    <script src="js/ui.js?v=1.0.2.2"></script>
-    <script src="js/app.js?v=1.0.2.2"></script>
+    <script src="js/plugins/registry.js?v=1.0.2.3"></script>
+    <script src="js/plugins/optimize.js?v=1.0.2.3"></script>
+    <script src="js/ui.js?v=1.0.2.3"></script>
+    <script src="js/app.js?v=1.0.2.3"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

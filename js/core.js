@@ -114,7 +114,11 @@
 
         valid: function (b)
         {
-            return isFinite(b.min[0]) && isFinite(b.max[0]);
+            // 以前直接读 b.min，传入 null / undefined 会抛 TypeError，
+            // 而渲染循环每帧都会调到它 —— 一处 bbox 缺失就会让整帧渲染失败、
+            // 画面停在上一帧不再更新（表现为"数据不显示了"）。
+            return !!(b && b.min && b.max &&
+                      isFinite(b.min[0]) && isFinite(b.max[0]));
         },
 
         merge: function (a, b)

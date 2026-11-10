@@ -238,6 +238,15 @@
         var R = [1, 0, 0, 0, 1, 0, 0, 0, 1];
         var t = [0, 0, 0];
 
+        // 初值：允许从已有的粗配准（质心/PCA/上一次 ICP）出发，
+        // 镜像类变体务必先把镜像作用到点集上，这里只接受刚体部分
+        if (opts.initMat)
+        {
+            var im = opts.initMat;
+            R = [im[0], im[1], im[2], im[4], im[5], im[6], im[8], im[9], im[10]];
+            t = [im[3], im[7], im[11]];
+        }
+
         var dR = new Float64Array(9);
         var tmp = new Float64Array(9);
 
@@ -397,10 +406,126 @@
         return solver.result();
     }
 
+    /* ---------------- PCA 主轴 ---------------- */
+
+    /* 3×3 对称矩阵 Jacobi 特征分解，返回按特征值降序的 (特征值, 主轴) */
+    function jacobi3(Ain)
+    {
+        var A = [
+            [Ain[0][0], Ain[0][1], Ain[0][2]],
+            [Ain[1][0], Ain[1][1], Ain[1][2]],
+            [Ain[2][0], Ain[2][1], Ain[2][2]]
+        ];
+        var V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+        var p, q, k;
+
+        for (var sweep = 0; sweep < 60; sweep++)
+        {
+            var off = A[0][1] * A[0][1] + A[0][2] * A[0][2] + A[1][2] * A[1][2];
+            if (off < 1e-26) { break; }
+
+            for (p = 0; p < 2; p++)
+            {
+                for (q = p + 1; q < 3; q++)
+                {
+                    if (Math.abs(A[p][q]) < 1e-20) { continue; }
+
+                    var theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+                    var t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+                    var c = 1 / Math.sqrt(t * t + 1);
+                    var sn = t * c;
+
+                    for (k = 0; k < 3; k++)
+                    {
+                        var akp = A[k][p], akq = A[k][q];
+                        A[k][p] = c * akp - sn * akq;
+                        A[k][q] = sn * akp + c * akq;
+                    }
+                    for (k = 0; k < 3; k++)
+                    {
+                        var apk = A[p][k], aqk = A[q][k];
+                        A[p][k] = c * apk - sn * aqk;
+                        A[q][k] = sn * apk + c * aqk;
+                    }
+                    for (k = 0; k < 3; k++)
+                    {
+                        var vkp = V[k][p], vkq = V[k][q];
+                        V[k][p] = c * vkp - sn * vkq;
+                        V[k][q] = sn * vkp + c * vkq;
+                    }
+                }
+            }
+        }
+
+        var order = [0, 1, 2];
+        order.sort(function (a, b) { return A[b][b] - A[a][a]; });
+
+        var values = [];
+        var axes = [];
+        for (var i = 0; i < 3; i++)
+        {
+            var idx = order[i];
+            values.push(A[idx][idx]);
+            axes.push([V[0][idx], V[1][idx], V[2][idx]]);
+        }
+
+        // 确定性符号：每个主轴让绝对值最大的分量为正，
+        // 两边用同一约定后矩阵才可比（简并时仍需外层枚举兜底）
+        for (i = 0; i < 3; i++)
+        {
+            var a = axes[i];
+            var best = 0;
+            if (Math.abs(a[1]) > Math.abs(a[best])) { best = 1; }
+            if (Math.abs(a[2]) > Math.abs(a[best])) { best = 2; }
+            if (a[best] < 0)
+            {
+                a[0] = -a[0]; a[1] = -a[1]; a[2] = -a[2];
+            }
+        }
+
+        return { values: values, axes: axes };
+    }
+
+    /* 点集的质心与主轴；stride 用于大点集抽样 */
+    function pcaOf(positions, count, stride)
+    {
+        var n = count || Math.floor(positions.length / 3);
+        var st = Math.max(1, stride || 1);
+
+        var cx = 0, cy = 0, cz = 0, m = 0;
+        var i;
+        for (i = 0; i < n; i += st)
+        {
+            cx += positions[i * 3];
+            cy += positions[i * 3 + 1];
+            cz += positions[i * 3 + 2];
+            m++;
+        }
+        if (!m) { return null; }
+        cx /= m; cy /= m; cz /= m;
+
+        var xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+        for (i = 0; i < n; i += st)
+        {
+            var dx = positions[i * 3] - cx;
+            var dy = positions[i * 3 + 1] - cy;
+            var dz = positions[i * 3 + 2] - cz;
+            xx += dx * dx; xy += dx * dy; xz += dx * dz;
+            yy += dy * dy; yz += dy * dz; zz += dz * dz;
+        }
+
+        var cov = [[xx / m, xy / m, xz / m], [xy / m, yy / m, yz / m], [xz / m, yz / m, zz / m]];
+        var eig = jacobi3(cov);
+
+        return { center: [cx, cy, cz], axes: eig.axes, values: eig.values };
+    }
+
     global.MV.icp = {
         symmetric: symmetric,
         createSolver: createSolver,
         computeVertexNormals: computeVertexNormals,
+        pcaOf: pcaOf,
+        jacobi3: jacobi3,
         solve6: solve6,
         expSO3: expSO3
     };

@@ -33,12 +33,13 @@
         'precision highp float;',
         'in vec3 aPos;',
         'uniform mat4 uMVP;',
+        'uniform mat4 uModel;',
         'uniform mat4 uView;',
         'out vec3 vViewPos;',
         'void main()',
         '{',
-        '    vViewPos = (uView * vec4(aPos, 1.0)).xyz;',
-        '    gl_Position = uMVP * vec4(aPos, 1.0);',
+        '    vViewPos = (uView * uModel * vec4(aPos, 1.0)).xyz;',
+        '    gl_Position = uMVP * uModel * vec4(aPos, 1.0);',
         '}'
     ].join('\n');
 
@@ -92,6 +93,7 @@
         'in vec3 aCol;',
         'in float aSF;',
         'uniform mat4 uMVP;',
+        'uniform mat4 uModel;',
         'uniform mat4 uView;',
         'uniform float uPointSize;',
         'uniform float uDepthBias;',
@@ -191,7 +193,7 @@
         '        }',
         '    }',
         '    vColor = c;',
-        '    gl_Position = uMVP * vec4(aPos, 1.0);',
+        '    gl_Position = uMVP * uModel * vec4(aPos, 1.0);',
         '    gl_Position.z -= uDepthBias * gl_Position.w;',
         '    gl_PointSize = uPointSize;',
         '}'
@@ -228,13 +230,17 @@
         'precision highp float;',
         'in vec3 aPos;',
         'uniform mat4 uMVP;',
+        'uniform mat4 uModel;',
         'uniform float uDepthBias;',
         'void main()',
         '{',
-        '    gl_Position = uMVP * vec4(aPos, 1.0);',
+        '    gl_Position = uMVP * uModel * vec4(aPos, 1.0);',
         '    gl_Position.z -= uDepthBias * gl_Position.w;',
         '}'
     ].join('\n');
+
+    /* 单位阵：没有预览变换时统一用它，避免每处写 null 分支 */
+    var IDENT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
     var LINE_FS = [
         '#version 300 es',
@@ -657,12 +663,12 @@
         this.lineA = { pos: gl.getAttribLocation(lineP, 'aPos') };
 
 
-        this.meshU = uniforms(gl, meshP, ['uMVP', 'uView', 'uColor', 'uBackColor',
+        this.meshU = uniforms(gl, meshP, ['uMVP', 'uView', 'uModel', 'uColor', 'uBackColor',
             'uLightView', 'uShade', 'uBackShade', 'uTwoSided']);
-        this.pointU = uniforms(gl, pointP, ['uMVP', 'uView', 'uPointSize', 'uDepthBias', 'uColorMode',
+        this.pointU = uniforms(gl, pointP, ['uMVP', 'uView', 'uModel', 'uPointSize', 'uDepthBias', 'uColorMode',
             'uColor', 'uZMin', 'uZMax', 'uSFMin', 'uSFMax', 'uSCMin', 'uSCMax', 'uOutMode',
                             'uRamp', 'uAlpha', 'uRound']);
-        this.lineU = uniforms(gl, lineP, ['uMVP', 'uColor', 'uDepthBias']);
+        this.lineU = uniforms(gl, lineP, ['uMVP', 'uModel', 'uColor', 'uDepthBias']);
 
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
@@ -1147,6 +1153,12 @@
     };
 
     /* ---------------- 绘制 ---------------- */
+    /* 图层的预览变换：配准面板在应用前用它实时预览，不改动顶点数据 */
+    Renderer.prototype.modelOf = function (layer)
+    {
+        return (layer && layer.previewMat) ? layer.previewMat : IDENT4;
+    };
+
     Renderer.prototype.drawMesh = function (layer, mvp, view, color, shade, pushBack, noStat, backCol, backShade)
     {
         var gl = this.gl;
@@ -1166,6 +1178,7 @@
 
         gl.useProgram(this.meshP);
         gl.uniformMatrix4fv(this.meshU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.meshU.uModel, false, this.modelOf(layer));
         gl.uniformMatrix4fv(this.meshU.uView, false, view);
         gl.uniform4fv(this.meshU.uColor, color);
         // 双面一次绘制：背面用 uBackColor / uBackShade（见 drawMeshLayer 快路径）
@@ -1178,15 +1191,22 @@
         gl.bindVertexArray(g.vao);
 
         // 分块 + 视锥剔除（?cull=0 可关闭以便对比）
-        var cullOn = !(global.MV.config && global.MV.config.cull === false);
-        if (cullOn && g.chunks && g.chunks.length > 1)
+        var cullCfg = !(global.MV.config && global.MV.config.cull === false);
+
+        // 有预览变换时不能按旧 bbox 判断可见性：chunks 的 bbox 是原始位置，
+        // 而顶点会被 uModel 搬走，按旧位置判断会把真正可见的块误剔除。
+        // 但必须仍然走「分块」这条绘制路径 —— 整体那条用 g.triCount * 3 作索引数，
+        // 与实际索引缓冲的长度不一定一致，切过去会导致模型大面积缺失。
+        var testVisible = cullCfg && !layer.previewMat;
+
+        if (g.chunks && g.chunks.length > 1)
         {
             var planes = frustumFromMVP(mvp);
             var drawn = 0;
             for (var ci3 = 0; ci3 < g.chunks.length; ci3++)
             {
                 var ch = g.chunks[ci3];
-                if (!aabbVisible(ch, planes))
+                if (testVisible && !aabbVisible(ch, planes))
                 {
                     continue;
                 }
@@ -1222,6 +1242,24 @@
     {
         var gl = this.gl;
         var col = [layer.colorRgb[0], layer.colorRgb[1], layer.colorRgb[2], alpha];
+
+        /* 预览态（layer.previewMat 存在）只画面片。
+         * 线框 / 顶点 / 法向 / 边界这些辅助路径在顶点被 uModel 大幅移动后
+         * 会出现退化三角形（表现为贯穿全屏的细条），而且它们对"看配准效果"
+         * 没有帮助。跳过它们既能消除伪影，也省一半绘制量。 */
+        if (layer.previewMat)
+        {
+            if (layer.showFaces)
+            {
+                gl.disable(gl.CULL_FACE);
+                var bc2 = layer.backColorRgb || [0.42, 0.44, 0.47];
+                var backCol2 = [bc2[0], bc2[1], bc2[2], alpha];
+                var backShade2 = (layer.shadeMode === 2) ? 0 : layer.shadeMode;
+                if (layer.shadeMode === 2) { backCol2 = [0, 0, 0, alpha]; }
+                this.drawMesh(layer, mvp, viewM, col, layer.shadeMode, false, false, backCol2, backShade2);
+            }
+            return;
+        }
 
         if (layer.showFaces)
         {
@@ -1358,6 +1396,7 @@
         var wc = layer.wireColorRgb || [0.20, 0.62, 0.95];
         gl.useProgram(this.lineP);
         gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.lineU.uModel, false, this.modelOf(layer));
         gl.uniform1f(this.lineU.uDepthBias, 0.0);
         gl.uniform4f(this.lineU.uColor, wc[0], wc[1], wc[2], 1.0);
         gl.bindVertexArray(g.wireVao);
@@ -1517,6 +1556,7 @@
         var bc = layer.boundaryColorRgb || [0.13, 0.83, 0.93];
         gl.useProgram(this.lineP);
         gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.lineU.uModel, false, this.modelOf(layer));
         // 裁剪空间前移（乘 w 等价于按视距等比前移），远近视角都稳定可见
         gl.uniform1f(this.lineU.uDepthBias, 0.0008);
         gl.uniform4f(this.lineU.uColor, bc[0], bc[1], bc[2], 1.0);
@@ -1637,6 +1677,7 @@
         {
             gl.useProgram(this.pointP);
             gl.uniformMatrix4fv(this.pointU.uMVP, false, mvp);
+            gl.uniformMatrix4fv(this.pointU.uModel, false, IDENT4);
             gl.uniformMatrix4fv(this.pointU.uView, false, viewM);
             gl.uniform1f(this.pointU.uPointSize, 4 * ((ctx && ctx.dpr) || 1));
             gl.uniform1f(this.pointU.uDepthBias, -0.00002);
@@ -1660,6 +1701,7 @@
         {
             gl.useProgram(this.meshP);
             gl.uniformMatrix4fv(this.meshU.uMVP, false, mvp);
+            gl.uniformMatrix4fv(this.meshU.uModel, false, IDENT4);
             gl.uniformMatrix4fv(this.meshU.uView, false, viewM);
             if (this.meshU.uTwoSided) { gl.uniform1i(this.meshU.uTwoSided, 0); }
             gl.uniform4f(this.meshU.uColor, 0.10, 0.95, 0.85, 1.0);
@@ -1724,6 +1766,7 @@
 
         gl.useProgram(this.lineP);
         gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.lineU.uModel, false, IDENT4);
         gl.uniform1f(this.lineU.uDepthBias, 0.0);
         gl.disable(gl.DEPTH_TEST);
         gl.bindVertexArray(this.markVao);
@@ -1789,6 +1832,7 @@
 
         gl.useProgram(this.pointP);
         gl.uniformMatrix4fv(this.pointU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.pointU.uModel, false, this.modelOf(layer));
         var vc = layer.vertColorRgb || [0.95, 0.95, 0.98];
         gl.uniform1f(this.pointU.uPointSize, (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale);
         gl.uniform1f(this.pointU.uDepthBias, 0.0);
@@ -1854,6 +1898,7 @@
 
         gl.useProgram(this.pointP);
         gl.uniformMatrix4fv(this.pointU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.pointU.uModel, false, this.modelOf(layer));
         gl.uniformMatrix4fv(this.pointU.uView, false, viewM);
         gl.uniform1f(this.pointU.uPointSize, pointSize);
         // 顶点云与网格表面完全共面：点必须比面更靠近相机，否则被网格整片挡掉
@@ -1912,6 +1957,7 @@
         }
         gl.useProgram(this.lineP);
         gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.lineU.uModel, false, this.modelOf(layer));
         gl.uniform1f(this.lineU.uDepthBias, 0.00001);
         // 法向固定用青色，与任意图层颜色区分
         gl.uniform4fv(this.lineU.uColor, [0.55, 0.93, 1.0, alpha]);
@@ -2011,6 +2057,7 @@
                 {
                     gl.useProgram(this.lineP);
                     gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+                    gl.uniformMatrix4fv(this.lineU.uModel, false, IDENT4);
                     gl.uniform1f(this.lineU.uDepthBias, 0.0);
                     var gc = this.gridColor || [0.22, 0.26, 0.32];
             gl.uniform4f(this.lineU.uColor, gc[0], gc[1], gc[2], 1.0);
@@ -2028,6 +2075,7 @@
                 this.ensureAxis(alen);
                 gl.useProgram(this.lineP);
                 gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
+                gl.uniformMatrix4fv(this.lineU.uModel, false, IDENT4);
                 gl.uniform1f(this.lineU.uDepthBias, 0.0);
                 gl.bindVertexArray(this.axisBuffer);
                 gl.uniform4f(this.lineU.uColor, 0.92, 0.28, 0.28, 1.0);
