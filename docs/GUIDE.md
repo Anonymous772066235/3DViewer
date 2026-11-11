@@ -560,9 +560,9 @@ ICP 一个错误起点。
 
 | 模块 | 职责 |
 | --- | --- |
-| `js/super4pcs.js` | 全局粗配准。按官方 nmellado/Super4PCS 逐函数翻译：`IndexedNormalSet3D`（位置网格 × 法向 7³ 分箱）、共面 4 点 + 比值不变量、`ExtractPairs` / `FindCongruentQuadrilaterals`、`Verify` 增量早停、质心居中与 `toGlobal` 全局补偿 |
-| `js/icp.js` | 精配准。点到面 / 对称对应、`computeVertexNormals`、`pcaOf` |
-| `js/kdtree.js` | 点云 KD 树，支持最近邻、半径查询与**环形查询**（带下界） |
+| `js/algo.js`（Super4PCS 段） | 全局粗配准。按官方 nmellado/Super4PCS 逐函数翻译：`IndexedNormalSet3D`（位置网格 × 法向 7³ 分箱）、共面 4 点 + 比值不变量、`ExtractPairs` / `FindCongruentQuadrilaterals`、`Verify` 增量早停、质心居中与 `toGlobal` 全局补偿 |
+| `js/algo.js`（ICP 段） | 精配准。点到面 / 对称对应、`computeVertexNormals`、`pcaOf` |
+| `js/core.js`（KD 树段） | 点云 KD 树，支持最近邻、半径查询与**环形查询**（带下界） |
 | `js/ui.js` | 面板编排：N-N 选点与配对、三阶段分帧驱动、矩阵读写与应用 |
 
 **几个不显然的设计**：

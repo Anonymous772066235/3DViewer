@@ -238,15 +238,11 @@ curl http://127.0.0.1:8765/health
 ├── check.ps1             冒烟测试（7 个场景）
 ├── css/style.css         深浅两套主题变量
 ├── js/
-│   ├── core.js           数学：向量、矩阵、四元数、包围盒
-│   ├── io.js             STL / OBJ / PLY / 点云解析
-│   ├── algo.js           三角求交、拾取、裁剪、空间索引
-│   ├── kdtree.js         点云 KD 树（最近邻 / 半径 / 环形查询）
-│   ├── icp.js            ICP 精配准、顶点法向计算
-│   ├── super4pcs.js      Super4PCS 全局粗配准（官方实现的逐函数翻译）
+│   ├── core.js           数学（向量 / 矩阵 / 四元数 / 包围盒）+ KD 树
+│   ├── io.js             STL / OBJ / PLY / 点云解析、内存预检
+│   ├── algo.js           三角求交、拾取、裁剪、分块索引 + ICP + Super4PCS
 │   ├── render.js         WebGL2 渲染、分块、视角器
-│   ├── ui-util.js        纯工具函数（格式化 / 矩阵 / 几何），零 DOM 依赖
-│   ├── ui.js             场景树、属性面板、数据对齐面板、拖拽
+│   ├── ui.js             场景树、属性面板、数据对齐面板、日志、拖拽 + 纯工具函数
 │   ├── app.js            应用编排、图层与相机
 │   └── plugins/          插件（孔位优化）
 ├── server/

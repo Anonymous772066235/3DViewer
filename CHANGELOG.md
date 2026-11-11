@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.2.7` |
+| 当前版本 | `1.0.2.8` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-11 |
 | 版本号规则 | `v` + `YYYYMMDD` + 当日序号字母（`a`…`z`），每次可感知改动递增 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -2418,28 +2418,66 @@ seg/rem 中不在原始顶点集合里的顶点：0 个
   `--run-all-compositor-stages-before-draw` 与 `--disable-new-content-rendering-timeout`
   才能拍到最后合成的画面。
 
+### 1.0.2.8（按职责合并源文件）
+
+`js/` 下原本是 10 个平铺文件，其中 `kdtree` / `icp` / `super4pcs` / `ui-util`
+和 `algo` / `ui` 处在两个抽象层级上，不看 `index.html` 的加载顺序看不出谁依赖谁。
+现在按职责合并成 6 个文件，**不新增任何目录层级**：
+
+| 文件 | 收拢的内容 |
+| --- | --- |
+| `core.js` | 数学（向量 / 矩阵 / 四元数 / 包围盒）+ KD 树 |
+| `algo.js` | 三角求交、拾取、裁剪、分块索引 + ICP + Super4PCS |
+| `render.js` | WebGL2 渲染、分块、相机、视角器 |
+| `ui.js` | 场景树 / 属性面板 / 数据对齐 / 日志 / 拖拽 + 纯工具函数 |
+| `io.js` | STL / OBJ / PLY / 点云解析、内存预检 |
+| `app.js` | 应用编排、图层与相机 |
+
+合并方式是**原样拼接**：每个原文件都是独立的 IIFE，按顺序首尾相接即可，
+不存在函数体改写。`MV.kdtree` / `MV.icp` / `MV.super4pcs` / `MV.util` 这些全局名
+全部保留，因此所有调用点、`check.ps1` 的场景 URL 都不需要动。
+
+唯一需要留意的是顺序：`ui-util.js` 必须排在 `ui.js` 之前，因为后者在自己的
+IIFE 入口就要解构 `MV.util`。合并后两者同处 `ui.js`，工具函数段放在前面。
+
+`index.html` 的 `<script>` 从 11 行减到 8 行（6 个模块 + 2 个插件）。
+README 的目录结构与 GUIDE 的模块归属表同步更新。
+
+---
+
 ---
 
 ## 附录 A：当前文件规模（2026-11-11）
 
 | 文件 | 行数 | 职责 |
 | --- | --- | --- |
-| `js/ui.js` | 4943 | 场景树、属性面板、数据对齐面板、菜单 |
+| `js/ui.js` | 5488 | 场景树、属性面板、数据对齐面板、日志、拖拽 + 纯工具函数 |
+| `js/algo.js` | 4003 | 三角求交、拾取、裁剪、分块索引、ICP、Super4PCS |
 | `css/style.css` | 2843 | 深浅两套主题变量与全部部件样式 |
-| `js/render.js` | 2755 | WebGL2 渲染、分块、视角器 |
+| `js/render.js` | 2755 | WebGL2 渲染、分块、相机、视角器 |
 | `js/app.js` | 2120 | 应用编排、图层与相机、截图合成 |
-| `js/algo.js` | 1867 | 三角求交、拾取、裁剪、空间索引 |
-| `js/io.js` | 1538 | STL / OBJ / PLY / 点云解析 |
-| `js/super4pcs.js` | 1489 | Super4PCS 全局粗配准 |
-| `index.html` | 644 | 单页入口 |
-| `js/icp.js` | 639 | ICP 精配准、顶点法向 |
-| `js/ui-util.js` | 541 | 纯工具函数（格式化 / 矩阵 / 几何），零 DOM 依赖 |
-| `js/core.js` | 398 | 数学：向量、矩阵、四元数、包围盒 |
-| `js/kdtree.js` | 260 | 点云 KD 树 |
+| `js/io.js` | 1538 | STL / OBJ / PLY / 点云解析、内存预检 |
+| `js/core.js` | 662 | 数学（向量 / 矩阵 / 四元数 / 包围盒）+ KD 树 |
+| `index.html` | 640 | 单页入口 |
+| `js/plugins/optimize.js` | 343 | 孔位优化插件 |
 | `check.ps1` | 237 | 冒烟测试（7 个场景） |
+| `js/plugins/registry.js` | 58 | 插件注册表 |
 
-`js/ui-util.js` 是从 `ui.js` 抽出的纯函数集合：不碰 DOM、不读 App 状态、
-不调用 `ui.js` 内部其他函数，因此可以独立成文件、独立测试。
-挂载点是 `MV.util` 而非 `MV.ui.util` —— 后者会被 `ui.js` 末尾的
-`global.MV.ui = { ... }` 整块覆盖。
+合并后的分层（自上而下单向依赖，下层不反向引用上层）：
 
+```
+app.js            编排：建图层、串流程
+  ├── ui.js       界面：DOM 与交互（不碰 GL）
+  ├── render.js   渲染：只负责画
+  └── algo.js     算法：纯计算（不碰 DOM / GL）
+        ├── io.js        解析：文件 → 内存数据
+        └── core.js      基础：数学与数据结构
+```
+
+`algo.js` 里 `MV.icp` / `MV.super4pcs` 是两段独立的 IIFE，同文件但互不内联；
+`algo` / `render` / `ui` 都通过 `MV.<模块>.installAppMethods` 往 `App` 原型注入方法，
+这样底层可以在 `App` 定义之前加载 —— 这是这套分层能在零构建前提下成立的关键。
+
+`ui.js` 里的纯工具函数段（`fmtMat` / `mat4Invert` / `isRigidMat` 等）仍然挂
+`MV.util`，不挂 `MV.ui.util` —— 后者会被 `ui.js` 末尾的 `global.MV.ui = { ... }`
+整块覆盖。
