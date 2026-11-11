@@ -47,8 +47,13 @@
         this.pickPoints = [];
 
         this.settings = {
-            bg: [0.078, 0.094, 0.129],
-            grid: true,
+            /* ?theme=light 要在这里就生效：setTheme 是在 init() 之后调的，
+             * 那时首帧已经按深色画过。分享链接 / 截图希望开屏即是目标主题，
+             * 所以构造期先按 URL 定下背景色（setTheme 随后再覆盖一次，无副作用）。 */
+            bg: (global.location && (global.location.search || '').indexOf('theme=light') >= 0)
+                ? [0.933, 0.945, 0.961]
+                : [0.078, 0.094, 0.129],
+            grid: false,          /* 地面网格默认关闭 */
             axes: true,
             ghost: true,
             ghostMode: 0,

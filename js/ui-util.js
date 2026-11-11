@@ -73,6 +73,17 @@
         return String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
     }
 
+    /* 与着色器 ramp 一致的色标采样点。
+     * 原本在 ui.js 里，rampColorAt 搬过来时必须一起搬 —— 否则每次调用
+     * 都会 ReferenceError，调用链（drawHist → renderProps）随之中断，
+     * 表现是「选中带标量场的点云后属性面板整个空白」。 */
+    var RAMP_STOPS = [
+        [[38, 77, 242], [26, 217, 230], [64, 230, 89], [255, 217, 38], [250, 56, 46]],
+        [[41, 87, 230], [41, 199, 112], [230, 56, 46]],
+        [[20, 20, 20], [240, 240, 240]],
+        [[36, 92, 224], [245, 245, 245], [219, 51, 46]]
+    ];
+
     function rampColorAt(rampIdx, t)
     {
         var stops = RAMP_STOPS[rampIdx] || RAMP_STOPS[0];

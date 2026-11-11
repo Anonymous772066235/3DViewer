@@ -888,6 +888,8 @@
 
         var pathText = layer.absPath || layer.sourceUrl ||
             '（未解析：浏览器不暴露本地路径；放入 data 目录或用 HOLEOPT_SEARCH 指定搜索根）';
+        /* URL 形式加载时路径里是 %E6%A7%BD... 这样的编码串，中文文件名会显示成乱码 */
+        try { pathText = decodeURI(pathText); } catch (e) { /* 保持原样 */ }
         $('p-path').textContent = pathText;
         $('p-path').title = pathText;
     }
@@ -2960,14 +2962,6 @@
             name: 'BWR',
             css: 'linear-gradient(90deg, rgb(36,92,224) 0%, rgb(245,245,245) 50%, rgb(219,51,46) 100%)'
         }
-    ];
-
-    // 与着色器 ramp 一致的色标采样点（用于直方图柱色）
-    var RAMP_STOPS = [
-        [[38, 77, 242], [26, 217, 230], [64, 230, 89], [255, 217, 38], [250, 56, 46]],
-        [[41, 87, 230], [41, 199, 112], [230, 56, 46]],
-        [[20, 20, 20], [240, 240, 240]],
-        [[36, 92, 224], [245, 245, 245], [219, 51, 46]]
     ];
 
     var HIST_BINS = 48;
