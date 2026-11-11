@@ -1739,10 +1739,7 @@
     App.prototype.setCameraLock = function (on)
     {
         this.cameraLocked = !!on;
-        if (this.canvas)
-        {
-            this.canvas.style.cursor = on ? 'crosshair' : '';
-        }
+        if (typeof this.setPickCursor === 'function') { this.setPickCursor(on); }
     };
 
     App.prototype.bindPointer = function ()

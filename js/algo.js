@@ -1111,6 +1111,47 @@
     }
 
     /* ---------------- 射线拾取（旋转中心 / 信息拾取共用） ---------------- */
+    /* 世界坐标 -> 屏幕坐标（相对 canvas 的 CSS 像素）。
+     * 与 rayFromScreen 严格互逆：同一套 camera.basis / fov / rect / dpr。
+     * 用于把配准选的 3D 点投影回屏幕画序号标签。 */
+    App.prototype.worldToScreen = function (p, vi)
+    {
+        vi = vi || 0;
+        var v = this.views && this.views[vi];
+        if (!v || !v.camera) { return null; }
+
+        var cam = v.camera;
+        var rect = v.rect;
+        var dpr = this.dpr || 1;
+        var b = cam.basis();
+
+        var dx = p[0] - b.eye[0];
+        var dy = p[1] - b.eye[1];
+        var dz = p[2] - b.eye[2];
+
+        var zc = dx * b.forward[0] + dy * b.forward[1] + dz * b.forward[2];
+        if (zc <= 1e-9) { return null; }            // 在相机背后
+
+        var xc = dx * b.right[0] + dy * b.right[1] + dz * b.right[2];
+        var yc = dx * b.up[0] + dy * b.up[1] + dz * b.up[2];
+
+        var tanH = Math.tan(cam.fov * 0.5);
+        var aspect = rect.w / Math.max(rect.h, 1);
+
+        var px = ((xc / (zc * tanH * aspect)) + 1) / 2 * rect.w + rect.x;
+        var py = (1 - (yc / (zc * tanH))) / 2 * rect.h + rect.y;
+
+        /* 落在本视图矩形外就不返回 —— 双视图并排时，
+         * 一个点只应出现在真正看得到它的那一侧。 */
+        if (px < rect.x || px > rect.x + rect.w ||
+            py < rect.y || py > rect.y + rect.h)
+        {
+            return null;
+        }
+
+        return { x: px / dpr, y: py / dpr, depth: zc };
+    };
+
     App.prototype.rayFromScreen = function (clientX, clientY)
     {
         var V = global.MV.math.Vec3;
@@ -1280,6 +1321,232 @@
     }
 
     /* 射线拾取最近命中：坐标 / 法向 / 标签 / 标量（点云） */
+    /* 只对指定图层做拾取。
+     *
+     * rayPick 返回的是"最近的一次命中"，两个点云在屏幕上重叠时，
+     * 后面的那一层永远取不到 —— N-N 配准要分别在参考层和目标层上取点，
+     * 未对齐状态下两层本来就重叠，靠 rayPick 会导致所有点击都落在
+     * 视线最前面那层上，另一边永远是 0 个点。
+     */
+    App.prototype.rayPickLayer = function (clientX, clientY, layerId)
+    {
+        if (!this.layers || !this.layers.length) { return null; }
+
+        var V = global.MV.math.Vec3;
+        var ray = this.rayFromScreen(clientX, clientY);
+        var eye = ray.eye;
+        var dir = ray.dir;
+        var bestT = Infinity;
+        var hit = null;
+
+        /* 当前视图能作为「主图」显示的槽位。
+         * 渲染时左视图只画 A + S、右视图只画 B + S，
+         * 不属于本视图的图层根本不绘制 —— 对它求交等于打向看不见的东西，
+         * 拿到的 3D 点与用户视觉上的点击位置完全无关。 */
+        var viL = this.viewIndexAt(clientX);
+        var v = this.views && this.views[viL];
+
+        for (var li = 0; li < this.layers.length; li++)
+        {
+            var l = this.layers[li];
+
+            if (!l || l.id !== layerId) { continue; }
+            if (!l.visible || !l.gpu) { continue; }
+            if (v && v.slots && !(this.settings && this.settings.singleView) &&
+                !v.slots[l.slot])
+            {
+                // 叠层例外：ghost 开启时对面槽位在本视图里也是可见的
+                var asGhostL = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
+                if (!asGhostL) { continue; }
+            }
+
+            if (l.kind === 'mesh')
+            {
+                var pos = l.data.positions;
+                var tri = l.gpu.triCount;
+                var cand = pickCandidates(l, eye, dir, tri);
+                var nCand = cand ? cand.length : tri;
+
+                for (var ci = 0; ci < nCand; ci++)
+                {
+                    var t = cand ? cand[ci] : ci;
+                    var o = t * 9;
+                    var tt = rayTriangle(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], pos, o);
+
+                    if (tt > 0 && tt < bestT)
+                    {
+                        bestT = tt;
+                        var e1 = [pos[o + 3] - pos[o], pos[o + 4] - pos[o + 1], pos[o + 5] - pos[o + 2]];
+                        var e2 = [pos[o + 6] - pos[o], pos[o + 7] - pos[o + 1], pos[o + 8] - pos[o + 2]];
+
+                        hit = {
+                            layer: l,
+                            pos: [eye[0] + dir[0] * tt, eye[1] + dir[1] * tt, eye[2] + dir[2] * tt],
+                            normal: V.normalize(V.cross(e1, e2)),
+                            tag: null,
+                            scalars: null,
+                            tri: t
+                        };
+                    }
+                }
+            }
+            else
+            {
+                var pp = l.data.positions;
+                var cnt = l.gpu.count;
+                var shapeL = this.pickShape(l, viL);
+                var coreL = shapeL.core;
+                var armL = shapeL.arm;
+                var thickL = shapeL.thick;
+                var camBL = (this.views && this.views[viL])
+                    ? this.views[viL].camera.basis() : null;
+
+                var localCrossL = Infinity;
+                var localTL = Infinity;
+                var localPiL = -1;
+
+                for (var pi = 0; pi < cnt; pi++)
+                {
+                    var ax = pp[pi * 3] - eye[0];
+                    var ay = pp[pi * 3 + 1] - eye[1];
+                    var az = pp[pi * 3 + 2] - eye[2];
+                    var tp = ax * dir[0] + ay * dir[1] + az * dir[2];
+
+                    /* 同 rayPick：不能用深度剪枝，否则会挤掉正中心的点 */
+                    if (tp <= 0) { continue; }
+
+                    var cx2 = ax - dir[0] * tp;
+                    var cy2 = ay - dir[1] * tp;
+                    var cz2 = az - dir[2] * tp;
+
+                    var auL, avL;
+                    if (camBL)
+                    {
+                        var duL = cx2 * camBL.right[0] + cy2 * camBL.right[1] + cz2 * camBL.right[2];
+                        var dvL = cx2 * camBL.up[0] + cy2 * camBL.up[1] + cz2 * camBL.up[2];
+                        auL = Math.abs(duL);
+                        avL = Math.abs(dvL);
+                    }
+                    else
+                    {
+                        auL = avL = Math.sqrt(cx2 * cx2 + cy2 * cy2 + cz2 * cz2);
+                    }
+
+                    var inCoreL = (auL * auL + avL * avL) <= coreL * coreL;
+                    var distCrossL;
+
+                    if (inCoreL)
+                    {
+                        distCrossL = Math.sqrt(auL * auL + avL * avL);
+                    }
+                    else
+                    {
+                        if (auL > armL || avL > armL) { continue; }
+                        if (auL <= thickL) { distCrossL = avL; }
+                        else if (avL <= thickL) { distCrossL = auL; }
+                        else { continue; }
+                    }
+
+                    if (distCrossL < localCrossL ||
+                        (distCrossL === localCrossL && tp < localTL))
+                    {
+                        localCrossL = distCrossL;
+                        localTL = tp;
+                        localPiL = pi;
+                    }
+                }
+
+                if (localPiL >= 0)
+                {
+                    bestT = localTL;
+                    hit = {
+                        layer: l,
+                        pos: [pp[localPiL * 3], pp[localPiL * 3 + 1], pp[localPiL * 3 + 2]],
+                        normal: [0, 0, 1],
+                        tag: null,
+                        scalars: null,
+                        tri: -1
+                    };
+                }
+            }
+        }
+
+        return hit;
+    };
+
+    /* 点云拾取区域：十字形，尺寸随点的渲染大小变化。
+     *
+     * 用十而不是圆，是为了"所见即所得"：
+     *   - 臂长 = 点半径 + 余量 → 点画得越大，可点中的范围越大
+     *   - 臂宽 = 点半径 + 余量 → 点自身占的面积内一定命中
+     *   - 斜向上超出臂宽的点不参与，避免吸附到视觉上并不在光标下的点
+     *
+     * 世界尺度由「屏幕像素」反算，所以缩放时手感一致。 */
+    App.prototype.pickShape = function (layer, vi)
+    {
+        /* bbox 缺失时不能用 BBox.radius(null)，那会直接抛错、
+         * 让整个 rayPick 失效 —— 表现就是"完全拾取不到数据"。 */
+        var bb0 = layer.data && layer.data.bbox;
+        var fallbackR = (bb0 && bb0.min && bb0.max)
+            ? Math.max(global.MV.math.BBox.radius(bb0) * 0.012, 1e-6)
+            : 1.0;
+
+        var v = this.views && this.views[vi];
+        if (!v || !v.camera || !v.rect)
+        {
+            return { core: fallbackR, arm: fallbackR, thick: fallbackR, perPx: fallbackR / 8 };
+        }
+
+        var bb = layer.data.bbox;
+        if (!bb || !bb.min || !bb.max)
+        {
+            return { core: fallbackR, arm: fallbackR, thick: fallbackR, perPx: fallbackR / 8 };
+        }
+
+        var b = v.camera.basis();
+        var cx = (bb.min[0] + bb.max[0]) * 0.5 - b.eye[0];
+        var cy = (bb.min[1] + bb.max[1]) * 0.5 - b.eye[1];
+        var cz = (bb.min[2] + bb.max[2]) * 0.5 - b.eye[2];
+
+        var depth = cx * b.forward[0] + cy * b.forward[1] + cz * b.forward[2];
+        if (depth <= 1e-6) { depth = Math.sqrt(cx * cx + cy * cy + cz * cz); }
+        if (depth <= 1e-6)
+        {
+            return { core: fallbackR, arm: fallbackR, thick: fallbackR, perPx: fallbackR / 8 };
+        }
+
+        var viewH = Math.max(v.rect.h / (this.dpr || 1), 1);
+        var perPx = 2 * depth * Math.tan(v.camera.fov * 0.5) / viewH;
+
+        /* 点的屏幕半径（CSS 像素）：与渲染用的是同一套换算
+         *   devicePx = pointSize * pointScale * dpr
+         * 拾取只看 CSS 像素，所以 dpr 不参与。 */
+        var scale = (this.settings && this.settings.pointScale) || 1;
+        var ptPx = (layer.pointSize || 3) * scale;
+        var radiusPx = Math.max(ptPx * 0.5, 1);
+
+        /* 吸附区 = 中心圆 + 十字臂。
+         *
+         * 只有十字带时，斜向偏差稍大就会落空，实际操作很难瞄准；
+         * 只给圆形又会让斜向"不该吸"的点被吸进来。
+         * 两者叠加：中心一圈圆形兜底（容易点中），外侧靠十字臂延伸（精确）。
+         *
+         *   corePx   圆形半径：至少 12px
+         *   thickPx  臂半宽：  至少 6px（带宽 12px）
+         *   armPx    臂半长：  至少 22px（十字总长 44px）
+         * 三者都随点尺寸增长，点画得越大越容易点中。 */
+        var corePx = Math.max(radiusPx + 8, 12);
+        var thickPx = Math.max(radiusPx + 4, 6);
+        var armPx = Math.max(radiusPx + 16, 22);
+
+        return {
+            core: perPx * corePx,
+            arm: perPx * armPx,
+            thick: perPx * thickPx,
+            perPx: perPx
+        };
+    };
+
     App.prototype.rayPick = function (clientX, clientY)
     {
         var V = global.MV.math.Vec3;
@@ -1288,6 +1555,8 @@
         var dir = ray.dir;
         var bestT = Infinity;
         var hit = null;
+        var viPick = this.viewIndexAt(clientX);
+        var vPick = this.views && this.views[viPick];
 
         for (var li = 0; li < this.layers.length; li++)
         {
@@ -1295,6 +1564,24 @@
             if (!l.visible || !l.gpu)
             {
                 continue;
+            }
+
+            /* 与渲染保持同一套可见性判断：不属于本视图槽位的图层不参与拾取，
+             * 否则射线会打到"屏幕上看不见的那一层"的背面。
+             *
+             * 但有一个例外：开启「叠加对面模型」时，对面槽位的图层会以半透明
+             * 形式画在本视图里（渲染的第一轮循环）—— 既然看得见，就必须能点。
+             * 早先只判断 slots 会把这类叠层一并挡掉，表现为"明明看得到却拾取不到"。 */
+            /* 单视图模式下渲染会把所有可见图层一起画（无视 slot），
+             * 拾取必须跟着放开，否则 B 槽的图层"看得见却点不到"。 */
+            if (vPick && vPick.slots && !(this.settings && this.settings.singleView) &&
+                !vPick.slots[l.slot])
+            {
+                var asGhost = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
+                if (!asGhost)
+                {
+                    continue;
+                }
             }
 
             if (l.kind === 'mesh')
@@ -1332,9 +1619,22 @@
             {
                 var pp = l.data.positions;
                 var cnt = l.gpu.count;
-                var rd = global.MV.math.BBox.radius(l.data.bbox);
-                var tol = Math.max(rd * 0.012, 1e-6);
-                var tol2 = tol * tol;
+                var shape = this.pickShape(l, viPick);
+                var coreW = shape.core;
+                var armW = shape.arm;
+                var thickW = shape.thick;
+
+                /* 相机平面内的两个轴，用来把「点到射线的垂足向量」
+                 * 分解成屏幕上的 (u, v) 偏移。 */
+                var camB = (this.views && this.views[viPick])
+                    ? this.views[viPick].camera.basis() : null;
+
+                /* 十字形判定：落在竖臂或横臂上才算命中，
+                 * 候选之间按「沿臂方向离十字中心的距离」排序 ——
+                 * 正中心最近，沿臂越远越靠后；斜向超出臂宽的点不参与。 */
+                var localCross = Infinity;
+                var localT = Infinity;
+                var localPi = -1;
 
                 for (var pi = 0; pi < cnt; pi++)
                 {
@@ -1342,38 +1642,83 @@
                     var ay = pp[pi * 3 + 1] - eye[1];
                     var az = pp[pi * 3 + 2] - eye[2];
                     var tp = ax * dir[0] + ay * dir[1] + az * dir[2];
-                    if (tp <= 0 || tp >= bestT)
+
+                    /* 这里【不能】用 tp >= bestT 剪枝。
+                     * bestT 是「已命中的最近深度」，而点云要选的是
+                     * 「十字上离中心最近」的点 —— 后者可能比已命中的更远。
+                     * 剪枝会让正中心的点被一个更近但偏心的点挤掉。 */
+                    if (tp <= 0)
                     {
                         continue;
                     }
                     var ddx = ax - dir[0] * tp;
                     var ddy = ay - dir[1] * tp;
                     var ddz = az - dir[2] * tp;
-                    if (ddx * ddx + ddy * ddy + ddz * ddz <= tol2)
-                    {
-                        bestT = tp;
-                        var d = l.data;
-                        hit = {
-                            layer: l,
-                            pos: [pp[pi * 3], pp[pi * 3 + 1], pp[pi * 3 + 2]],
-                            normal: d.normals
-                                ? [d.normals[pi * 3], d.normals[pi * 3 + 1], d.normals[pi * 3 + 2]]
-                                : null,
-                            tag: (d.tags && d.tags.length > pi) ? d.tags[pi] : null,
-                            scalars: null,
-                            index: pi
-                        };
 
-                        if (d.scalars && d.scalars.length)
+                    var au, av;
+                    if (camB)
+                    {
+                        var du = ddx * camB.right[0] + ddy * camB.right[1] + ddz * camB.right[2];
+                        var dv = ddx * camB.up[0] + ddy * camB.up[1] + ddz * camB.up[2];
+                        au = Math.abs(du);
+                        av = Math.abs(dv);
+                    }
+                    else
+                    {
+                        au = av = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+                    }
+
+                    /* 中心圆内：一律算命中，距离用欧氏距离；
+                     * 圆外但仍落在十字臂上：按「沿臂偏移」计距离。
+                     * 这样中心附近好点，稍远时十字臂还能兜住。 */
+                    var inCore = (au * au + av * av) <= coreW * coreW;
+                    var distCross;
+
+                    if (inCore)
+                    {
+                        distCross = Math.sqrt(au * au + av * av);
+                    }
+                    else
+                    {
+                        if (au > armW || av > armW) { continue; }
+                        if (au <= thickW) { distCross = av; }        // 竖臂
+                        else if (av <= thickW) { distCross = au; }   // 横臂
+                        else { continue; }                            // 十字之外
+                    }
+
+                    if (distCross < localCross ||
+                        (distCross === localCross && tp < localT))
+                    {
+                        localCross = distCross;
+                        localT = tp;
+                        localPi = pi;
+                    }
+                }
+
+                if (localPi >= 0)
+                {
+                    bestT = localT;
+                    var d = l.data;
+                    hit = {
+                        layer: l,
+                        pos: [pp[localPi * 3], pp[localPi * 3 + 1], pp[localPi * 3 + 2]],
+                        normal: d.normals
+                            ? [d.normals[localPi * 3], d.normals[localPi * 3 + 1], d.normals[localPi * 3 + 2]]
+                            : null,
+                        tag: (d.tags && d.tags.length > localPi) ? d.tags[localPi] : null,
+                        scalars: null,
+                        index: localPi
+                    };
+
+                    if (d.scalars && d.scalars.length)
+                    {
+                        hit.scalars = [];
+                        for (var si = 0; si < d.scalars.length; si++)
                         {
-                            hit.scalars = [];
-                            for (var si = 0; si < d.scalars.length; si++)
-                            {
-                                hit.scalars.push({
-                                    name: d.scalars[si].name,
-                                    value: d.scalars[si].values[pi]
-                                });
-                            }
+                            hit.scalars.push({
+                                name: d.scalars[si].name,
+                                value: d.scalars[si].values[localPi]
+                            });
                         }
                     }
                 }
@@ -1400,21 +1745,47 @@
     };
 
     /* ---------------- 信息拾取：坐标 / 法向 / 标签 / 标量 + 距离角度 ---------------- */
+    /* 统一的光标切换：拾取 / 选点模式走这里。
+     * 用 class 而不是内联 style，避免与 CSS 里的 #gl 规则互相覆盖。 */
+    App.prototype.setPickCursor = function (on)
+    {
+        if (!this.canvas) { return; }
+        if (on) { this.canvas.classList.add('picking'); }
+        else { this.canvas.classList.remove('picking'); }
+    };
+
     App.prototype.setPickInfo = function (on)
     {
         this.pickInfo = !!on;
         if (this.pickInfo)
         {
             this.pickPoints = this.pickPoints || [];
-            this.canvas.style.cursor = 'crosshair';
-            hooks.notify('拾取模式：在数据上单击取点（最多 3 个），Esc 退出');
+            this.setPickCursor(true);
+            hooks.notify('拾取模式：在数据上单击取点，Esc 退出');
         }
         else
         {
-            this.canvas.style.cursor = '';
+            /* 退出即清空。原来只切光标、保留 pickPoints，于是：
+             *   - 三维视图里的十字标记一直挂着
+             *   - renderPickBar 的判断是「未激活且无点才隐藏」，
+             *     点还在就照样显示，信息栏也留在那儿
+             * 下次进入拾取模式还会看到上次的残留。 */
+            this.pickPoints = [];
+            this.setPickCursor(false);
             hooks.notify('已退出拾取模式');
         }
+
+        // pickPoints 已清空，这里传进去的就是空数组，信息栏随之隐藏
         hooks.renderPickBar(this.pickPoints || [], this.pickInfo);
+
+        /* 直接同步给渲染器，不等下一帧 ——
+         * 渲染循环虽然也会同步，但它依赖帧调度；退出时用户期望
+         * 标记立刻消失，不该有一帧的延迟。 */
+        if (this.renderer)
+        {
+            this.renderer.pickMarks = this.pickPoints;
+        }
+
         this.markDirty();
     };
 
@@ -1433,20 +1804,19 @@
         }
 
         this.pickPoints = this.pickPoints || [];
+        /* 不限个数：距离 / 角度取前几个点计算，其余照样在信息栏列出坐标。
+         * 原来超过 3 个就 shift() 掉最早的，等于不能多点参照。 */
         this.pickPoints.push(hit);
-        if (this.pickPoints.length > 3)
-        {
-            this.pickPoints.shift();   // 只保留最近 3 个，用于距离 / 角度
-        }
 
         hooks.renderPickBar(this.pickPoints, true);
-        hooks.notify('已拾取 ' + this.pickPoints.length + ' 个点（最多 3 个）');
+        hooks.notify('已拾取 ' + this.pickPoints.length + ' 个点（Esc 退出）');
         this.markDirty();
     };
 
     App.prototype.clearPicks = function ()
     {
         this.pickPoints = [];
+        if (this.renderer) { this.renderer.pickMarks = this.pickPoints; }
         hooks.renderPickBar([], this.pickInfo);
         this.markDirty();
     };
@@ -1457,7 +1827,7 @@
         this.pickMode = true;
         if (this.canvas)
         {
-            this.canvas.style.cursor = 'crosshair';
+            this.setPickCursor(true);
         }
         hooks.notify('点击模型表面设置旋转中心（Esc 取消）');
     };

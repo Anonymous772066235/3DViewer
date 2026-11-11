@@ -24,6 +24,16 @@
     --shadow:     0 8px 24px rgba(1, 4, 9, .55);
     --accent-hi: #79c0ff;
     --accent-lo: #1f6feb;
+
+    /* 双视图分隔线：取强调色的低饱和版本，
+     * 既比普通边框（--line）醒目，又不会盖过模型本身 */
+    --split:      rgba(88, 166, 255, .42);
+    --split-glow: rgba(88, 166, 255, .18);
+
+    /* 让原生控件（select 的弹出列表、滚动条、日期选择器等）走深色渲染。
+     * 这些部件的列表是浏览器自绘的，CSS 的 background 不一定生效，
+     * 必须靠 color-scheme 告诉它当前的明暗基调。 */
+    color-scheme: dark;
 }
 
 /* 浅色：纸白面板 + 微灰画布（画布略暗，模型才「浮」得起来）。
@@ -47,6 +57,12 @@ body.theme-light {
     --ok:         #1a7f37;
     --warn:       #9a6700;
     --danger:     #cf222e;
+
+    /* 浅色下用深蓝，透明度降低 —— 纸白背景上过饱和会显得脏 */
+    --split:      rgba(9, 105, 218, .34);
+    --split-glow: rgba(9, 105, 218, .12);
+
+    color-scheme: light;
 
     --shadow:     0 8px 24px rgba(31, 45, 61, .14);
     --accent-hi: #0969da;
@@ -531,13 +547,28 @@ button.mini {
     cursor: grabbing;
 }
 
+/* 拾取 / 选点模式的光标：贯穿式细十字 + 中心点。
+ *
+ * 取 CAD 与工程软件的经典做法 —— 十字线延伸到光标边缘，
+ * 方便对齐孔位、边缘这类有方向性的特征；中心点标出精确采样位置。
+ * 黑描边（0.45 透明）+ 白线双层，深色浅色背景都能看清。
+ * 热点 (13,13) 与十字交点、中心点重合，"光标画在哪就取在哪"。
+ *
+ * 回退值用 crosshair：SVG data URI 在极少数环境下会被拒，
+ * 那种情况下退回系统准星，语义不变。 */
+#gl.picking {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26'%3E%3Cg stroke='%23000000' stroke-opacity='0.9' stroke-width='4.6' stroke-linecap='round'%3E%3Cpath d='M13 1v24M1 13h24'/%3E%3C/g%3E%3Cg stroke='%2300d4ff' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M13 1v24M1 13h24'/%3E%3C/g%3E%3Ccircle cx='13' cy='13' r='2.6' fill='%2300d4ff' stroke='%23000000' stroke-opacity='0.9' stroke-width='1.1'/%3E%3C/svg%3E") 13 13, crosshair;
+}
+
 #split-line {
     position: absolute;
     left: 50%;
     top: 0;
     bottom: 0;
-    width: 1px;
-    background: var(--line);
+    width: 2px;
+    margin-left: -1px;          /* 宽度变了，重新居中 */
+    background: var(--split);
+    box-shadow: 0 0 6px var(--split-glow);
     pointer-events: none;
 }
 
@@ -1062,6 +1093,12 @@ button.danger:hover {
 .pick-row {
     padding: 5px 0;
     border-top: 1px solid var(--bg-soft);
+}
+
+/* 参与了距离 / 角度计算的那几行：与三维标记同色系 */
+.pick-title-active {
+    color: #ff9f4a;
+    font-weight: 600;
 }
 
 .pick-title {
@@ -2161,7 +2198,7 @@ body.theme-light #p-sfhist.sf-ruler {
 /* 显示范围 / 颜色范围两行：标签 4 字需要更宽 */
 #props .prop-row.range2 { grid-template-columns: 74px minmax(0, 1fr) minmax(0, 1fr) auto; }
 
-/* ===== 坐标变换对话框 ===== */
+/* ===== 数据对齐：对话框 ===== */
 .xform-box {
     min-width: 400px;
     max-width: 440px;
@@ -2383,7 +2420,7 @@ body.theme-light #p-sfhist.sf-ruler {
     max-height: calc(100vh - 32px);
     overflow-y: auto;
 }
-/* ===== 坐标变换（侧栏常驻） ===== */
+/* ===== 数据对齐（侧栏常驻） ===== */
 #xform.panel {
     padding: 8px 10px 12px;
 }
@@ -2444,17 +2481,21 @@ body.theme-light #p-sfhist.sf-ruler {
     padding: 4px 8px;
     font-size: 12px;
 }
-/* 侧栏里的下拉：补深色底，避免深色主题下出现刺眼的白框 */
+/* 侧栏里的下拉：底色统一走主题变量。
+ *
+ * 原来写的是 var(--bg-input, #14181f) 与硬编码的 #14181f / #dfe3e8，
+ * 而 --bg-input 从来没定义过 —— 于是深色回退值一直生效，
+ * 浅色主题下这两个框保持深底浅字，跟白面板撞得很厉害。 */
 #xform .xform-reg-row select {
-    background: var(--bg-input, #14181f);
-    color: var(--text, #dfe3e8);
-    border: 1px solid var(--line, #2a3038);
+    background: var(--bg-soft);
+    color: var(--text);
+    border: 1px solid var(--line);
     border-radius: 3px;
     height: 22px;
 }
 #xform .xform-reg-row select option {
-    background: #14181f;
-    color: #dfe3e8;
+    background: var(--bg-soft);
+    color: var(--text);
 }
 /* 没有图层时下拉保持空白：隐藏箭头与边框，只占位不影响布局 */
 #xform .xform-reg-row select:empty {
@@ -2464,5 +2505,40 @@ body.theme-light #p-sfhist.sf-ruler {
     background: transparent;
     border-color: transparent;
     pointer-events: none;
+}
+
+/* ---------- N-N 选点的 3D 序号标记 ---------- */
+#pick-marks {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 6;
+    overflow: hidden;
+}
+
+#pick-marks .pick-mark {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    font: 11px/1.2 ui-monospace, Menlo, Consolas, monospace;
+    font-weight: 600;
+    padding: 2px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+/* 目标侧（被移动的图层）：琥珀色，与参考侧区分 */
+#pick-marks .pick-mark.dst {
+    color: #1a1200;
+    background: #f0b429;
+    border: 1px solid #c98f12;
+}
+
+/* 参考侧（固定图层）：青色 */
+#pick-marks .pick-mark.ref {
+    color: #001a1a;
+    background: #35d0d0;
+    border: 1px solid #1a9c9c;
 }
 

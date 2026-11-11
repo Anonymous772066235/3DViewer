@@ -1176,7 +1176,7 @@
         });
     }
 
-    /* ---------------- 坐标变换 ---------------- */
+    /* ---------------- 数据对齐（4×4 矩阵编辑 / 应用） ---------------- */
 
     var xformInputs = null;
 
@@ -1352,13 +1352,31 @@
 
     function refreshXformTargetLabel()
     {
+        /* 目标层变了：把该图层的累积变换回显到矩阵框，
+         * 并把「应用」的基准同步过去（没变换过就是单位阵）。 */
+        var layNow = xformTargetLayer();
+        var idNow = layNow ? layNow.id : null;
+
+        if (idNow !== refreshXformTargetLabel._lastId)
+        {
+            refreshXformTargetLabel._lastId = idNow;
+
+            var showMat = (layNow && layNow.xformMat) ? layNow.xformMat : IDENT4;
+            writeXformMat(showMat);
+
+            appliedMat = new Float64Array(16);
+            for (var mi = 0; mi < 16; mi++) { appliedMat[mi] = showMat[mi]; }
+
+            refreshApplyState();
+        }
+
         var el = $('xform-layer');
         if (!el) { return; }
         var L = xformTargetLayer();
         el.textContent = L ? (L.name + '（' + L.kind + '）') : '（未选择）';
     }
 
-    /* 两个下拉保持一致，避免「点对配准」和「ICP」指向不同图层造成混乱 */
+    /* 两个下拉保持一致，避免「N-N」和「ICP」指向不同图层造成混乱 */
     function syncTargetSelects(src)
     {
         var iSel = $('icp-dst');
@@ -1423,6 +1441,37 @@
 
     var previewBackup = null;   // { layer, pos, uniq }
 
+    var IDENT4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+    /* 已应用到数据上的矩阵（或目标图层的累积变换）。
+     * 「应用」按钮的可用状态以它为基准：两边一致时没必要高亮。 */
+    var appliedMat = null;
+
+    function matSame(a, b)
+    {
+        if (!a || !b) { return false; }
+        for (var i = 0; i < 16; i++)
+        {
+            if (Math.abs(a[i] - b[i]) > 1e-6) { return false; }
+        }
+        return true;
+    }
+
+    /* 只有当前矩阵与基准不一致时才允许点「应用」 */
+    function refreshApplyState()
+    {
+        var btn = $('xform-apply');
+        if (!btn) { return; }
+
+        var cur = peekXformMat();
+        var base = appliedMat || IDENT4;
+        var dirty = !!cur && !matSame(cur, base);
+
+        btn.disabled = !dirty;
+        if (dirty) { btn.classList.add('primary'); }
+        else { btn.classList.remove('primary'); }
+    }
+
     function restorePreviewData()
     {
         if (!previewBackup) { return; }
@@ -1484,9 +1533,16 @@
 
         if (app && app.renderer)
         {
-            if (layer.gpu) { app.renderer.releaseLayer(layer); }
-            layer.gpu = null;
-            app.renderer.uploadLayer(layer);
+            /* 优先增量更新：只重传顶点位置。
+             * 走不通（散点图层等）时再退回完整的释放 + 重建。 */
+            var fast = app.renderer.updateVertices && app.renderer.updateVertices(layer);
+
+            if (!fast)
+            {
+                if (layer.gpu) { app.renderer.releaseLayer(layer); }
+                layer.gpu = null;
+                app.renderer.uploadLayer(layer);
+            }
         }
         if (app) { app.markDirty(); }
 
@@ -1522,6 +1578,20 @@
             return;
         }
 
+        /* 当前矩阵已经烘焙进数据了（「应用」之后矩阵框仍显示它），
+         * 此时绝不能当预览再乘一次。
+         *
+         * 否则会出现：应用 M → 切图层/改参数触发 applyPreview →
+         * 备份 P0×M、再乘 M 得 P0×M²（界面显示这个）→
+         * 后续某处 clearPreview 又还原回 P0×M。
+         * 结果就是"界面看到的数据"和"配准实际读到的数据"不是同一个状态。 */
+        if (appliedMat && matSame(m, appliedMat))
+        {
+            restorePreviewData();
+            previewLayer = null;
+            return;
+        }
+
         applyPreviewMat(lay, m);
     }
 
@@ -1543,8 +1613,18 @@
     {
         if (!xformInputs) { return; }
         for (var i = 0; i < 16; i++) { xformInputs[i].value = fmtMat(m[i]); }
-        // 程序化填入（ICP / 点对配准 / 对称检查）后立刻预览
+
+        // 程序化填入（ICP / N-N）后立刻预览
         applyPreview();
+
+        /* 必须同步刷新「应用」按钮的可用状态。
+         *
+         * 手动改输入框会触发 input 事件、间接触发 refreshApplyState；
+         * 但 writeXformMat 是程序化赋值、不产生事件 —— 漏掉这一步时，
+         * 若按钮此前恰好是 disabled（矩阵 == 已应用的矩阵），
+         * 写入新矩阵后它仍然是灰的，用户看到的就是
+         * "N-N 算出矩阵了，但「应用」点不动"。 */
+        refreshApplyState();
     }
 
     function xformInfo(text, isErr)
@@ -1636,7 +1716,24 @@
         }
 
         var d = layer.data;
+
+        /* 顺序很关键：必须【先撤销预览，再做变换】。
+         *
+         * writeXformMat 会触发 applyPreview，此时顶点已经是「原始 × M」。
+         * 若在这个基础上再 xformPositions(m)，数据会变成「原始 × M²」；
+         * 而紧接着的 clearPreview 又会把顶点 set() 回备份（即原始数据），
+         * 两者叠加的结果就是 —— 应用完全没生效，数据弹回原位。
+         *
+         * 表现为"N-N 算出矩阵、点了应用、再跑 ICP 却被拉走"：
+         * ICP 实际看到的是从未变换过的原始点云。
+         */
+        clearPreview();
+
         var before = bboxOfPositions(d.positions);
+
+        /* 顶点是直接烘焙的，没有这层记录就无法还原"这个图层被变换过什么"。
+         * 选中图层回显矩阵、判断「应用」是否需要高亮，都依赖它。 */
+        layer.xformMat = mat4Mul(m, layer.xformMat || IDENT4);
 
         xformPositions(d.positions, m);
         if (d.uniqVerts) { xformPositions(d.uniqVerts, m); }
@@ -1652,8 +1749,16 @@
             app.renderer.uploadLayer(layer);
         }
 
-        // 数据已烘焙，预览必须撤销，否则渲染时会同一次变换叠乘两遍
-        clearPreview();
+        /* 应用即表示这次配准收尾：退出选点模式，避免后续误点又加进列表。
+         * 想继续选点就再点一次「开始选点」。 */
+        if (regMode)
+        {
+            regMode = false;
+            var regStartBtn = $('reg-start');
+            if (regStartBtn) { regStartBtn.textContent = '开始选点'; }
+            if (app && app.setPickCursor) { app.setPickCursor(false); }
+            regDrawMarks();     // 应用即收尾，顺手把标记抹掉
+        }
 
         app.markDirty();
         renderProps();
@@ -1680,12 +1785,14 @@
      * 加 50ms 间隔后 40 轮约 2.6 秒，能看清数据被逐步拉近的过程。 */
     var ITER_MIN_GAP = 50;
 
-    function nextIteration(fn)
+    function nextIteration(fn, gap)
     {
+        /* ICP 迭代需要肉眼可见的节奏（默认 50ms 一轮），
+         * 但粗配准是按帧推进的批量任务，不该再额外等 —— 传 0 即可。 */
         global.setTimeout(function ()
         {
             global.requestAnimationFrame(fn);
-        }, ITER_MIN_GAP);
+        }, gap === undefined ? ITER_MIN_GAP : gap);
     }
 
     function bindDialogDrag()
@@ -1763,7 +1870,7 @@
         icpFillSelects();
         refreshXformTargetLabel();
 
-        // 侧栏常驻：切到「坐标变换」标签
+        // 侧栏常驻：切到「数据对齐」标签
         var sideTabs = document.querySelectorAll('#sidebar .panel-tabs .tab[data-tab]');
         for (var ti2 = 0; ti2 < sideTabs.length; ti2++)
         {
@@ -1776,11 +1883,25 @@
         xformInfo('');
     }
 
-    /* ---------------- 手动点对配准（Horn 四元数法） ---------------- */
+    /* ---------------- 手动 N-N 配准（Horn 四元数法） ---------------- */
 
     var regMode = false;          // 是否处于选点状态
-    var regPairs = [];            // [{ s: 目标点(移动), d: 参考点(固定) }]
-    var regPendingRef = null;     // 已选的参考点，等待对应目标点
+    /* 参考层与目标层各自独立收集，不强制点击顺序 ——
+     * 想先点哪个层就点哪个层。参考层第 i 个点记为 R{i}，
+     * 目标层第 i 个点记为 A{i}，两者按【索引】配对（R0-A0、R1-A1 …）。 */
+    var regRefPts = [];           // 参考层（固定图层）上选的点
+    var regDstPts = [];           // 目标层（移动图层）上选的点
+
+    function regBuildPairs()
+    {
+        var n = Math.min(regRefPts.length, regDstPts.length);
+        var out = [];
+        for (var i = 0; i < n; i++)
+        {
+            out.push({ s: regDstPts[i], d: regRefPts[i] });
+        }
+        return out;
+    }
 
     function fmt3p(p)
     {
@@ -1929,6 +2050,11 @@
         return { mat: m, rms: rms };
     }
 
+    /* 参考层与目标层必须互斥 —— 同一个图层不可能既当参考又当目标，
+     * 否则配准会退化成"自己配自己"，矩阵恒为单位阵、迭代毫无意义。
+     *
+     * 之前两个下拉填充完全相同的候选列表，默认值又都落在第一项，
+     * 于是只导入一个图层时两边指向同一层。 */
     function fillLayerSelects(refSel, dstSel)
     {
         if (!refSel || !dstSel || !app) { return; }
@@ -1939,26 +2065,72 @@
             var L = app.layers[i];
 
             // 只要能拿到顶点就允许参与配准，不再看 kind / visible。
-            // 之前要求 visible 为真且 kind 严格匹配，任何一项不符就被静默排除，
-            // 表现为下拉一片空白、无从判断原因（配准本身也不需要图层可见）。
+            // 配准本身不需要图层可见；要求 visible 会造成"下拉一片空白却不知原因"。
             if (!L || !L.data || !L.data.positions || L.data.positions.length < 9) { continue; }
 
             cands.push(L);
         }
 
-        function fill(sel, keepValue)
+        var prevRef = refSel.value;
+        var prevDst = dstSel.value;
+
+        /* 少于两个图层时无法配对：两个下拉都清空，
+         * 配合 CSS 的 select:empty 隐藏箭头，视觉上就是空白。 */
+        if (cands.length < 2)
         {
-            sel.innerHTML = '';
+            refSel.innerHTML = '';
+            dstSel.innerHTML = '';
+            return;
+        }
 
-            if (!cands.length)
-            {
-                // 没有候选图层就保持空，不塞占位文字；
-                // 配合 CSS 的 select:empty 把下拉箭头一并隐藏，看起来就是一片空白。
-                return;
-            }
-
+        function hasId(id)
+        {
+            if (!id) { return false; }
             for (var k = 0; k < cands.length; k++)
             {
+                if (String(cands[k].id) === id) { return true; }
+            }
+            return false;
+        }
+
+        function firstExcept(excludeId)
+        {
+            for (var k = 0; k < cands.length; k++)
+            {
+                if (String(cands[k].id) !== excludeId) { return String(cands[k].id); }
+            }
+            return '';
+        }
+
+        var refId = '';
+        var dstId = '';
+
+        /* 首次填充（两者都还是空）：目标层优先取场景树当前选中层，
+         * 参考层取任意一个不同的层。 */
+        if (!prevRef && !prevDst)
+        {
+            var sel = app.getSelected();
+            if (sel && hasId(String(sel.id)))
+            {
+                dstId = String(sel.id);
+                refId = firstExcept(dstId);
+            }
+        }
+
+        // 保持原选择，但不允许与对方重合
+        if (!refId && hasId(prevRef) && prevRef !== prevDst) { refId = prevRef; }
+        if (!refId) { refId = firstExcept(prevDst); }
+
+        if (!dstId && hasId(prevDst) && prevDst !== refId) { dstId = prevDst; }
+        if (!dstId) { dstId = firstExcept(refId); }
+
+        /* 填充时各自排除对方的选中值，从候选层面就杜绝重复选择 */
+        function fill(sel, keepValue, excludeId)
+        {
+            sel.innerHTML = '';
+            for (var k = 0; k < cands.length; k++)
+            {
+                if (String(cands[k].id) === excludeId) { continue; }
                 var o = document.createElement('option');
                 o.value = String(cands[k].id);
                 o.textContent = cands[k].name;
@@ -1967,91 +2139,328 @@
             if (keepValue) { sel.value = keepValue; }
         }
 
-        var prevRef = refSel.value;
-        var prevDst = dstSel.value;
-        fill(refSel, prevRef);
-        fill(dstSel, prevDst);
+        fill(refSel, refId, dstId);
+        fill(dstSel, dstId, refId);
 
-        // 默认：目标层 = 当前选中层；参考层 = 另一个
-        var sel = app.getSelected();
-        if (sel)
-        {
-            dstSel.value = String(sel.id);
-            for (var m = 0; m < cands.length; m++)
-            {
-                if (cands[m].id !== sel.id) { refSel.value = String(cands[m].id); break; }
-            }
-        }
+        // fill 里若因排除导致 value 落空，这里再兜一次
+        if (refSel.value !== refId && refId) { refSel.value = refId; }
+        if (dstSel.value !== dstId && dstId) { dstSel.value = dstId; }
     }
 
     function regFillSelects() { fillLayerSelects($('reg-ref'), $('reg-dst')); }
     function icpFillSelects() { fillLayerSelects($('icp-ref'), $('icp-dst')); }
 
+    /* ---------------- N-N 选点的 3D 序号标记 ---------------- */
+
+    var pickMarksBox = null;        // overlay 容器
+    var pickMarkEls = [];           // 复用 DOM，避免每帧重建
+
+    function ensurePickMarks()
+    {
+        if (pickMarksBox && pickMarksBox.isConnected) { return pickMarksBox; }
+
+        var host = $('view-area');
+        if (!host) { return null; }
+
+        pickMarksBox = document.createElement('div');
+        pickMarksBox.id = 'pick-marks';
+        host.appendChild(pickMarksBox);
+
+        return pickMarksBox;
+    }
+
+    /* 把 regRefPts / regDstPts 投影到屏幕并绘制标签。
+     * 每帧调用：点在屏幕上只有几个，DOM 复用后开销可忽略。 */
+    function regDrawMarks()
+    {
+        var box = ensurePickMarks();
+        if (!box || !app) { return; }
+
+        /* 退出选点模式就不再显示标记 —— 否则选完点、
+         * 应用完矩阵之后，那些 A0/R0 会一直挂在画面上。 */
+        if (!regMode)
+        {
+            for (var h = 0; h < pickMarkEls.length; h++)
+            {
+                pickMarkEls[h].style.display = 'none';
+            }
+            return;
+        }
+
+        /* 收集需要显示的点：目标侧 A0..An、参考侧 R0..Rn。
+         * 每个点都要在【所有视图】里各投影一次 —— 双视图并排时
+         * 同一个点可能在左右两侧都可见，两侧都该标出来；
+         * 只投影视图 0 会导致右视图里一个标签都没有。 */
+        var raw = [];
+        for (var i = 0; i < regDstPts.length; i++)
+        {
+            raw.push({ p: regDstPts[i], text: 'A' + i, cls: 'dst' });
+        }
+        for (var j = 0; j < regRefPts.length; j++)
+        {
+            raw.push({ p: regRefPts[j], text: 'R' + j, cls: 'ref' });
+        }
+
+        var items = [];
+        var nViews = (app.views && app.views.length) || 1;
+        for (var r = 0; r < raw.length; r++)
+        {
+            for (var vi = 0; vi < nViews; vi++)
+            {
+                var s0 = app.worldToScreen(raw[r].p, vi);
+                if (s0) { items.push({ x: s0.x, y: s0.y, text: raw[r].text, cls: raw[r].cls }); }
+            }
+        }
+
+        // 补齐 / 复用 DOM 元素
+        while (pickMarkEls.length < items.length)
+        {
+            var el = document.createElement('div');
+            el.className = 'pick-mark';
+            box.appendChild(el);
+            pickMarkEls.push(el);
+        }
+
+        for (var k = 0; k < pickMarkEls.length; k++)
+        {
+            var el2 = pickMarkEls[k];
+
+            if (k >= items.length)
+            {
+                el2.style.display = 'none';
+                continue;
+            }
+
+            var it = items[k];
+
+            el2.style.display = 'block';
+            el2.style.left = it.x.toFixed(1) + 'px';
+            el2.style.top = it.y.toFixed(1) + 'px';
+            el2.textContent = it.text;
+            el2.className = 'pick-mark ' + it.cls;
+        }
+    }
+
+    var pickMarkLoop = 0;
+    function startPickMarkLoop()
+    {
+        if (pickMarkLoop) { return; }
+        (function step()
+        {
+            pickMarkLoop = global.requestAnimationFrame(step);
+            if (regRefPts.length || regDstPts.length) { regDrawMarks(); }
+        })();
+    }
+
+    /* ---------------- 列表与实时误差 ---------------- */
+
     function regRender()
     {
         var el = $('reg-list');
         if (!el) { return; }
+
         var lines = [];
-        for (var i = 0; i < regPairs.length; i++)
+        var i, j;
+
+        for (i = 0; i < regRefPts.length; i++)
         {
-            lines.push((i + 1) + '. 目标 (' + fmt3p(regPairs[i].s) + ') → 参考 (' + fmt3p(regPairs[i].d) + ')');
+            lines.push('R' + i + '  参考 (' + fmt3p(regRefPts[i]) + ')');
         }
-        if (regPendingRef)
+        for (j = 0; j < regDstPts.length; j++)
         {
-            lines.push('● 参考点 (' + fmt3p(regPendingRef) + ')，请点击目标层上的对应位置');
+            lines.push('A' + j + '  目标 (' + fmt3p(regDstPts[j]) + ')');
         }
+
+        var nPair = Math.min(regRefPts.length, regDstPts.length);
+        var pairs = regBuildPairs();
+
+        if (nPair >= 3)
+        {
+            var live = null;
+            try { live = solveRigid(pairs); } catch (e) { live = null; }
+
+            if (live && isFinite(live.rms))
+            {
+                lines.push('');
+                lines.push('当前 RMS = ' + live.rms.toFixed(4) + '   （' + nPair + ' 对）');
+
+                var m = live.mat;
+                var worst = 0;
+                for (var r = 0; r < nPair; r++)
+                {
+                    var s3 = pairs[r].s, d3 = pairs[r].d;
+                    var tx = m[0] * s3[0] + m[1] * s3[1] + m[2] * s3[2] + m[3];
+                    var ty = m[4] * s3[0] + m[5] * s3[1] + m[6] * s3[2] + m[7];
+                    var tz = m[8] * s3[0] + m[9] * s3[1] + m[10] * s3[2] + m[11];
+                    var ex = tx - d3[0], ey = ty - d3[1], ez = tz - d3[2];
+                    var err = Math.sqrt(ex * ex + ey * ey + ez * ez);
+                    if (err > worst) { worst = err; }
+                    lines.push('  A' + r + '-R' + r + ' 误差 ' + err.toFixed(4));
+                }
+                lines.push('  最大误差 ' + worst.toFixed(4));
+            }
+        }
+        else
+        {
+            lines.push('');
+            if (nPair === 0)
+            {
+                lines.push('尚未配对（至少需要 3 对）');
+            }
+            else
+            {
+                lines.push('还差 ' + (3 - nPair) + ' 对才能计算');
+            }
+
+            if (regRefPts.length !== regDstPts.length)
+            {
+                lines.push('当前 参考 ' + regRefPts.length + ' 点 / 目标 ' + regDstPts.length +
+                           ' 点，多出的暂不参与配对');
+            }
+        }
+
         el.textContent = lines.length ? lines.join('\n') : '尚未选点';
+
+        regDrawMarks();
+        startPickMarkLoop();
     }
 
     function regPick(cx, cy)
     {
-        if (!app || !app.rayPick) { return; }
-        var hit = app.rayPick(cx, cy);
-        if (!hit || !hit.layer) { setInfo('未命中数据'); return; }
+        if (!app) { return; }
 
         var refId = parseInt($('reg-ref').value, 10);
         var dstId = parseInt($('reg-dst').value, 10);
+        var refLay = findLayerById(refId);
+        var dstLay = findLayerById(dstId);
 
-        if (hit.layer.id === refId)
+        /* 关键：按「点击所在的视图」决定能选哪一层。
+         *
+         * 渲染时左视图只画 A + S、右视图只画 B + S。如果在左视图里
+         * 强行对 B 层求交，射线会穿过 A 打到看不见的 B 的背面，
+         * 拿到的坐标和用户视觉上的落点毫无关系 —— 这是"选点不精准"
+         * 的根源。所以这里先问：本视图到底显示哪些槽位。 */
+        var vi = app.viewIndexAt ? app.viewIndexAt(cx) : 0;
+        var v = app.views && app.views[vi];
+        var slotsHere = [];
+
+        /* 单视图模式渲染所有可见图层，与槽位无关 —— 这里也要放开，
+         * 否则 N-N 在单视图下会误报"本视图没有显示参考层或目标层"。 */
+        if (app.settings && app.settings.singleView)
         {
-            regPendingRef = hit.pos.slice();
-            setInfo('参考点已选：' + fmt3p(regPendingRef) + '，请点击目标层的对应位置');
-            regRender();
+            slotsHere = ['A', 'B', 'S'];
+        }
+        else if (v && v.slots)
+        {
+            if (v.slots.A) { slotsHere.push('A'); }
+            if (v.slots.B) { slotsHere.push('B'); }
+            if (v.slots.S) { slotsHere.push('S'); }
+        }
+
+        var refHere = refLay && slotsHere.indexOf(refLay.slot) >= 0;
+        var dstHere = dstLay && slotsHere.indexOf(dstLay.slot) >= 0;
+
+        if (!refHere && !dstHere)
+        {
+            var layName = (v && v.slots)
+                ? (v.slots.A ? '左侧 (A)' : (v.slots.B ? '右侧 (B)' : '本视图'))
+                : '本视图';
+            setInfo(layName + ' 没有显示参考层或目标层，请点到对应的一侧');
             return;
         }
 
-        if (hit.layer.id === dstId)
+        var takeRef;
+
+        if (refHere && !dstHere)
         {
-            if (!regPendingRef)
+            takeRef = true;
+        }
+        else if (!refHere && dstHere)
+        {
+            takeRef = false;
+        }
+        else
+        {
+            /* 两层都在本视图可见（例如都属公共层 S，或单视图模式）：
+             * 分别求交，补给数量少的那边。 */
+            var hitRef2 = app.rayPickLayer ? app.rayPickLayer(cx, cy, refId) : null;
+            var hitDst2 = app.rayPickLayer ? app.rayPickLayer(cx, cy, dstId) : null;
+
+            if (!hitRef2 && !hitDst2)
             {
-                setInfo('请先点击参考层上的点');
+                setInfo('该位置没有命中参考层或目标层');
                 return;
             }
-            regPairs.push({ s: hit.pos.slice(), d: regPendingRef });
-            regPendingRef = null;
-            setInfo('已配对 ' + regPairs.length + ' 组' + (regPairs.length >= 3 ? '，可点「计算矩阵」' : '，至少需要 3 组'));
+
+            takeRef = (hitRef2 && hitDst2)
+                ? (regRefPts.length <= regDstPts.length)
+                : !!hitRef2;
+
+            if (takeRef)
+            {
+                regRefPts.push(hitRef2.pos.slice());
+                setInfo('已选 R' + (regRefPts.length - 1) + '  参考层 (' +
+                        fmt3p(hitRef2.pos) + ')    参考 ' + regRefPts.length +
+                        ' / 目标 ' + regDstPts.length);
+            }
+            else
+            {
+                regDstPts.push(hitDst2.pos.slice());
+                setInfo('已选 A' + (regDstPts.length - 1) + '  目标层 (' +
+                        fmt3p(hitDst2.pos) + ')    参考 ' + regRefPts.length +
+                        ' / 目标 ' + regDstPts.length);
+            }
+
             regRender();
             return;
         }
 
-        setInfo('点到了其它图层，请点在参考层或目标层上');
+        // 只有一侧在本视图可见：直接对它求交
+        var layerId = takeRef ? refId : dstId;
+        var hit = app.rayPickLayer ? app.rayPickLayer(cx, cy, layerId) : null;
+
+        if (!hit)
+        {
+            setInfo('该位置没有命中' + (takeRef ? '参考层' : '目标层'));
+            return;
+        }
+
+        if (takeRef)
+        {
+            regRefPts.push(hit.pos.slice());
+            setInfo('已选 R' + (regRefPts.length - 1) + '  参考层 (' +
+                    fmt3p(hit.pos) + ')    参考 ' + regRefPts.length +
+                    ' / 目标 ' + regDstPts.length);
+        }
+        else
+        {
+            regDstPts.push(hit.pos.slice());
+            setInfo('已选 A' + (regDstPts.length - 1) + '  目标层 (' +
+                    fmt3p(hit.pos) + ')    参考 ' + regRefPts.length +
+                    ' / 目标 ' + regDstPts.length);
+        }
+
+        regRender();
     }
 
     function regSolve()
     {
-        if (regPairs.length < 3)
+        var pairs = regBuildPairs();
+
+        if (pairs.length < 3)
         {
-            xformInfo('至少需要 3 对点（当前 ' + regPairs.length + ' 对）', true);
+            xformInfo('至少需要 3 对点（当前 ' + pairs.length + ' 对：参考 ' +
+                      regRefPts.length + ' 点 / 目标 ' + regDstPts.length + ' 点）', true);
             return;
         }
-        var res = solveRigid(regPairs);
+        var res = solveRigid(pairs);
         if (!res)
         {
             xformInfo('求解失败：点对可能共线或重合', true);
             return;
         }
         writeXformMat(res.mat);
-        xformInfo('点对配准完成：' + regPairs.length + ' 对，RMS = ' + res.rms.toFixed(4) +
+        xformInfo('N-N 配准完成：' + pairs.length + ' 对，RMS = ' + res.rms.toFixed(4) +
             '\n点「应用」把矩阵作用到目标图层', false);
         setInfo('配准矩阵已计算（RMS ' + res.rms.toFixed(4) + '）');
     }
@@ -2179,16 +2588,35 @@
             count: fixed.count
         };
 
-        var maxIter = clampInt($('icp-iter').value, 1, 500, 40);
-        var stride = clampInt($('icp-stride').value, 1, 64, 4);
-        var thresh = parseFloat($('icp-thresh').value);
-        if (!isFinite(thresh)) { thresh = 0.3; }
+        var maxIter = clampInt($('icp-iter').value, 1, 50, 50);
+        var samplePct = clampInt($('icp-sample').value, 1, 100, 100);
+        var sampleRatio = samplePct / 100;
+        var angleDeg = parseFloat($('icp-angle').value);
+        if (!isFinite(angleDeg)) { angleDeg = 30; }
+        angleDeg = Math.max(0, Math.min(180, angleDeg));
+        var thresh = Math.cos(angleDeg * Math.PI / 180);
+        var maxDist = parseFloat($('icp-maxdist').value);
+        if (!isFinite(maxDist) || maxDist < 0) { maxDist = 10; }
+        var tol = 1e-7;
 
-        var maxDist = parseFloat($('icp-maxdist') ? $('icp-maxdist').value : '0');
-        if (!isFinite(maxDist) || maxDist < 0) { maxDist = 0; }
+        /* 数据量大时给出采样推荐值，并直接写回界面 —— 参数框显示的就是
+         * 实际使用的比例，不会出现"界面 100% 但内部偷偷采样"的错位。
+         * 只在用户设了 100% 时才推荐；自己填过的值不覆盖。 */
+        var AUTO_SAMPLE_MAX = 200000;
+        var nSrcPts = Math.floor(moving.pos.length / 3);
+        var sampleNote = '';
 
-        var tol = parseFloat($('icp-tol') ? $('icp-tol').value : '1e-7');
-        if (!isFinite(tol) || tol <= 0) { tol = 1e-7; }
+        if (samplePct >= 100 && nSrcPts > AUTO_SAMPLE_MAX)
+        {
+            var recPct = Math.max(1, Math.round(AUTO_SAMPLE_MAX / nSrcPts * 100));
+            var sEl = $('icp-sample');
+            if (sEl) { sEl.value = String(recPct); }
+
+            samplePct = recPct;
+            sampleRatio = recPct / 100;
+            sampleNote = '\n采样已按数据量（' + nSrcPts + ' 点）调整为 ' + recPct + '%';
+        }
+
 
         var info = $('icp-info');
         var target = xformTargetLayer();
@@ -2205,28 +2633,114 @@
             diag = Math.sqrt(dbx * dbx + dby * dby + dbz * dbz);
         }
 
+        /* 粗配准 / 候选验证 / 正式 ICP 三个阶段按帧推进。
+         * 三段都是重计算，同步跑完要几秒，浏览器会直接判定无响应 ——
+         * 用户看到的就是"勾上粗配准就卡住"。 */
+        var phase = 'icp';
+        var coarseNote = '';
+        var previewTagRef = null;   // 上一个已预览的粗配准矩阵，避免重复重传
+        var coarsePreviewTick = 0;  // 粗配准预览节流计数
+        var coarseSolver = null;
+        var cands = [];
+        var verifyIdx = 0;
+        var curProbe = null;
+        var bestInit = null;
+        var bestRms = Infinity;
+
+        var coarseOn = $('icp-coarse') ? $('icp-coarse').checked : true;
+
+        if (coarseOn && global.MV.super4pcs && global.MV.super4pcs.createRegistration)
+        {
+            /* 自动粗配准：js/super4pcs.js 的官方忠实实现。
+             * 参数与 Match4PCSOptions 对应：
+             *   sample_size         每侧均匀采样点数
+             *   delta               LCP 命中的距离容差（绝对单位）
+             *   overlap_estimation  推导 RANSAC 迭代数
+             *   terminate_threshold LCP 达到即停
+             *   maxTrials           迭代数上限（官方算到 2 万量级，浏览器里截断）
+             */
+            coarseSolver = global.MV.super4pcs.createRegistration(
+                { positions: moving.pos, count: moving.count },
+                { positions: fixed.pos, count: fixed.count },
+                {
+                    /* sample_size 与 delta 必须匹配，这是 4PCS 的硬约束：
+                     *   ExtractPairs 的球壳半宽是 2·delta，
+                     *   而抽样点在归一化空间里的间距约为 1/√sample_size，
+                     *   球壳比间距还薄时就一个点对都找不到（算法空转）。
+                     * 经验关系： delta ≈ scale / (2·√n)
+                     * 对 300mm 量级的工件，2000 点配 3mm 是合适的组合。 */
+                    sample_size: 2000,
+                    delta: 3.0,
+                    overlap_estimation: 0.2,
+                    terminate_threshold: 1.0,
+                    max_time_seconds: 30,
+                    maxTrials: 200,        // 上限（代码里另有 K_MAX_TRIALS=200 兜底）
+                    pairLimit: 40000,
+                    maxCongruent: 300,
+                    batch: 2,
+                    preview: true
+                });
+            phase = 'coarse';
+        }
+
         var solver = null;
-        try
+
+        /* 创建正式 ICP 求解器（初值来自粗配准验证结果） */
+        function buildMainSolver()
         {
-            solver = global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm,
-                { maxIter: maxIter, stride: stride, normalThresh: thresh, tol: tol, maxDist: maxDist });
-        }
-        catch (e)
-        {
-            if (info) { info.textContent = '出错：' + e.message; }
-            xformInfo('ICP 出错：' + e.message, true);
-            return;
+            /* 关键：maxDist 必须容纳粗配准的残留误差。
+             * 粗配准给的是"够用"的位姿，残差可能几毫米到十几毫米；
+             * 若 maxDist 卡在 10，初值再好也几乎找不到对应点，
+             * 参与点只剩几十个，ICP 等于白跑 —— 粗配准就失去意义了。 */
+            var effMaxDist = maxDist;
+
+            /* 只做"兜底放宽"，不做"随残差等比放大"。
+             * 等比放大（试过 ×2.5）在初值本来就在容差内时反而有害：
+             * 残差 5.5 被放大成 13.7，ICP 递减从 41 起步，
+             * 大量错配参与求解，把好好的初值拉坏到 RMS 13.6。
+             * 正确做法：初值够准就按原容差跑，只有确实吃不到点时才放宽。 */
+            if (bestInit && isFinite(bestRms) && bestRms > maxDist && maxDist > 0)
+            {
+                effMaxDist = bestRms * 1.5;
+            }
+
+            return global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm,
+                {
+                    maxIter: maxIter,
+                    sampleRatio: sampleRatio,
+                    normalThresh: thresh,
+                    tol: tol,
+                    maxDist: effMaxDist,
+                    initMat: bestInit
+                });
         }
 
-        if (!solver)
+        if (phase === 'icp')
         {
-            if (info) { info.textContent = '配准失败：数据不足'; }
-            xformInfo('ICP 失败', true);
-            return;
+            try
+            {
+                solver = buildMainSolver();
+            }
+            catch (e)
+            {
+                if (info) { info.textContent = '出错：' + e.message; }
+                xformInfo('ICP 出错：' + e.message, true);
+                return;
+            }
+
+            if (!solver)
+            {
+                if (info) { info.textContent = '配准失败：数据不足'; }
+                xformInfo('ICP 失败', true);
+                return;
+            }
         }
 
-        if (info) { info.textContent = '开始…'; }
-        setInfo('ICP 计算中…');
+        if (info)
+        {
+            info.textContent = (phase === 'coarse') ? '准备粗配准…' : '开始…';
+        }
+        setInfo(phase === 'coarse' ? '自动粗配准中…' : 'ICP 计算中…');
 
         var t0 = Date.now();
 
@@ -2235,6 +2749,166 @@
         // 全部跑完，画面只会闪一两下。
         function tick()
         {
+            // ---- 阶段 1：粗配准 ----
+            if (phase === 'coarse')
+            {
+                var cs = coarseSolver.step();
+
+                /* 预览必须降频。
+                 * applyPreviewMat 走的是数据级变换：备份全量顶点 → 写入变换后顶点
+                 * → 释放并重建 GPU buffer → 上传（本模型约 1.3MB）。
+                 * 粗配准每步都做一次，单帧光上传就要 20~30ms，
+                 * 叠加每帧的计算量直接掉帧 —— 这是"卡顿"的真正来源。
+                 * 改成每 4 步更新一次，视觉上仍是连续变化。 */
+                if (target && cs.matrix)
+                {
+                    if ((cs.done || (coarsePreviewTick % 4) === 0) && cs.matrix !== previewTagRef)
+                    {
+                        previewTagRef = cs.matrix;
+                        applyPreviewMat(target, cs.matrix);
+                    }
+                    coarsePreviewTick++;
+                }
+
+                if (info)
+                {
+                    info.textContent = '粗配准 ' + Math.round(cs.progress * 100) + '%' +
+                                       '   尝试 ' + cs.trial + '/' + cs.trials +
+                                       '   LCP ' + (cs.lcp * 100).toFixed(0) + '%';
+                }
+
+                if (!cs.done) { nextIteration(tick, 0); return; }
+
+                var cr = coarseSolver.result();
+                coarseSolver = null;
+                phase = 'verify';
+
+                /* 基准比较在 super4pcs 内部就完成了：
+                 * 初始 bestLCP = 单位阵在下采样点上的覆盖率，
+                 * 任何候选必须【严格超过】它才会被采纳，
+                 * 所以 usedBaseline 为真时返回的就是"原始位姿"。
+                 *
+                 * 这里不再加绝对阈值（原来那个 rejectLcp=0.10）——
+                 * 那个会把"比原始位姿好、但绝对值不高"的解也丢掉，
+                 * 与"不如原始位姿才退回"的要求相反。 */
+                function pct(v) { return (v * 100).toFixed(0) + '%'; }
+
+                if (!cr || !cr.matrix)
+                {
+                    coarseNote = '\n粗配准未得到解，使用单位阵';
+                    cands = [];
+                    bestInit = null;
+                }
+                else if (cr.usedBaseline && cr.lcp < 0.4)
+                {
+                    /* 基准本身就低：说明"只把质心对齐"都重合不了，
+                     * 需要旋转但搜不出来 —— 这种初值是负资产。 */
+                    coarseNote = '\n粗配准未找到合适位姿（最优 ' + pct(cr.lcp) +
+                                 ' ≤ 基准 ' + pct(cr.baselineLcp) + '），使用单位阵';
+                    cands = [];
+                    bestInit = null;
+                }
+                else if (cr.usedBaseline)
+                {
+                    /* 没有候选超过基准，但基准本身已经很高 ——
+                     * 意味着"质心对齐"就是这个解（cr.matrix 正是质心差补偿）。
+                     * 按需求直接采用它，而不是丢弃。 */
+                    coarseNote = '\n粗配准：原始位姿已足够（' + pct(cr.lcp) +
+                                 '），直接采用';
+                    cands = [{ mat: cr.matrix, score: cr.lcp }];
+                }
+                else
+                {
+                    coarseNote = '\n粗配准 ' + pct(cr.lcp) +
+                                 '（基准 ' + pct(cr.baselineLcp) + '，' +
+                                 cr.trial + '/' + cr.trials + ' 次尝试）';
+                    cands = [{ mat: cr.matrix, score: cr.lcp }];
+                }
+
+
+                nextIteration(tick, 0);
+                return;
+            }
+
+            // ---- 阶段 2：逐个候选跑短 ICP 验证 ----
+            if (phase === 'verify')
+            {
+                if (!curProbe)
+                {
+                    if (verifyIdx >= cands.length)
+                    {
+                        phase = 'icp';
+
+                        try { solver = buildMainSolver(); }
+                        catch (e2) { solver = null; }
+
+                        if (!solver)
+                        {
+                            if (info) { info.textContent = '配准失败：数据不足'; }
+                            xformInfo('ICP 失败', true);
+                            return;
+                        }
+
+                        if (bestInit)
+                        {
+                            coarseNote = '\n粗配准 ' + cands.length + ' 个候选，最优残差 ' +
+                                         bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿';
+                        }
+
+                        if (info) { info.textContent = '开始精配准…'; }
+                        nextIteration(tick);
+                        return;
+                    }
+
+                    try
+                    {
+                        curProbe = global.MV.icp.createSolver(
+                            moving.pos, moving.nrm, fixed.pos, fixed.nrm,
+                            {
+                                maxIter: 12,
+                                sampleRatio: Math.min(1, sampleRatio * 2),
+                                normalThresh: thresh,
+                                tol: tol,
+                                maxDist: maxDist,
+                                initMat: cands[verifyIdx].mat
+                            });
+                    }
+                    catch (e3) { curProbe = null; }
+
+                    if (!curProbe) { verifyIdx++; nextIteration(tick); return; }
+                }
+
+                var vr = curProbe.step();
+
+                // 候选验证也是逐步收敛的，同样实时反映
+                if (target)
+                {
+                    var vlive = curProbe.result();
+                    if (vlive && vlive.mat) { applyPreviewMat(target, vlive.mat); }
+                }
+
+                if (info)
+                {
+                    info.textContent = '验证候选 ' + (verifyIdx + 1) + '/' + cands.length +
+                                       '   迭代 ' + vr.iters + '   RMS ' + vr.rms.toFixed(3);
+                }
+
+                if (!vr.done) { nextIteration(tick); return; }
+
+                var pr = curProbe.result();
+                if (isFinite(pr.rms) && pr.rms < bestRms)
+                {
+                    bestRms = pr.rms;
+                    bestInit = cands[verifyIdx].mat;
+                }
+
+                curProbe = null;
+                verifyIdx++;
+                nextIteration(tick);
+                return;
+            }
+
+            // ---- 阶段 3：正式 ICP ----
             var r = solver.step();
 
             // 每轮都把当前变换挂到预览上，配合 rAF 就能看到数据逐步移动
@@ -2274,7 +2948,7 @@
                     info.textContent = '配准未收敛：迭代 ' + res.iters + ' 次后 RMS = ' +
                         res.rms.toFixed(2) + '（数据尺度 ' + diag.toFixed(1) + '）\n' +
                         '已放弃该结果，数据保持原位。可尝试：调低「采样」数值、\n' +
-                        '调大「迭代」，或先用点对配准给一个接近的初值。';
+                        '调大「迭代」，或先用 N-N 配准给一个接近的初值。';
                 }
                 xformInfo('配准未收敛，已放弃结果（数据未被移动）', true);
                 setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）');
@@ -2286,7 +2960,7 @@
             var txt = '迭代 ' + res.iters + ' 次，RMS = ' + res.rms.toFixed(4) +
                       '\n参与点 ' + res.used + '，' +
                       (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
-                      '\n耗时 ' + dt + ' ms';
+                      '\n耗时 ' + dt + ' ms' + sampleNote + coarseNote;
             if (info) { info.textContent = txt; }
 
             xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
@@ -2297,12 +2971,8 @@
         setTimeout(tick, 30);
     }
 
-    /* ---------------- 对称翻转检查 ---------------- */
-
     /* 旋转对称检查的候选角度；轴在运行时按参考数据的 PCA 主轴确定，
      * 这样工件斜放时也能沿它自身的惯量轴去检查。 */
-    var SYM_ANGLES = [90, 180, 270];
-    var SYM_AXIS_NAMES = ['X', 'Y', 'Z'];
 
     function mat4Mul(a, b)
     {
@@ -2318,57 +2988,9 @@
         }
         return o;
     }
-
-    /* 绕「过点 c、方向 dir」的直线旋转 deg 度，返回 4×4（行主序） */
-    function rotationAbout(dir, deg, c)
-    {
-        var ang = deg * Math.PI / 180;
-        var R = new Float64Array(9);
-        global.MV.icp.expSO3(dir[0] * ang, dir[1] * ang, dir[2] * ang, R);
-
-        // M = T(c) · R · T(−c)  =>  平移 = c − R·c
-        var tx = c[0] - (R[0] * c[0] + R[1] * c[1] + R[2] * c[2]);
-        var ty = c[1] - (R[3] * c[0] + R[4] * c[1] + R[5] * c[2]);
-        var tz = c[2] - (R[6] * c[0] + R[7] * c[1] + R[8] * c[2]);
-
-        return new Float64Array([
-            R[0], R[1], R[2], tx,
-            R[3], R[4], R[5], ty,
-            R[6], R[7], R[8], tz,
-            0, 0, 0, 1
-        ]);
-    }
-
     /* 世界坐标轴。曾用 PCA 主轴，但 axes 按方差降序、符号也不定，
      * 叫「绕X」时实际可能是绕 Z，结论无法解释；固定用世界轴后名实相符。
      * 需要沿工件自身惯量轴检查时，先把数据摆正再跑。 */
-    var SYM_WORLD_AXES = [
-        [1, 0, 0],
-        [0, 1, 0],
-        [0, 0, 1]
-    ];
-
-    /* 原始 + 绕世界 X/Y/Z 各转 90/180/270 */
-    function buildSymVariants(center)
-    {
-        var list = [{ name: '原始', m: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], angle: 0, axis: -1, isOriginal: true }];
-
-        for (var a = 0; a < 3; a++)
-        {
-            for (var i = 0; i < SYM_ANGLES.length; i++)
-            {
-                var deg = SYM_ANGLES[i];
-                list.push({
-                    name: '绕' + SYM_AXIS_NAMES[a] + ' ' + deg + '°',
-                    m: rotationAbout(SYM_WORLD_AXES[a], deg, center),
-                    angle: deg,
-                    axis: a
-                });
-            }
-        }
-        return list;
-    }
-
     function xformPoints(src, m, out)
     {
         for (var i = 0; i < src.length; i += 3)
@@ -2379,342 +3001,6 @@
             out[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
         }
     }
-
-    /* 对目标层做 X/Y/Z 镜像后各跑一次 ICP，比较 RMS 判断是否为镜像件。
-     * 原理：真实手性正确的数据，原始变体应当最优；若某个镜像变体明显更好，
-     * 说明数据本身是镜像出来的（Geomagic 的「翻转检查」思路）。 */
-    function symRun()
-    {
-        if (!app || !global.MV.icp) { return; }
-
-        var refId = parseInt($('icp-ref').value, 10);
-        var dstId = parseInt($('icp-dst').value, 10);
-        if (!isFinite(refId) || !isFinite(dstId))
-        {
-            xformInfo('请先在上方 ICP 区块选择参考层与目标层', true);
-            return;
-        }
-        if (refId === dstId)
-        {
-            xformInfo('参考层与目标层不能相同', true);
-            return;
-        }
-
-        var fixed = icpSample(findLayerById(refId));
-        var moving = icpSample(findLayerById(dstId));
-        if (!fixed || !moving)
-        {
-            xformInfo('图层缺少可配准的数据', true);
-            return;
-        }
-
-        // 同上：预览会改目标层顶点，这里必须持有独立副本
-        moving = {
-            pos: new Float32Array(moving.pos),
-            nrm: moving.nrm ? new Float32Array(moving.nrm) : null,
-            count: moving.count
-        };
-        fixed = {
-            pos: new Float32Array(fixed.pos),
-            nrm: fixed.nrm ? new Float32Array(fixed.nrm) : null,
-            count: fixed.count
-        };
-
-        var maxIter = clampInt($('icp-iter').value, 1, 200, 40);
-        var stride = clampInt($('icp-stride').value, 1, 64, 4);
-        var thresh = -2;
-
-        var info = $('sym-info');
-        var target = xformTargetLayer();
-
-        // 参考数据自身的质心与主轴：工件斜放时沿它的惯量轴检查才有意义
-        var pcaF = global.MV.icp.pcaOf(fixed.pos, null, 8);
-        if (!pcaF)
-        {
-            xformInfo('参考层数据不足，无法计算主轴', true);
-            return;
-        }
-
-        var cf = pcaF.center;
-        var variants = buildSymVariants(cf);
-
-        // 评估用的最近点索引，建一次复用
-        var kdFix = global.MV.kdtree.build(fixed.pos);
-
-        /* 直接度量：把源点按 mat 变换后，到参考点集的平均最近点距离。
-         * 刻意不再跑 ICP —— ICP 有 6 个自由度，会主动把施加的旋转"优化回去"，
-         * 数据只要有重复结构，任何角度都会收敛到 0，检测完全失效。 */
-        function evalRms(mat)
-        {
-            var pos = moving.pos;
-            var st = Math.max(1, stride * 4) * 3;
-            var total = 0;
-            var cnt = 0;
-
-            for (var i = 0; i < pos.length; i += st)
-            {
-                var x = pos[i], y = pos[i + 1], z = pos[i + 2];
-
-                var px = mat[0] * x + mat[1] * y + mat[2] * z + mat[3];
-                var py = mat[4] * x + mat[5] * y + mat[6] * z + mat[7];
-                var pz = mat[8] * x + mat[9] * y + mat[10] * z + mat[11];
-
-                var qi = kdFix.nearestIndex(px, py, pz);
-                if (qi < 0) { continue; }
-
-                var q0 = qi * 3;
-                var dx = px - fixed.pos[q0];
-                var dy = py - fixed.pos[q0 + 1];
-                var dz = pz - fixed.pos[q0 + 2];
-
-                total += Math.sqrt(dx * dx + dy * dy + dz * dz);
-                cnt++;
-            }
-            return cnt ? total / cnt : Infinity;
-        }
-
-        // 基准变换：矩阵框里若已有配准结果就用它，否则由「原始」变体的 ICP 现场求出
-        var priorMat = peekXformMat();
-        var baseMat = (priorMat && !isIdentityMat(priorMat)) ? priorMat : null;
-        var baseSource = baseMat ? '复用矩阵框中的配准结果' : '';
-
-        /* 变体的初值 = 该变体的旋转 ∘ 基准对齐。
-         * 刻意不做 PCA 主轴粗对齐：绕主轴转 90° 恰好等价于主轴列置换，
-         * PCA 对齐会把它当成坐标系变化给抵消掉，导致所有角度都"完美对齐"、
-         * 检查彻底失效。 */
-        function initFor(rotMat, isOriginal)
-        {
-            if (isOriginal) { return baseMat; }
-            if (!baseMat) { return null; }
-            return mat4Mul(rotMat, baseMat);
-        }
-
-        var results = [];
-        var vi = 0;
-        var solver = null;
-        var cur = null;
-        var t0 = Date.now();
-
-        function finish()
-        {
-            var base = null;
-            var best = null;
-            var i;
-
-            for (i = 0; i < results.length; i++)
-            {
-                if (results[i].name === '原始') { base = results[i]; }
-                if (!best || results[i].rms < best.rms) { best = results[i]; }
-            }
-
-            var out = [];
-            for (i = 0; i < results.length; i++)
-            {
-                var r = results[i];
-                var val = (r.rms === Infinity) ? '失败  ' : r.rms.toFixed(4);
-                out.push(r.name + '  ' + val + (r === best ? '   ← 最小' : ''));
-            }
-
-            // 阈值按数据尺度取（包围盒对角线的 1%），而不是硬比 0：
-            // 点云是离散采样，即使形状完全重合，绕轴旋转后也有采样误差。
-            // 同上：i cpSample 无 bbox，从参考图层取
-            var diag = 0;
-            var refLayer = findLayerById(refId);
-            var db2 = (refLayer && refLayer.data) ? refLayer.data.bbox : null;
-            if (db2 && db2.min && db2.max)
-            {
-                var dx0 = db2.max[0] - db2.min[0];
-                var dy0 = db2.max[1] - db2.min[1];
-                var dz0 = db2.max[2] - db2.min[2];
-                diag = Math.sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0);
-            }
-
-            var tol = Math.max(
-                (base && base.rms !== Infinity) ? base.rms * 2 : 0,
-                diag > 0 ? diag * 0.01 : 0,
-                1e-6);
-
-            var minAngle = 999;
-            var minAxis = -1;
-
-            if (base && base.rms !== Infinity)
-            {
-                for (i = 0; i < results.length; i++)
-                {
-                    var rr = results[i];
-                    if (rr.name === '原始' || rr.rms === Infinity) { continue; }
-                    if (rr.rms <= tol && rr.angle < minAngle)
-                    {
-                        minAngle = rr.angle;
-                        minAxis = rr.axis;
-                    }
-                }
-            }
-
-            var verdict;
-            if (!base || base.rms === Infinity)
-            {
-                verdict = '原始数据配准失败，无法判断';
-            }
-            else if (minAxis >= 0)
-            {
-                var fold = Math.round(360 / minAngle);
-                verdict = '存在绕 ' + SYM_AXIS_NAMES[minAxis] + ' 轴的 ' + minAngle +
-                          '° 旋转对称（' + fold + ' 重对称），原始 RMS ' + base.rms.toFixed(4);
-            }
-            else
-            {
-                verdict = '未发现旋转对称（各角度 RMS 均明显大于原始 ' +
-                          base.rms.toFixed(4) + '）';
-            }
-
-            out.push('');
-            out.push(verdict);
-            if (baseSource) { out.push('基准：' + baseSource); }
-            out.push('（' + variants.length + ' 个变体，' + (Date.now() - t0) + ' ms）');
-            if (info) { info.textContent = out.join('\n'); }
-
-            setInfo(verdict);
-            xformInfo(verdict, minAxis < 0);
-
-            // 只有原始变体（即基准配准本身）才回填矩阵；
-            // 其余变体的矩阵是"为了让数据与自身重合"而加的旋转，应用会多转一次。
-            if (base && base.mat && base.name === '原始')
-            {
-                writeXformMat(base.mat);
-            }
-            else
-            {
-                clearPreview();
-            }
-        }
-
-        function tick()
-        {
-            if (!solver)
-            {
-                if (vi >= variants.length) { finish(); return; }
-
-                cur = variants[vi];
-
-                // 原始变体跑完后才有 baseMat
-                if (!cur.isOriginal && !baseMat)
-                {
-                    results.push({
-                        name: cur.name, angle: cur.angle, axis: cur.axis,
-                        rms: Infinity, mat: null
-                    });
-                    vi++;
-                    nextIteration(tick);
-                    return;
-                }
-
-                // 非原始变体：施加旋转后直接度量，不做任何优化
-                if (!cur.isOriginal)
-                {
-                    var fm = mat4Mul(cur.m, baseMat);
-                    var rr = evalRms(fm);
-
-                    if (target)
-                    {
-                        applyPreviewMat(target, fm);
-                        app.markDirty();
-                    }
-
-                    results.push({
-                        name: cur.name, angle: cur.angle, axis: cur.axis,
-                        rms: rr, mat: fm
-                    });
-                    vi++;
-                    global.requestAnimationFrame(tick);
-                    return;
-                }
-
-                var init = initFor(cur.m, cur.isOriginal);
-                try
-                {
-                    solver = global.MV.icp.createSolver(
-                        moving.pos, moving.nrm, fixed.pos, fixed.nrm,
-                        {
-                            maxIter: maxIter,
-                            stride: stride,
-                            normalThresh: thresh,
-                            tol: 1e-7,
-                            initMat: init
-                        });
-                }
-                catch (e)
-                {
-                    solver = null;
-                }
-
-                if (!solver)
-                {
-                    results.push({
-                        name: cur.name, angle: cur.angle, axis: cur.axis,
-                        rms: Infinity, mat: null
-                    });
-                    solver = null;
-                    vi++;
-                    global.requestAnimationFrame(tick);
-                    return;
-                }
-
-                if (target && init)
-                {
-                    applyPreviewMat(target, init);
-                    app.markDirty();
-                }
-            }
-
-            var r = solver.step();
-
-            if (target)
-            {
-                var live = solver.result();
-                applyPreviewMat(target, live.mat);
-                app.markDirty();
-            }
-
-            if (r.done)
-            {
-                var res = solver.result();
-
-                // 原始变体给出基准；后续变体记录对应角度
-                if (cur.isOriginal)
-                {
-                    baseMat = res.mat;
-                    baseSource = baseSource || '本次 ICP 求得';
-                }
-
-                results.push({
-                    name: cur.name,
-                    angle: cur.angle,
-                    axis: cur.axis,
-                    rms: res.rms,
-                    mat: res.mat
-                });
-
-                solver = null;
-                cur = null;
-                vi++;
-            }
-            else if (info)
-            {
-                info.textContent = '变体 ' + (vi + 1) + '/' + variants.length +
-                    ' ' + cur.name + '   迭代 ' + r.iters + '/' + maxIter +
-                    '   RMS ' + r.rms.toFixed(3);
-            }
-
-            // 与 icpRun 一致：每帧一轮 + 最小间隔
-            nextIteration(tick);
-        }
-
-        if (info) { info.textContent = '准备中…'; }
-        setInfo('旋转对称检查中…');
-        setTimeout(tick, 30);
-    }
-
     function bindXform()
     {
         buildXformGrid();
@@ -2724,7 +3010,11 @@
         {
             for (var pi = 0; pi < 16; pi++)
             {
-                xformInputs[pi].addEventListener('input', applyPreview);
+                xformInputs[pi].addEventListener('input', function ()
+                {
+                    applyPreview();
+                    refreshApplyState();
+                });
             }
         }
 
@@ -2835,6 +3125,10 @@
                 }
                 if (applyXformToLayer(inv, '反变换'))
                 {
+                    appliedMat = new Float64Array(16);
+                    for (var qa = 0; qa < 16; qa++) { appliedMat[qa] = inv[qa]; }
+                    refreshApplyState();
+
                     xformInfo('已应用逆矩阵（回到变换前）\n\n' + matToText(inv), false);
                 }
             });
@@ -2847,7 +3141,13 @@
             {
                 var m = readXformMat();
                 if (!m) { return; }
-                applyXformToLayer(m, '变换');
+
+                if (applyXformToLayer(m, '变换'))
+                {
+                    appliedMat = new Float64Array(16);
+                    for (var qb = 0; qb < 16; qb++) { appliedMat[qb] = m[qb]; }
+                    refreshApplyState();
+                }
             });
         }
 
@@ -2876,7 +3176,7 @@
             })(tabBtns[ti]);
         }
 
-        // ---- 点对配准 ----
+        // ---- N-N 配准 ----
         regBindCanvas();
 
         var regStart = $('reg-start');
@@ -2885,12 +3185,15 @@
             regStart.addEventListener('click', function ()
             {
                 regMode = !regMode;
-                regPendingRef = null;
                 regStart.textContent = regMode ? '停止选点' : '开始选点';
+
+                /* 与「工具 → 拾取」共用同一个精准准星光标 */
+                if (app && app.setPickCursor) { app.setPickCursor(regMode); }
                 setInfo(regMode
-                    ? '配准选点：先点参考层，再点目标层的对应位置（拖动仍可旋转）'
-                    : '已停止选点');
+                    ? '配准选点：点参考层和目标层上的任意位置，按层自动编号 R0..／A0..'
+                    : '已结束选点（标记已隐藏，点「开始选点」可继续）');
                 regRender();
+                regDrawMarks();     // 立刻刷一次，退出时把标记抹掉
             });
         }
 
@@ -2899,8 +3202,8 @@
         {
             regClear.addEventListener('click', function ()
             {
-                regPairs.length = 0;
-                regPendingRef = null;
+                regRefPts.length = 0;
+                regDstPts.length = 0;
                 regRender();
                 setInfo('已清空点对');
             });
@@ -2914,8 +3217,6 @@
         if (icpBtn) { icpBtn.addEventListener('click', icpRun); }
 
         // ---- 对称翻转检查 ----
-        var symBtn = $('sym-run');
-        if (symBtn) { symBtn.addEventListener('click', symRun); }
     }
 
     /* 写状态栏单行；noLog 为 true 时只更新摘要、不记历史 */
@@ -3753,10 +4054,15 @@
             var row = document.createElement('div');
             row.className = 'pick-row';
 
+            /* 最近三个点参与距离 / 角度计算，列表里也标出来，
+             * 与三维视图里高亮的标记对应。 */
+            var inCalc = i >= points.length - 3;
+
             var title = document.createElement('div');
-            title.className = 'pick-title';
+            title.className = 'pick-title' + (inCalc ? ' pick-title-active' : '');
             title.textContent = 'P' + (i + 1) + '  ' + h.layer.name +
-                (h.layer.kind === 'mesh' ? ' · 网格' : ' · 点云');
+                (h.layer.kind === 'mesh' ? ' · 网格' : ' · 点云') +
+                (inCalc ? '   ● 参与计算' : '');
             row.appendChild(title);
 
             var lines = [];
@@ -3785,24 +4091,32 @@
             list.appendChild(row);
         }
 
+        /* 距离 / 角度取【最近拾取的三个点】，而不是最早的三个。
+         *
+         * 边点边看是这类测量的主要用法：先点一个基准，再连续点几处比较。
+         * 用最早的三个会让"刚点的那个点"完全不参与计算，反而要看它就得
+         * 清空重来。现在始终跟着最新的走，编号也如实反映（P4→P5 这样）。 */
+        var np = points.length;
         var out = [];
-        if (points.length >= 2)
+
+        if (np >= 2)
         {
-            var a = points[0].pos;
-            var b = points[1].pos;
-            out.push('距离 P1\u2192P2  ' + fmtNum(vecLen(a, b)));
+            var a = points[np - 2].pos;
+            var b = points[np - 1].pos;
+            out.push('距离 P' + (np - 1) + '\u2192P' + np + '  ' + fmtNum(vecLen(a, b)));
             out.push('\u0394x ' + fmtNum(b[0] - a[0]) +
                 '   \u0394y ' + fmtNum(b[1] - a[1]) +
                 '   \u0394z ' + fmtNum(b[2] - a[2]));
         }
-        if (points.length >= 3)
+        if (np >= 3)
         {
-            var p1 = points[0].pos;
-            var p2 = points[1].pos;
-            var p3 = points[2].pos;
-            out.push('角度 \u2220P1P2P3  ' + angleAt(p1, p2, p3).toFixed(2) + '\u00B0');
-            out.push('边长 P2P1 ' + fmtNum(vecLen(p2, p1)) +
-                '   P2P3 ' + fmtNum(vecLen(p2, p3)));
+            var p1 = points[np - 3].pos;
+            var p2 = points[np - 2].pos;
+            var p3 = points[np - 1].pos;
+            out.push('角度 \u2220P' + (np - 2) + 'P' + (np - 1) + 'P' + np +
+                '  ' + angleAt(p1, p2, p3).toFixed(2) + '\u00B0');
+            out.push('边长 P' + (np - 1) + 'P' + (np - 2) + ' ' + fmtNum(vecLen(p2, p1)) +
+                '   P' + (np - 1) + 'P' + np + ' ' + fmtNum(vecLen(p2, p3)));
         }
         $('pick-calc').textContent = out.join('\n');
     }

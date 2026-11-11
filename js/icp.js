@@ -203,8 +203,44 @@
 
     /* ---------------- 求解器（可按轮驱动） ---------------- */
 
+    /* 行向量重正交（Gram-Schmidt）。
+     * expSO3 每轮左乘会累积浮点误差，几十轮后 R 不再严格正交，
+     * 于是 isRigidMat 判为"非刚体"，应用矩阵时被拒绝、数据保持原位 ——
+     * 表现为 ICP 明明报了 RMS=0，模型却纹丝不动。 */
+    function orthonormalize(R, out)
+    {
+        var r0x = R[0], r0y = R[1], r0z = R[2];
+        var r1x = R[3], r1y = R[4], r1z = R[5];
+
+        var n0 = Math.sqrt(r0x * r0x + r0y * r0y + r0z * r0z);
+        if (!(n0 > 0)) { return false; }
+        r0x /= n0; r0y /= n0; r0z /= n0;
+
+        var d01 = r1x * r0x + r1y * r0y + r1z * r0z;
+        r1x -= d01 * r0x; r1y -= d01 * r0y; r1z -= d01 * r0z;
+
+        var n1 = Math.sqrt(r1x * r1x + r1y * r1y + r1z * r1z);
+        if (!(n1 > 0)) { return false; }
+        r1x /= n1; r1y /= n1; r1z /= n1;
+
+        out[0] = r0x; out[1] = r0y; out[2] = r0z;
+        out[3] = r1x; out[4] = r1y; out[5] = r1z;
+        out[6] = r0y * r1z - r0z * r1y;
+        out[7] = r0z * r1x - r0x * r1z;
+        out[8] = r0x * r1y - r0y * r1x;
+        return true;
+    }
+
     function matOf(R, t)
     {
+        // 先重正交：几十轮 expSO3 累积的浮点误差会让 R 偏离正交，
+        // 上层 isRigidMat 校验不通过就不应用矩阵（表现为 RMS=0 但模型不动）
+        var R2 = new Float64Array(9);
+        if (orthonormalize(R, R2))
+        {
+            R = [R2[0], R2[1], R2[2], R2[3], R2[4], R2[5], R2[6], R2[7], R2[8]];
+        }
+
         var m = new Float64Array(16);
         m[0] = R[0]; m[1] = R[1]; m[2] = R[2];   m[3] = t[0];
         m[4] = R[3]; m[5] = R[4]; m[6] = R[5];   m[7] = t[1];
@@ -219,11 +255,21 @@
         opts = opts || {};
 
         var maxIter = opts.maxIter || 50;
-        var tol = opts.tol || 1e-6;
-        var stride = Math.max(1, opts.stride || 1);
+        var tol = opts.tol || 1e-7;
         var maxDist = opts.maxDist || 0;
         var normalThresh = (opts.normalThresh === undefined) ? 0.5 : opts.normalThresh;
         var onIter = opts.onIter || null;
+
+        // 采样比例 0~1：1 表示不采样。兼容旧的整数 stride（1 表示全量）。
+        var sampleRatio = 1;
+        if (opts.sampleRatio !== undefined)
+        {
+            sampleRatio = Math.max(0.001, Math.min(1, opts.sampleRatio));
+        }
+        else if (opts.stride)
+        {
+            sampleRatio = Math.max(0.001, Math.min(1, 1 / opts.stride));
+        }
 
         var kd = global.MV.kdtree.build(dstPos);
         if (!kd) { return null; }
@@ -247,6 +293,34 @@
             t = [im[3], im[7], im[11]];
         }
 
+        /* 随机下采样：一次性抽取固定的索引集合，之后每轮都用同一批点。
+         * 若每轮重新随机，RMS 会持续抖动、收敛判据失效。
+         * 不采样时 idxList 保持 null，走零开销的全量遍历。 */
+        var idxList = null;
+        if (sampleRatio < 0.9999)
+        {
+            var want = Math.max(6, Math.round(nSrc * sampleRatio));
+
+            if (want < nSrc)
+            {
+                var pool = new Int32Array(nSrc);
+                for (var pi2 = 0; pi2 < nSrc; pi2++) { pool[pi2] = pi2; }
+
+                // 部分 Fisher-Yates：只需要前 want 个
+                for (var pi3 = 0; pi3 < want; pi3++)
+                {
+                    var pj = pi3 + Math.floor(Math.random() * (nSrc - pi3));
+                    var pt = pool[pi3];
+                    pool[pi3] = pool[pj];
+                    pool[pj] = pt;
+                }
+
+                idxList = pool.subarray(0, want);
+            }
+        }
+
+        var nSamples = idxList ? idxList.length : nSrc;
+
         var dR = new Float64Array(9);
         var tmp = new Float64Array(9);
 
@@ -264,13 +338,26 @@
                 return { done: true, iters: iters, rms: lastRms, step: 0, used: used };
             }
 
+            /* 距离阈值随迭代递减（trim-ICP 的常见做法）：
+             * 前 2/3 的迭代放宽到 3 倍，用于快速拉近；之后线性收紧回设定值，
+             * 避免大阈值把错配带进最终解。
+             * 初始偏差较大时，固定的小阈值会让几乎所有对应被丢弃，
+             * 剩下的少量重叠点给出不唯一的解（实测偏移 50 会停在 15）。 */
+            var curMaxDist = maxDist;
+            if (maxDist > 0 && maxIter > 1)
+            {
+                var decay = 1 - Math.min(1, iters / (maxIter * 0.66));
+                curMaxDist = maxDist * (1 + 2 * decay);
+            }
+
             var A = new Float64Array(36);
             var b = new Float64Array(6);
             var cnt = 0;
             var sumSq = 0;
 
-            for (var i = 0; i < nSrc; i += stride)
+            for (var si = 0; si < nSamples; si++)
             {
+                var i = idxList ? idxList[si] : si;
                 var p0 = i * 3;
                 var sx = srcPos[p0], sy = srcPos[p0 + 1], sz = srcPos[p0 + 2];
 
@@ -287,7 +374,7 @@
                 var dx = px - qx, dy = py - qy, dz = pz - qz;
                 var d2 = dx * dx + dy * dy + dz * dz;
 
-                if (maxDist > 0 && d2 > maxDist * maxDist) { continue; }
+                if (curMaxDist > 0 && d2 > curMaxDist * curMaxDist) { continue; }
 
                 var nx = 0, ny = 0, nz = 0;
                 if (hasDstN) { nx = dstNrm[q0]; ny = dstNrm[q0 + 1]; nz = dstNrm[q0 + 2]; }
@@ -366,7 +453,9 @@
 
             iters++;
 
-            var converged = (Math.abs(lastRms - rms) < tol) || (stepLen < 1e-9);
+            // 相对判据：不同尺度的模型用同一个 tol 才有一致的收敛行为。
+            // 绝对阈值会导致大模型永远达不到、每次都跑满 maxIter。
+            var converged = (Math.abs(lastRms - rms) < tol * (1 + rms)) || (stepLen < 1e-9);
             lastRms = rms;
 
             if (onIter && onIter(iters, rms, stepLen) === false) { done = true; }
@@ -520,6 +609,24 @@
         return { center: [cx, cy, cz], axes: eig.axes, values: eig.values };
     }
 
+
+    /* ---------------- 自动粗配准（Super4PCS 的简化实现） ----------------
+     *
+     * 论文做法：从源点集取共面 4 点，用 LCP（最大公共点集）索引在目标中
+     * 快速找出与此 4 点全等的所有 4 点组，再按最优子集枚举 + RANSAC 打分。
+     *
+     * 这里做了三处简化，换来实现量与内存可控：
+     *   1. 不做 LCP 索引，改在抽样后的目标点集上按"逐级半径查询"扩张；
+     *   2. 不做最优子集枚举，每级只保留少量候选（宽基线本身已给出较强约束）；
+     *   3. 打分用固定抽样点的内点率，而不是全量 LCP。
+     *
+     * 对"两个姿态差异很大、PCA 主轴又区分不开"的工件，这一步能把 ICP
+     * 拉进收敛域，剩下的精度交给后面的对称 ICP。
+     */
+
+    /* 4×4 对称矩阵的最大特征向量（Jacobi 旋转），用于 Horn 四元数求解 */
+
+
     global.MV.icp = {
         symmetric: symmetric,
         createSolver: createSolver,
@@ -527,6 +634,6 @@
         pcaOf: pcaOf,
         jacobi3: jacobi3,
         solve6: solve6,
-        expSO3: expSO3
+        expSO3: expSO3,
     };
 })(window);

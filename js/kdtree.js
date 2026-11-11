@@ -116,6 +116,7 @@
         var qx = 0, qy = 0, qz = 0;
         var bestIdx = -1, bestD2 = Infinity;
         var rad2 = 0;
+        var minRad2 = 0;      // 环形查询的下界（平方）；0 表示不设下界
         var radOut = [];
 
         function nearestRec(node)
@@ -175,7 +176,8 @@
                     var dx = pts[p] - qx;
                     var dy = pts[p + 1] - qy;
                     var dz = pts[p + 2] - qz;
-                    if (dx * dx + dy * dy + dz * dz <= rad2)
+                    var dd2 = dx * dx + dy * dy + dz * dz;
+                    if (dd2 <= rad2 && dd2 >= minRad2)
                     {
                         radOut.push(pi);
                     }
@@ -228,10 +230,14 @@
             nodeCount: function () { return nn; },
 
             /* 半径内所有点索引（含边界） */
-            radius: function (x, y, z, r)
+            /* rMin 可选：给了就只返回 [rMin, r] 之间的点（环形查询）。
+             * 4PCS 找"与源点对等距"的目标点时必须要下界，
+             * 否则返回的近处点会把上层过滤全部挡掉。 */
+            radius: function (x, y, z, r, rMin)
             {
                 qx = x; qy = y; qz = z;
                 rad2 = r * r;
+                minRad2 = (rMin && rMin > 0) ? rMin * rMin : 0;
                 radOut = [];
                 radiusRec(0);
                 return radOut;

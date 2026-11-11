@@ -905,6 +905,31 @@
         }
     };
 
+    /* 仅更新顶点位置缓冲，不重建 VAO / 索引 / 空间分块。
+     *
+     * 配准预览只是对顶点做刚体变换，拓扑完全没变；而 uploadLayer 会重新
+     * buildIndexed + buildSpaceChunks + 全量索引越界自检 + 重建 buffer，
+     * 单次就要二三十毫秒。预览每步走一遍，帧率必然崩。
+     *
+     * 只对"索引化且顶点来自 uniqVerts"的图层生效（STL 焊接路径），
+     * 其余（散点、非焊接网格）返回 false，由调用方退回 uploadLayer。
+     */
+    Renderer.prototype.updateVertices = function (layer)
+    {
+        if (!this.ready || !layer || !layer.gpu) { return false; }
+
+        var g = layer.gpu;
+        var arr = g.uniqVerts;
+        if (!arr || !g.posBuffer || !g.vao) { return false; }
+
+        var gl = this.gl;
+        gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        return true;
+    };
+
     Renderer.prototype.releaseLayer = function (layer)
     {
         var gl = this.gl;
@@ -1762,7 +1787,19 @@
         gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
         gl.bindVertexArray(null);
 
-        var COLORS = [[1.0, 0.85, 0.2], [0.35, 1.0, 0.55], [0.45, 0.75, 1.0]];
+        /* 所有标记统一一个颜色。
+         *
+         * 原来按索引在黄 / 绿 / 蓝之间轮换，本意是帮用户区分前三个点，
+         * 但放开个数之后颜色会循环出现，"第 4 个点是哪个颜色"就没有意义了。
+         * 区分点靠信息栏的 P1 / P2 / P3 编号即可。 */
+        /* 两档配色：
+         *   最近 3 个点（参与距离 / 角度计算）→ 亮橙，带黑描边
+         *   更早的点（仅作参照）          → 暗灰，不描边
+         * 这样一眼能看出"哪三个在算"。 */
+        var ACTIVE = [1.0, 0.58, 0.08];
+        var IDLE = [0.58, 0.58, 0.58];
+
+        var activeStart = Math.max(0, n - 3);
 
         gl.useProgram(this.lineP);
         gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
@@ -1770,12 +1807,27 @@
         gl.uniform1f(this.lineU.uDepthBias, 0.0);
         gl.disable(gl.DEPTH_TEST);
         gl.bindVertexArray(this.markVao);
-        for (var k = 0; k < n; k++)
+
+        // 历史点：暗灰，单层
+        if (activeStart > 0)
         {
-            var c = COLORS[k % COLORS.length];
-            gl.uniform4f(this.lineU.uColor, c[0], c[1], c[2], 1.0);
-            gl.drawArrays(gl.LINES, k * 6, 6);
+            gl.uniform4f(this.lineU.uColor, IDLE[0], IDLE[1], IDLE[2], 1.0);
+            gl.drawArrays(gl.LINES, 0, activeStart * 6);
         }
+
+        /* 参与计算的点：画两遍形成描边。
+         * WebGL 的 gl.lineWidth 大多被驱动钳到 1，所以用「同位置画两遍、
+         * 靠颜色差拉开对比」代替真正的粗线。 */
+        var activeCount = n - activeStart;
+        if (activeCount > 0)
+        {
+            gl.uniform4f(this.lineU.uColor, 0.0, 0.0, 0.0, 1.0);
+            gl.drawArrays(gl.LINES, activeStart * 6, activeCount * 6);
+
+            gl.uniform4f(this.lineU.uColor, ACTIVE[0], ACTIVE[1], ACTIVE[2], 1.0);
+            gl.drawArrays(gl.LINES, activeStart * 6, activeCount * 6);
+        }
+
         gl.bindVertexArray(null);
         gl.enable(gl.DEPTH_TEST);
 
@@ -2137,7 +2189,9 @@
                 // 因此加“最少 6 px”保护：放大到足够近时才真正按 1 mm 显示
                 var baseLen = this.pickMarkLen || 1;
                 var eyeP = cam.getPosition();
-                this.drawPickMarks(mvp, this.pickMarks, eyeP, cam.fov, v.h, baseLen, 6);
+                /* 最后一项是「最小屏幕像素」：1mm 世界尺寸在小模型或远视角下
+         * 只有几个像素，几乎看不见。14px 保证任何距离都能看清。 */
+        this.drawPickMarks(mvp, this.pickMarks, eyeP, cam.fov, v.h, baseLen, 14);
             }
 
             // 编辑选区预览
