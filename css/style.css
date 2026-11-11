@@ -227,6 +227,27 @@ button.primary {
     padding: 6px 0 10px 0;
 }
 
+/* 场景树：组开关在标题行右端（原来是子列表里的独立一行） */
+.tree-group-header .group-chk {
+    flex: 0 0 auto;
+    margin-left: 6px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
+.tree-group-header .gcount {
+    margin-left: auto;
+    margin-right: 2px;
+}
+
+/* 空槽位占位：一行灰色小字，不再占满整行高度 */
+.tree-empty {
+    padding: 3px 0 3px 22px;
+    color: var(--dim);
+    font-size: 11px;
+    opacity: .7;
+}
+
 .tree-group-header {
     display: flex;
     align-items: center;
@@ -2307,7 +2328,7 @@ body.theme-light #p-sfhist.sf-ruler {
     padding: 3px 4px;
 }
 .xform-reg-actions {
-    justify-content: flex-start;
+    justify-content: flex-end;   /* 原来被覆盖成 flex-start，按钮贴在左下角 */
     margin-bottom: 6px;
 }
 .xform-reg-list {
@@ -2389,6 +2410,35 @@ body.theme-light #p-sfhist.sf-ruler {
     margin-bottom: 0;
 }
 /* 预览开关 */
+/* 勾选框行（如「自动粗配准」）：此前没有任何样式定义，
+ * 是 inline 的 label，侧栏宽度不够时文字与勾选框会挤成两行。 */
+.xform-check {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+    /* 父级 .xform-reg-row 是 flex，label 作为 flex item 会被压缩到
+     * 只剩几十像素，导致「自动粗配准（4PCS）」被 CJK 断行规则拆成两行。
+     * 这里占满整行并禁止文字换行。 */
+    flex: 1 1 100%;
+    white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11px;
+    color: var(--dim);
+    margin: 2px 0 8px 0;
+    cursor: pointer;
+    user-select: none;
+}
+
+.xform-check input {
+    margin: 0;
+    flex: 0 0 auto;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
 .xform-preview {
     display: flex;
     align-items: center;
@@ -2423,6 +2473,12 @@ body.theme-light #p-sfhist.sf-ruler {
 /* ===== 数据对齐（侧栏常驻） ===== */
 #xform.panel {
     padding: 8px 10px 12px;
+
+    /* 侧栏是 flex column 且 overflow: hidden —— 面板内容超出高度就被直接裁掉，
+     * 表现为「实时预览」勾选框、底部提示文字凭空消失。
+     * 这里让面板自己滚动，min-height: 0 是 flex 子项允许收缩的前提。 */
+    overflow-y: auto;
+    min-height: 0;
 }
 #xform .xform-side {
     display: flex;
@@ -2468,10 +2524,12 @@ body.theme-light #p-sfhist.sf-ruler {
 }
 #xform .xform-panes {
     height: auto;
-    max-height: 260px;
+    /* 原来是 260px 内部滚动。面板整体已经能滚，
+     * 再限一层会变成双滚动条，且把下面的预览/提示挤出视野。 */
+    max-height: none;
     min-height: 130px;      /* flex 容器里会被压成 0，必须给下限 */
     flex: 0 0 auto;
-    overflow-y: auto;
+    overflow-y: visible;
 }
 #xform .xform-actions {
     flex-wrap: wrap;
@@ -2542,3 +2600,244 @@ body.theme-light #p-sfhist.sf-ruler {
     border: 1px solid #1a9c9c;
 }
 
+/* ===== P2：数据对齐面板的视觉分组 ===== */
+
+/* 矩阵第 4 列（平移）左侧加一道竖线，和旋转 3 列分开 */
+#xform .xform-grid input:nth-child(4n) {
+    box-shadow: inset 2px 0 0 -1px var(--line);
+}
+
+/* 「应用」是执行类动作，与前面的编辑类按钮拉开距离 */
+#xform /* 已被末尾的统一规则接管（margin-left: auto 推到最右） */
+.xform-actions .primary {
+    position: relative;
+}
+#xform .xform-actions .primary::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 12%;
+    bottom: 12%;
+    width: 1px;
+    background: var(--line);
+}
+
+/* ICP 参数：两列网格，标签与输入框对齐 */
+/* ICP 面板里的勾选项（4PCS / 预览）：纵向排列，与参数网格区分开 */
+/* 两个勾选项各占一半宽度：贴在一端会让右侧留出大片空白，
+ * 与下面两列的参数网格也接不上。 */
+.xform-icp-checks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    gap: 6px 12px;
+    margin-bottom: 9px;
+}
+.xform-icp-checks .xform-check {
+    flex: initial;      /* grid 下不需要 flex 尺寸 */
+    margin: 0;
+    min-width: 0;
+}
+
+.xform-icp-params {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px 12px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.xform-icp-params .param {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+.xform-icp-params .param span {
+    /* 固定标签宽度：否则「迭代」2 字与「采样%」3 字会把同一行的
+     * 两个输入框挤成不同长度（实测 107.5 / 98.5 / 103.3 参差）。 */
+    flex: 0 0 42px;
+    width: 42px;
+    color: var(--dim);
+    font-size: 11px;
+    white-space: nowrap;
+}
+.xform-icp-params .param input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    height: 20px;
+    padding: 0 4px;
+    font-size: 11px;
+    text-align: center;
+    background: var(--bg-soft);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+}
+
+/* ==================================================================
+ * 侧栏三个面板（图层属性 / 视图设置 / 数据对齐）的布局统一
+ *
+ * 三者原本各写一套：
+ *   属性   #props .prop-row   grid 66px 1fr auto
+ *   视图   .viewcfg .row      flex，标签宽 56px 与 70px 两处定义互相覆盖
+ *   对齐   .xform-reg-row     flex-wrap，标签无固定宽度
+ * 这里统一到同一组尺寸，并补上数据对齐缺失的分组标题。
+ * ================================================================== */
+
+:root {
+    --pane-label-w: 66px;     /* 标签列宽：与属性面板对齐 */
+    --pane-gap: 8px;
+    --pane-row-minh: 26px;
+}
+
+/* ---- 视图设置：只统一行高，不动标签宽度 ----
+ * 属性面板与数据对齐是「标签定宽 + 控件拉伸」（输入框需要撑开），
+ * 视图设置是「标签弹性 + 控件靠右」（勾选框/按钮宽度固定）。
+ * 两者是不同但各自合理的布局，强行统一会把
+ * 「叠加对面模型」这类长标签压成两行。 */
+.viewcfg .row {
+    min-height: var(--pane-row-minh);
+}
+
+/* ---- 数据对齐：补齐与另两个面板一致的分组样式 ---- */
+/* 与「图层属性」「视图设置」的 .group-title 完全一致：
+ * 实测前两者是 13px / padding 8 0 4，数据对齐原来写成 12px / 0 0 5。 */
+#xform .group-title {
+    padding: 8px 0 4px 0;
+    margin: 0;
+    letter-spacing: .4px;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text);
+    opacity: .82;
+}
+#xform .group-title:first-child {
+    padding-top: 0;
+}
+
+/* 目标图层：标题在上、值在下，不用挤在一行 */
+#xform .xform-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+}
+#xform .xform-head b {
+    font-weight: 400;
+    color: var(--accent);
+    padding-left: 1px;
+}
+
+/* ---- 数据对齐：行内标签与另两个面板对齐 ----
+ * 用 flex 而不是 grid：参考/目标行是「标签+控件+标签+控件」四个兄弟节点，
+ * 三列 grid 会把第 4 个挤到下一行。flex 下两个 select 均分剩余宽度即可。 */
+#xform .xform-reg-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+    min-height: var(--pane-row-minh);
+    padding: 2px 0;
+}
+#xform .xform-reg-row > span {
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-size: 11px;
+    white-space: nowrap;
+}
+#xform .xform-reg-row > select {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* 参考 / 目标是这一页的主参数（选错层整次配准就白做），
+ * 用一道分隔线把它和下面的勾选项、数值参数区分开。 */
+#xform .xform-reg-row {
+    padding-bottom: 9px;
+    margin-bottom: 9px;
+    border-bottom: 1px solid var(--line);
+}
+
+/* ---- 矩阵按钮组：编辑类靠左、执行类靠右 ---- */
+#xform .xform-actions-split {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+/* 只有一个主操作时不要被 space-between 推到中间 */
+#xform .xform-reg-actions {
+    justify-content: flex-end;
+}
+#xform .xform-actions-split .btn-edit {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+#xform .xform-actions-split .primary {
+    flex: 0 0 auto;
+    margin-left: 0 !important;   /* 由 space-between 负责靠右 */
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+/* 主操作按钮的不可用态：保留强调色，只降低不透明度 ——
+ * 这样「应用」「计算矩阵」「运行 ICP」在任何状态下都一眼可辨为主操作。 */
+button.primary:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
+/* ==================================================================
+ * 勾选项统一规范：文字靠左、勾选框靠右
+ *
+ * 三处原本各写一套：
+ *   属性「元素」   .chk-grid label  → <input /> 面片    （框在前）
+ *   视图「地面网格」 .row.chk2 label  → <input /> 地面网格 （框在前）
+ *   数据对齐 4PCS   .xform-check     → 4PCS <input />   （框紧跟文字）
+ * 现在统一为 flex + space-between。
+ * ================================================================== */
+
+/* 属性面板：元素 2×2 */
+#props .chk-grid label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+}
+
+/* 视图设置：地面网格 / 坐标轴 */
+.viewcfg .row.chk2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+}
+.viewcfg .row.chk2 > label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+.viewcfg .row.chk2 > label > span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 数据对齐：4PCS / 预览 */
+#xform .xform-icp-checks .xform-check {
+    justify-content: space-between;
+}
+
+/* 光照的「跟随相机」也是单个勾选项，同样文字左、框右 */
+.viewcfg .row > label.wide {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}

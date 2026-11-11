@@ -1050,70 +1050,201 @@
     }
 
     /* ==================== 拾取与测量（原 pick.js）（App 方法，由 app.js 启动时安装） ==================== */
-    function installPickMethods()
+    /* 拾取相关的 App 方法，分三组安装。
+     *
+     * 「安装」这一步是必要的：algo.js 在 app.js 之前加载，那时
+     * global.MV.App 还不存在，无法在模块顶层直接挂原型方法。
+     * 原来 13 个方法 + 4 个辅助函数全塞在一个 799 行的函数里，
+     * LSP 跳不过去、git blame 一改就牵动整块，所以按职责拆开。
+     * 辅助函数（rayTriangle / rayAabb / ensurePickGrid / pickCandidates）
+     * 不依赖 App，已提到模块作用域。 */
+
+function rayTriangle(ox, oy, oz, dx, dy, dz, pos, o)
+{
+    var ax = pos[o];
+    var ay = pos[o + 1];
+    var az = pos[o + 2];
+    var e1x = pos[o + 3] - ax;
+    var e1y = pos[o + 4] - ay;
+    var e1z = pos[o + 5] - az;
+    var e2x = pos[o + 6] - ax;
+    var e2y = pos[o + 7] - ay;
+    var e2z = pos[o + 8] - az;
+
+    var px = dy * e2z - dz * e2y;
+    var py = dz * e2x - dx * e2z;
+    var pz = dx * e2y - dy * e2x;
+
+    var det = e1x * px + e1y * py + e1z * pz;
+    if (det > -1e-12 && det < 1e-12)
+    {
+        return -1;
+    }
+    var inv = 1 / det;
+
+    var tx = ox - ax;
+    var ty = oy - ay;
+    var tz = oz - az;
+    var u = (tx * px + ty * py + tz * pz) * inv;
+    if (u < 0 || u > 1)
+    {
+        return -1;
+    }
+
+    var qx = ty * e1z - tz * e1y;
+    var qy = tz * e1x - tx * e1z;
+    var qz = tx * e1y - ty * e1x;
+    var v = (dx * qx + dy * qy + dz * qz) * inv;
+    if (v < 0 || u + v > 1)
+    {
+        return -1;
+    }
+
+    var t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+    return t > 1e-6 ? t : -1;
+}
+
+function rayAabb(ox, oy, oz, dx, dy, dz, mnx, mny, mnz, mxx, mxy, mxz)
+{
+    var t0 = 0;
+    var t1 = Infinity;
+
+    function slab(o, d, lo, hi)
+    {
+        if (Math.abs(d) < 1e-12)
+        {
+            return o >= lo && o <= hi;
+        }
+        var a = (lo - o) / d;
+        var b = (hi - o) / d;
+        if (a > b) { var tmp = a; a = b; b = tmp; }
+        if (a > t0) { t0 = a; }
+        if (b < t1) { t1 = b; }
+        return t1 >= t0;
+    }
+
+    return slab(ox, dx, mnx, mxx) && slab(oy, dy, mny, mxy) && slab(oz, dz, mnz, mxz);
+}
+
+var PICK_GRID_N = 8;
+
+var PICK_GRID_MIN_TRIS = 4000;      // 少于这个数直接全量，构建不划算
+
+function ensurePickGrid(layer, tri)
+{
+    if (layer._pickGrid && layer._pickGrid.tri === tri)
+    {
+        return layer._pickGrid;
+    }
+
+    var pos = layer.data.positions;
+    var mnx = Infinity, mny = Infinity, mnz = Infinity;
+    var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+    var i;
+    for (i = 0; i < tri * 9; i += 3)
+    {
+        var x = pos[i], y = pos[i + 1], z = pos[i + 2];
+        if (x < mnx) { mnx = x; } if (x > mxx) { mxx = x; }
+        if (y < mny) { mny = y; } if (y > mxy) { mxy = y; }
+        if (z < mnz) { mnz = z; } if (z > mxz) { mxz = z; }
+    }
+
+    var N = PICK_GRID_N;
+    var sx = ((mxx - mnx) / N) || 1;
+    var sy = ((mxy - mny) / N) || 1;
+    var sz = ((mxz - mnz) / N) || 1;
+    var cells = new Array(N * N * N);
+
+    for (var t = 0; t < tri; t++)
+    {
+        var o = t * 9;
+        var tx0 = Math.min(pos[o], pos[o + 3], pos[o + 6]);
+        var tx1 = Math.max(pos[o], pos[o + 3], pos[o + 6]);
+        var ty0 = Math.min(pos[o + 1], pos[o + 4], pos[o + 7]);
+        var ty1 = Math.max(pos[o + 1], pos[o + 4], pos[o + 7]);
+        var tz0 = Math.min(pos[o + 2], pos[o + 5], pos[o + 8]);
+        var tz1 = Math.max(pos[o + 2], pos[o + 5], pos[o + 8]);
+
+        var i0 = Math.min(N - 1, Math.max(0, Math.floor((tx0 - mnx) / sx)));
+        var i1 = Math.min(N - 1, Math.max(0, Math.floor((tx1 - mnx) / sx)));
+        var j0 = Math.min(N - 1, Math.max(0, Math.floor((ty0 - mny) / sy)));
+        var j1 = Math.min(N - 1, Math.max(0, Math.floor((ty1 - mny) / sy)));
+        var k0 = Math.min(N - 1, Math.max(0, Math.floor((tz0 - mnz) / sz)));
+        var k1 = Math.min(N - 1, Math.max(0, Math.floor((tz1 - mnz) / sz)));
+
+        for (var ci = i0; ci <= i1; ci++)
+        {
+            for (var cj = j0; cj <= j1; cj++)
+            {
+                for (var ck = k0; ck <= k1; ck++)
+                {
+                    var key = (ci * N + cj) * N + ck;
+                    if (!cells[key]) { cells[key] = []; }
+                    cells[key].push(t);
+                }
+            }
+        }
+    }
+
+    layer._pickGrid = {
+        tri: tri, N: N,
+        mnx: mnx, mny: mny, mnz: mnz,
+        sx: sx, sy: sy, sz: sz,
+        cells: cells
+    };
+    return layer._pickGrid;
+}
+
+function pickCandidates(layer, eye, dir, tri)
+{
+    if (tri < PICK_GRID_MIN_TRIS)
+    {
+        return null;
+    }
+
+    var g = ensurePickGrid(layer, tri);
+    var N = g.N;
+    var out = [];
+    var seen = null;
+
+    for (var ci = 0; ci < N; ci++)
+    {
+        var x0 = g.mnx + ci * g.sx;
+        for (var cj = 0; cj < N; cj++)
+        {
+            var y0 = g.mny + cj * g.sy;
+            for (var ck = 0; ck < N; ck++)
+            {
+                var key = (ci * N + cj) * N + ck;
+                var list = g.cells[key];
+                if (!list)
+                {
+                    continue;
+                }
+                var z0 = g.mnz + ck * g.sz;
+                if (!rayAabb(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2],
+                        x0, y0, z0, x0 + g.sx, y0 + g.sy, z0 + g.sz))
+                {
+                    continue;
+                }
+                for (var q = 0; q < list.length; q++)
+                {
+                    out.push(list[q]);
+                }
+            }
+        }
+    }
+
+    // 块遍历顺序不保证深度优先，命中的三角形仍需逐个求交取最近（bestT 保证正确）
+    return out;
+}
+
+    /* 射线基础：屏幕坐标与相机互转 */
+    function installRayMethods()
     {
         var App = global.MV && global.MV.App;
-        if (!App)
-        {
-            return;
-        }
+        if (!App) { return; }
 
-    var App = global.MV && global.MV.App;
-    if (!App)
-    {
-        return;
-    }
-
-    /* ---------------- 射线拾取（Ctrl + 左键设置旋转中心） ---------------- */
-    function rayTriangle(ox, oy, oz, dx, dy, dz, pos, o)
-    {
-        var ax = pos[o];
-        var ay = pos[o + 1];
-        var az = pos[o + 2];
-        var e1x = pos[o + 3] - ax;
-        var e1y = pos[o + 4] - ay;
-        var e1z = pos[o + 5] - az;
-        var e2x = pos[o + 6] - ax;
-        var e2y = pos[o + 7] - ay;
-        var e2z = pos[o + 8] - az;
-
-        var px = dy * e2z - dz * e2y;
-        var py = dz * e2x - dx * e2z;
-        var pz = dx * e2y - dy * e2x;
-
-        var det = e1x * px + e1y * py + e1z * pz;
-        if (det > -1e-12 && det < 1e-12)
-        {
-            return -1;
-        }
-        var inv = 1 / det;
-
-        var tx = ox - ax;
-        var ty = oy - ay;
-        var tz = oz - az;
-        var u = (tx * px + ty * py + tz * pz) * inv;
-        if (u < 0 || u > 1)
-        {
-            return -1;
-        }
-
-        var qx = ty * e1z - tz * e1y;
-        var qy = tz * e1x - tx * e1z;
-        var qz = tx * e1y - ty * e1x;
-        var v = (dx * qx + dy * qy + dz * qz) * inv;
-        if (v < 0 || u + v > 1)
-        {
-            return -1;
-        }
-
-        var t = (e2x * qx + e2y * qy + e2z * qz) * inv;
-        return t > 1e-6 ? t : -1;
-    }
-
-    /* ---------------- 射线拾取（旋转中心 / 信息拾取共用） ---------------- */
-    /* 世界坐标 -> 屏幕坐标（相对 canvas 的 CSS 像素）。
-     * 与 rayFromScreen 严格互逆：同一套 camera.basis / fov / rect / dpr。
-     * 用于把配准选的 3D 点投影回屏幕画序号标签。 */
     App.prototype.worldToScreen = function (p, vi)
     {
         vi = vi || 0;
@@ -1183,151 +1314,14 @@
         };
     };
 
-    /* 射线与轴对齐包围盒求交（slab 法）；返回是否相交 */
-    function rayAabb(ox, oy, oz, dx, dy, dz, mnx, mny, mnz, mxx, mxy, mxz)
-    {
-        var t0 = 0;
-        var t1 = Infinity;
-
-        function slab(o, d, lo, hi)
-        {
-            if (Math.abs(d) < 1e-12)
-            {
-                return o >= lo && o <= hi;
-            }
-            var a = (lo - o) / d;
-            var b = (hi - o) / d;
-            if (a > b) { var tmp = a; a = b; b = tmp; }
-            if (a > t0) { t0 = a; }
-            if (b < t1) { t1 = b; }
-            return t1 >= t0;
-        }
-
-        return slab(ox, dx, mnx, mxx) && slab(oy, dy, mny, mxy) && slab(oz, dz, mnz, mxz);
     }
 
-    /* 分块网格：把三角形按包围盒注册到 8×8×8 个块，拾取时先筛块 */
-    var PICK_GRID_N = 8;
-    var PICK_GRID_MIN_TRIS = 4000;      // 少于这个数直接全量，构建不划算
-
-    function ensurePickGrid(layer, tri)
+    /* 拾取查询：按层求交、十字判定、命中信息组装 */
+    function installPickQueryMethods()
     {
-        if (layer._pickGrid && layer._pickGrid.tri === tri)
-        {
-            return layer._pickGrid;
-        }
+        var App = global.MV && global.MV.App;
+        if (!App) { return; }
 
-        var pos = layer.data.positions;
-        var mnx = Infinity, mny = Infinity, mnz = Infinity;
-        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-        var i;
-        for (i = 0; i < tri * 9; i += 3)
-        {
-            var x = pos[i], y = pos[i + 1], z = pos[i + 2];
-            if (x < mnx) { mnx = x; } if (x > mxx) { mxx = x; }
-            if (y < mny) { mny = y; } if (y > mxy) { mxy = y; }
-            if (z < mnz) { mnz = z; } if (z > mxz) { mxz = z; }
-        }
-
-        var N = PICK_GRID_N;
-        var sx = ((mxx - mnx) / N) || 1;
-        var sy = ((mxy - mny) / N) || 1;
-        var sz = ((mxz - mnz) / N) || 1;
-        var cells = new Array(N * N * N);
-
-        for (var t = 0; t < tri; t++)
-        {
-            var o = t * 9;
-            var tx0 = Math.min(pos[o], pos[o + 3], pos[o + 6]);
-            var tx1 = Math.max(pos[o], pos[o + 3], pos[o + 6]);
-            var ty0 = Math.min(pos[o + 1], pos[o + 4], pos[o + 7]);
-            var ty1 = Math.max(pos[o + 1], pos[o + 4], pos[o + 7]);
-            var tz0 = Math.min(pos[o + 2], pos[o + 5], pos[o + 8]);
-            var tz1 = Math.max(pos[o + 2], pos[o + 5], pos[o + 8]);
-
-            var i0 = Math.min(N - 1, Math.max(0, Math.floor((tx0 - mnx) / sx)));
-            var i1 = Math.min(N - 1, Math.max(0, Math.floor((tx1 - mnx) / sx)));
-            var j0 = Math.min(N - 1, Math.max(0, Math.floor((ty0 - mny) / sy)));
-            var j1 = Math.min(N - 1, Math.max(0, Math.floor((ty1 - mny) / sy)));
-            var k0 = Math.min(N - 1, Math.max(0, Math.floor((tz0 - mnz) / sz)));
-            var k1 = Math.min(N - 1, Math.max(0, Math.floor((tz1 - mnz) / sz)));
-
-            for (var ci = i0; ci <= i1; ci++)
-            {
-                for (var cj = j0; cj <= j1; cj++)
-                {
-                    for (var ck = k0; ck <= k1; ck++)
-                    {
-                        var key = (ci * N + cj) * N + ck;
-                        if (!cells[key]) { cells[key] = []; }
-                        cells[key].push(t);
-                    }
-                }
-            }
-        }
-
-        layer._pickGrid = {
-            tri: tri, N: N,
-            mnx: mnx, mny: mny, mnz: mnz,
-            sx: sx, sy: sy, sz: sz,
-            cells: cells
-        };
-        return layer._pickGrid;
-    }
-
-    /* 返回候选三角形序号数组；小模型返回 null（表示全量遍历） */
-    function pickCandidates(layer, eye, dir, tri)
-    {
-        if (tri < PICK_GRID_MIN_TRIS)
-        {
-            return null;
-        }
-
-        var g = ensurePickGrid(layer, tri);
-        var N = g.N;
-        var out = [];
-        var seen = null;
-
-        for (var ci = 0; ci < N; ci++)
-        {
-            var x0 = g.mnx + ci * g.sx;
-            for (var cj = 0; cj < N; cj++)
-            {
-                var y0 = g.mny + cj * g.sy;
-                for (var ck = 0; ck < N; ck++)
-                {
-                    var key = (ci * N + cj) * N + ck;
-                    var list = g.cells[key];
-                    if (!list)
-                    {
-                        continue;
-                    }
-                    var z0 = g.mnz + ck * g.sz;
-                    if (!rayAabb(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2],
-                            x0, y0, z0, x0 + g.sx, y0 + g.sy, z0 + g.sz))
-                    {
-                        continue;
-                    }
-                    for (var q = 0; q < list.length; q++)
-                    {
-                        out.push(list[q]);
-                    }
-                }
-            }
-        }
-
-        // 块遍历顺序不保证深度优先，命中的三角形仍需逐个求交取最近（bestT 保证正确）
-        return out;
-    }
-
-    /* 射线拾取最近命中：坐标 / 法向 / 标签 / 标量（点云） */
-    /* 只对指定图层做拾取。
-     *
-     * rayPick 返回的是"最近的一次命中"，两个点云在屏幕上重叠时，
-     * 后面的那一层永远取不到 —— N-N 配准要分别在参考层和目标层上取点，
-     * 未对齐状态下两层本来就重叠，靠 rayPick 会导致所有点击都落在
-     * 视线最前面那层上，另一边永远是 0 个点。
-     */
     App.prototype.rayPickLayer = function (clientX, clientY, layerId)
     {
         if (!this.layers || !this.layers.length) { return null; }
@@ -1474,14 +1468,6 @@
         return hit;
     };
 
-    /* 点云拾取区域：十字形，尺寸随点的渲染大小变化。
-     *
-     * 用十而不是圆，是为了"所见即所得"：
-     *   - 臂长 = 点半径 + 余量 → 点画得越大，可点中的范围越大
-     *   - 臂宽 = 点半径 + 余量 → 点自身占的面积内一定命中
-     *   - 斜向上超出臂宽的点不参与，避免吸附到视觉上并不在光标下的点
-     *
-     * 世界尺度由「屏幕像素」反算，所以缩放时手感一致。 */
     App.prototype.pickShape = function (layer, vi)
     {
         /* bbox 缺失时不能用 BBox.radius(null)，那会直接抛错、
@@ -1728,7 +1714,14 @@
         return hit;
     };
 
-    /* Ctrl + 左键 / 「旋转中心 → 重设」：把命中点设为旋转中心 */
+    }
+
+    /* 拾取状态：光标、模式开关、点列表、旋转中心 */
+    function installPickStateMethods()
+    {
+        var App = global.MV && global.MV.App;
+        if (!App) { return; }
+
     App.prototype.pickTarget = function (clientX, clientY)
     {
         var hit = this.rayPick(clientX, clientY);
@@ -1744,9 +1737,6 @@
             hit.pos[1].toFixed(2) + ', ' + hit.pos[2].toFixed(2) + ')');
     };
 
-    /* ---------------- 信息拾取：坐标 / 法向 / 标签 / 标量 + 距离角度 ---------------- */
-    /* 统一的光标切换：拾取 / 选点模式走这里。
-     * 用 class 而不是内联 style，避免与 CSS 里的 #gl 规则互相覆盖。 */
     App.prototype.setPickCursor = function (on)
     {
         if (!this.canvas) { return; }
@@ -1821,7 +1811,6 @@
         this.markDirty();
     };
 
-    /* 进入“重设旋转中心”拾取模式：下一次左键单击模型即设为新的旋转中心 */
     App.prototype.beginPickCenter = function ()
     {
         this.pickMode = true;
@@ -1846,8 +1835,13 @@
         hooks.notify('已取消设置旋转中心');
     };
 
-    /* 视角回正：清除无极旋转累积的滚转，保持当前水平角/俯仰角 */
+    }
 
+    function installPickMethods()
+    {
+        installRayMethods();
+        installPickQueryMethods();
+        installPickStateMethods();
     }
 
     global.MV.algo = global.MV.algo || {};

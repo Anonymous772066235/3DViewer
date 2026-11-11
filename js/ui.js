@@ -5,6 +5,40 @@
  */
 (function (global)
 {
+    /* ---- 从 ui-util.js 解构纯工具函数 ----
+     * 这些函数零副作用、零外部依赖（不碰 DOM、不读 App 状态），
+     * 已独立成 js/ui-util.js（挂 MV.util）。解构成本地变量后，
+     * 本文件里所有原有调用点都不需要改动。 */
+    var MV_UTIL = (global.MV && global.MV.util) || {};
+    var hexToRgb = MV_UTIL.hexToRgb;
+    var rgbToHex = MV_UTIL.rgbToHex;
+    var fmtNum = MV_UTIL.fmtNum;
+    var formatBytes = MV_UTIL.formatBytes;
+    var fmtTime = MV_UTIL.fmtTime;
+    var slotLabel = MV_UTIL.slotLabel;
+    var formatCount = MV_UTIL.formatCount;
+    var pad2 = MV_UTIL.pad2;
+    var classifyLog = MV_UTIL.classifyLog;
+    var fmtMat = MV_UTIL.fmtMat;
+    var textToMat = MV_UTIL.textToMat;
+    var identityMat = MV_UTIL.identityMat;
+    var mat4Invert = MV_UTIL.mat4Invert;
+    var isIdentityMat = MV_UTIL.isIdentityMat;
+    var isRigidMat = MV_UTIL.isRigidMat;
+    var matSame = MV_UTIL.matSame;
+    var bboxOfPositions = MV_UTIL.bboxOfPositions;
+    var xformPositions = MV_UTIL.xformPositions;
+    var xformNormals = MV_UTIL.xformNormals;
+    var fmt3p = MV_UTIL.fmt3p;
+    var jacobiLargestEigenVec = MV_UTIL.jacobiLargestEigenVec;
+    var icpSample = MV_UTIL.icpSample;
+    var mat4Mul = MV_UTIL.mat4Mul;
+    var xformPoints = MV_UTIL.xformPoints;
+    var rampColorAt = MV_UTIL.rampColorAt;
+    var normKey = MV_UTIL.normKey;
+    var planFromLabels = MV_UTIL.planFromLabels;
+    var vecLen = MV_UTIL.vecLen;
+    var angleAt = MV_UTIL.angleAt;
     'use strict';
 
     global.MV = global.MV || {};
@@ -44,75 +78,11 @@
         return el;
     }
 
-    function hexToRgb(hex)
-    {
-        var s = hex.replace('#', '');
-        if (s.length === 3)
-        {
-            s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
-        }
-        var v = parseInt(s, 16);
-        return [
-            ((v >> 16) & 255) / 255,
-            ((v >> 8) & 255) / 255,
-            (v & 255) / 255
-        ];
-    }
 
-    function rgbToHex(rgb)
-    {
-        var out = '#';
-        for (var i = 0; i < 3; i++)
-        {
-            var v = Math.max(0, Math.min(255, Math.round(rgb[i] * 255)));
-            out += (v < 16 ? '0' : '') + v.toString(16);
-        }
-        return out;
-    }
 
-    function fmtNum(v)
-    {
-        var a = Math.abs(v);
-        if (a === 0) { return '0'; }
-        if (a >= 10000 || a < 0.001) { return v.toExponential(2); }
-        if (a >= 100) { return v.toFixed(1); }
-        return v.toFixed(3);
-    }
 
-    function formatBytes(n)
-    {
-        if (!(n > 0))
-        {
-            return '0 B';
-        }
-        var u = ['B', 'KB', 'MB', 'GB'];
-        var i = 0;
-        while (n >= 1024 && i < u.length - 1)
-        {
-            n /= 1024;
-            i++;
-        }
-        return n.toFixed(i === 0 ? 0 : 2) + ' ' + u[i];
-    }
 
-    function fmtTime(ms)
-    {
-        if (!ms)
-        {
-            return '-';
-        }
-        var d = new Date(ms);
-        var p = function (v) { return (v < 10 ? '0' : '') + v; };
-        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
-            p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
-    }
 
-    function slotLabel(slot)
-    {
-        if (slot === 'A') { return '左侧 (A)'; }
-        if (slot === 'B') { return '右侧 (B)'; }
-        return '公共图层 (S)';
-    }
 
     /* 场景树节点的悬停提示：文件来源、大小、修改时间、归属等 */
     function layerTooltip(layer)
@@ -167,18 +137,6 @@
         return lines.join('\n');
     }
 
-    function formatCount(n)
-    {
-        if (n >= 1e6)
-        {
-            return (n / 1e6).toFixed(2) + 'M';
-        }
-        if (n >= 1e3)
-        {
-            return (n / 1e3).toFixed(1) + 'k';
-        }
-        return String(n);
-    }
 
     function el(tag, cls, text)
     {
@@ -399,6 +357,9 @@
             var list = app.layers.filter(function (l) { return l.slot === slot; });
             var info = SLOT_INFO[slot];
 
+            var visibleGroup = list.length > 0;
+            var allVisible = visibleGroup && list.every(function (l) { return l.visible; });
+
             var header = el('div', 'tree-group-header slot-' + slot);
             var caret = el('span', 'caret', collapsed[slot] ? '\u25B8' : '\u25BE');
             var badge = el('span', 'slot-badge', info.badge);
@@ -408,6 +369,32 @@
             header.appendChild(badge);
             header.appendChild(title);
             header.appendChild(cnt);
+
+            /* 组开关直接放在标题行右端。
+             * 原来它是子项列表里的第一行「全选 / 全不选」，三个槽位就白占三行，
+             * 而且和下面的图层行长得一样，容易误点。 */
+            if (visibleGroup)
+            {
+                var groupChk = document.createElement('input');
+                groupChk.type = 'checkbox';
+                groupChk.className = 'group-chk';
+                groupChk.checked = allVisible;
+                groupChk.title = '显示 / 隐藏本组全部图层';
+                groupChk.addEventListener('click', function (ev) { ev.stopPropagation(); });
+                groupChk.addEventListener('change', function (ev)
+                {
+                    ev.stopPropagation();
+                    var now = Date.now();
+                    list.forEach(function (l)
+                    {
+                        l.visible = groupChk.checked;
+                        if (groupChk.checked) { l.shownAt = now; }
+                    });
+                    app.markDirty();
+                    renderTree();
+                });
+                header.appendChild(groupChk);
+            }
 
             header.addEventListener('click', function ()
             {
@@ -420,37 +407,7 @@
             var children = el('div', 'tree-children' + (collapsed[slot] ? ' collapsed' : ''));
             if (list.length === 0)
             {
-                children.appendChild(el('div', 'tree-empty', '空 — 按钮载入或拖放文件'));
-            }
-
-            var visibleGroup = list.length > 0;
-            var allVisible = list.every(function (l) { return l.visible; });
-
-            if (visibleGroup)
-            {
-                var groupToggle = el('div', 'tree-item');
-                var chk = document.createElement('input');
-                chk.type = 'checkbox';
-                chk.checked = allVisible;
-                chk.addEventListener('change', function (ev)
-                {
-                    ev.stopPropagation();
-                    var now = Date.now();
-                    list.forEach(function (l)
-                    {
-                        l.visible = chk.checked;
-                        if (chk.checked)
-                        {
-                            l.shownAt = now;
-                        }
-                    });
-                    app.markDirty();
-                    renderTree();
-                });
-                chk.addEventListener('click', function (ev) { ev.stopPropagation(); });
-                groupToggle.appendChild(chk);
-                groupToggle.appendChild(el('span', 'lname', '全选 / 全不选'));
-                children.appendChild(groupToggle);
+                children.appendChild(el('div', 'tree-empty', '（空）'));
             }
 
             // 父子层级：parentId 指向本组内图层时，作为其子项缩进显示
@@ -958,22 +915,8 @@
     var logBuf = [];
     var stHeight = ST_MIN_H;
 
-    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
     /* 按关键字分级：错误 → 红，取消/警告 → 黄 */
-    function classifyLog(text)
-    {
-        var t = text || '';
-        if (/失败|错误|异常|无效|越界|不支持|无法|没[有法]|error|Error|FAIL/.test(t))
-        {
-            return 'err';
-        }
-        if (/取消|警告|注意|跳过|请先|未找到|未就绪|未拾取|warn|Warn/.test(t))
-        {
-            return 'warn';
-        }
-        return 'info';
-    }
 
     function makeLogRow(rec)
     {
@@ -1180,17 +1123,6 @@
 
     var xformInputs = null;
 
-    function fmtMat(v)
-    {
-        if (!isFinite(v)) { return '0'; }
-        // 阈值取 toFixed(6) 的半个最小单位：否则 -1e-8 会先格式化成 "-0.000000"，
-        // 去掉尾零后留下刺眼的 "-0"
-        if (Math.abs(v) < 5e-7) { return '0'; }
-        var s = v.toFixed(6);
-        s = s.replace(/0+$/, '').replace(/\.$/, '');
-        if (s === '-0' || s === '') { return '0'; }
-        return s;
-    }
 
     /* 每行 4 个、空格分隔，便于粘贴回表格 */
     function matToText(m)
@@ -1205,90 +1137,9 @@
         return lines.join('\n');
     }
 
-    function textToMat(txt)
-    {
-        var parts = String(txt || '').split(/[\s,;]+/).filter(function (x) { return x !== ''; });
-        if (parts.length !== 16) { return null; }
-        var m = new Float64Array(16);
-        for (var i = 0; i < 16; i++)
-        {
-            var v = parseFloat(parts[i]);
-            if (!isFinite(v)) { return null; }
-            m[i] = v;
-        }
-        return m;
-    }
 
-    function identityMat()
-    {
-        var m = new Float64Array(16);
-        m[0] = m[5] = m[10] = m[15] = 1;
-        return m;
-    }
 
     /* 4×4 求逆：转成列主序 → 伴随矩阵法 → 转回行主序 */
-    function mat4Invert(m)
-    {
-        // 转置（行主序 -> 列主序）
-        var a = [
-            m[0], m[4], m[8],  m[12],
-            m[1], m[5], m[9],  m[13],
-            m[2], m[6], m[10], m[14],
-            m[3], m[7], m[11], m[15]
-        ];
-
-        var a00 = a[0],  a01 = a[1],  a02 = a[2],  a03 = a[3];
-        var a10 = a[4],  a11 = a[5],  a12 = a[6],  a13 = a[7];
-        var a20 = a[8],  a21 = a[9],  a22 = a[10], a23 = a[11];
-        var a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-
-        var b00 = a00 * a11 - a01 * a10;
-        var b01 = a00 * a12 - a02 * a10;
-        var b02 = a00 * a13 - a03 * a10;
-        var b03 = a01 * a12 - a02 * a11;
-        var b04 = a01 * a13 - a03 * a11;
-        var b05 = a02 * a13 - a03 * a12;
-        var b06 = a20 * a31 - a21 * a30;
-        var b07 = a20 * a32 - a22 * a30;
-        var b08 = a20 * a33 - a23 * a30;
-        var b09 = a21 * a32 - a22 * a31;
-        var b10 = a21 * a33 - a23 * a31;
-        var b11 = a22 * a33 - a23 * a32;
-
-        var det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-        if (!det || !isFinite(det))
-        {
-            return null;
-        }
-        var id = 1 / det;
-
-        var o = [
-            ( a11 * b11 - a12 * b10 + a13 * b09) * id,
-            (-a01 * b11 + a02 * b10 - a03 * b09) * id,
-            ( a31 * b05 - a32 * b04 + a33 * b03) * id,
-            (-a21 * b05 + a22 * b04 - a23 * b03) * id,
-            (-a10 * b11 + a12 * b08 - a13 * b07) * id,
-            ( a00 * b11 - a02 * b08 + a03 * b07) * id,
-            (-a30 * b05 + a32 * b02 - a33 * b01) * id,
-            ( a20 * b05 - a22 * b02 + a23 * b01) * id,
-            ( a10 * b10 - a11 * b08 + a13 * b06) * id,
-            (-a00 * b10 + a01 * b08 - a03 * b06) * id,
-            ( a30 * b04 - a31 * b02 + a33 * b00) * id,
-            (-a20 * b04 + a21 * b02 - a23 * b00) * id,
-            (-a10 * b09 + a11 * b07 - a12 * b06) * id,
-            ( a00 * b09 - a01 * b07 + a02 * b06) * id,
-            (-a30 * b03 + a31 * b01 - a32 * b00) * id,
-            ( a20 * b03 - a21 * b01 + a22 * b00) * id
-        ];
-
-        // 转回行主序
-        return new Float64Array([
-            o[0], o[4], o[8],  o[12],
-            o[1], o[5], o[9],  o[13],
-            o[2], o[6], o[10], o[14],
-            o[3], o[7], o[11], o[15]
-        ]);
-    }
 
     function readXformMat()
     {
@@ -1321,15 +1172,6 @@
         return m;
     }
 
-    function isIdentityMat(m)
-    {
-        for (var i = 0; i < 16; i++)
-        {
-            var want = (i % 5 === 0) ? 1 : 0;
-            if (Math.abs(m[i] - want) > 1e-9) { return false; }
-        }
-        return true;
-    }
 
     /* 矩阵的作用对象：优先用配准面板里选的目标层，
      * 没有选择时才退回场景树选中项 —— 用户不必先去树里点一下。 */
@@ -1373,7 +1215,19 @@
         var el = $('xform-layer');
         if (!el) { return; }
         var L = xformTargetLayer();
-        el.textContent = L ? (L.name + '（' + L.kind + '）') : '（未选择）';
+
+        /* 带上槽位：面板顶部只显示"目标图层"，而下方还有参考/目标两个下拉，
+         * 不标槽位的话用户看不出这里指的到底是哪一个。 */
+        if (L)
+        {
+            var slotTag = L.slot === 'A' ? '左侧'
+                        : (L.slot === 'B' ? '右侧' : '公共');
+            el.textContent = L.name + ' · ' + slotTag + '（' + L.kind + '）';
+        }
+        else
+        {
+            el.textContent = '（未选择）';
+        }
     }
 
     /* 两个下拉保持一致，避免「N-N」和「ICP」指向不同图层造成混乱 */
@@ -1392,36 +1246,6 @@
 
     /* 判定 4×4 是否为刚体变换：3×3 部分正交、det = +1（无镜像）、末行为 0 0 0 1。
      * 本工具的变换只做旋转 + 平移，缩放/切变/镜像一律拒绝。 */
-    function isRigidMat(m)
-    {
-        var eps = 1e-3;
-
-        var r00 = m[0], r01 = m[1], r02 = m[2];
-        var r10 = m[4], r11 = m[5], r12 = m[6];
-        var r20 = m[8], r21 = m[9], r22 = m[10];
-
-        // 三行必须都是单位长度
-        if (Math.abs(Math.sqrt(r00 * r00 + r01 * r01 + r02 * r02) - 1) > eps) { return false; }
-        if (Math.abs(Math.sqrt(r10 * r10 + r11 * r11 + r12 * r12) - 1) > eps) { return false; }
-        if (Math.abs(Math.sqrt(r20 * r20 + r21 * r21 + r22 * r22) - 1) > eps) { return false; }
-
-        // 两两正交
-        if (Math.abs(r00 * r10 + r01 * r11 + r02 * r12) > eps) { return false; }
-        if (Math.abs(r00 * r20 + r01 * r21 + r02 * r22) > eps) { return false; }
-        if (Math.abs(r10 * r20 + r11 * r21 + r12 * r22) > eps) { return false; }
-
-        // det = +1：det = −1 是镜像，不属于刚体
-        var det = r00 * (r11 * r22 - r12 * r21)
-                - r01 * (r10 * r22 - r12 * r20)
-                + r02 * (r10 * r21 - r11 * r20);
-        if (det < 1 - eps) { return false; }
-
-        // 齐次末行
-        if (Math.abs(m[12]) > eps || Math.abs(m[13]) > eps || Math.abs(m[14]) > eps) { return false; }
-        if (Math.abs(m[15] - 1) > eps) { return false; }
-
-        return true;
-    }
 
     var previewLayer = null;
 
@@ -1447,15 +1271,6 @@
      * 「应用」按钮的可用状态以它为基准：两边一致时没必要高亮。 */
     var appliedMat = null;
 
-    function matSame(a, b)
-    {
-        if (!a || !b) { return false; }
-        for (var i = 0; i < 16; i++)
-        {
-            if (Math.abs(a[i] - b[i]) > 1e-6) { return false; }
-        }
-        return true;
-    }
 
     /* 只有当前矩阵与基准不一致时才允许点「应用」 */
     function refreshApplyState()
@@ -1467,9 +1282,11 @@
         var base = appliedMat || IDENT4;
         var dirty = !!cur && !matSame(cur, base);
 
+        /* 只控制可用状态，不摘 primary。
+         * 原来用 primary 的有无表示"是否有未应用的改动"，于是无改动时
+         * 「应用」会退化成和「复制」「粘贴」一样的灰按钮 —— 主操作的身份
+         * 随状态变化，视觉上不成立。改为：primary 常驻，不可用时半透明。 */
         btn.disabled = !dirty;
-        if (dirty) { btn.classList.add('primary'); }
-        else { btn.classList.remove('primary'); }
     }
 
     function restorePreviewData()
@@ -1653,51 +1470,10 @@
     }
 
     /* 数值 bbox（与 data.bbox 的 {min,max} 结构一致） */
-    function bboxOfPositions(pos)
-    {
-        var mnx = Infinity, mny = Infinity, mnz = Infinity;
-        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-        for (var i = 0; i < pos.length; i += 3)
-        {
-            var x = pos[i], y = pos[i + 1], z = pos[i + 2];
-            if (x < mnx) { mnx = x; }
-            if (y < mny) { mny = y; }
-            if (z < mnz) { mnz = z; }
-            if (x > mxx) { mxx = x; }
-            if (y > mxy) { mxy = y; }
-            if (z > mxz) { mxz = z; }
-        }
-        if (!isFinite(mnx)) { return null; }
-        return { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] };
-    }
 
     /* 对一组 XYZ 顶点施加 4×4（行主序，列向量） */
-    function xformPositions(arr, m)
-    {
-        for (var i = 0; i < arr.length; i += 3)
-        {
-            var x = arr[i], y = arr[i + 1], z = arr[i + 2];
-            arr[i]     = m[0] * x + m[1] * y + m[2] * z + m[3];
-            arr[i + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
-            arr[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
-        }
-    }
 
     /* 法向只受 3×3 部分影响，变换后归一化 */
-    function xformNormals(arr, m)
-    {
-        for (var i = 0; i < arr.length; i += 3)
-        {
-            var x = arr[i], y = arr[i + 1], z = arr[i + 2];
-            var nx = m[0] * x + m[1] * y + m[2] * z;
-            var ny = m[4] * x + m[5] * y + m[6] * z;
-            var nz = m[8] * x + m[9] * y + m[10] * z;
-            var len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-            arr[i] = nx / len;
-            arr[i + 1] = ny / len;
-            arr[i + 2] = nz / len;
-        }
-    }
 
     /* 把矩阵应用到图层：改 data + 重建 GPU */
     function applyXformToLayer(m, label)
@@ -1903,74 +1679,8 @@
         return out;
     }
 
-    function fmt3p(p)
-    {
-        return p[0].toFixed(2) + ', ' + p[1].toFixed(2) + ', ' + p[2].toFixed(2);
-    }
 
     /* 4×4 对称矩阵的最大特征值对应的特征向量（Jacobi 旋转法） */
-    function jacobiLargestEigenVec(Nin)
-    {
-        var n = 4;
-        var A = [];
-        var V = [];
-        var i, j, k, p, q;
-
-        for (i = 0; i < n; i++)
-        {
-            A.push([Nin[i][0], Nin[i][1], Nin[i][2], Nin[i][3]]);
-            var row = [0, 0, 0, 0];
-            row[i] = 1;
-            V.push(row);
-        }
-
-        for (var sweep = 0; sweep < 60; sweep++)
-        {
-            var off = 0;
-            for (i = 0; i < n; i++)
-            {
-                for (j = i + 1; j < n; j++) { off += A[i][j] * A[i][j]; }
-            }
-            if (off < 1e-26) { break; }
-
-            for (p = 0; p < n - 1; p++)
-            {
-                for (q = p + 1; q < n; q++)
-                {
-                    if (Math.abs(A[p][q]) < 1e-20) { continue; }
-
-                    var theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
-                    var t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
-                    var c = 1 / Math.sqrt(t * t + 1);
-                    var sn = t * c;
-
-                    for (k = 0; k < n; k++)
-                    {
-                        var akp = A[k][p], akq = A[k][q];
-                        A[k][p] = c * akp - sn * akq;
-                        A[k][q] = sn * akp + c * akq;
-                    }
-                    for (k = 0; k < n; k++)
-                    {
-                        var apk = A[p][k], aqk = A[q][k];
-                        A[p][k] = c * apk - sn * aqk;
-                        A[q][k] = sn * apk + c * aqk;
-                    }
-                    for (k = 0; k < n; k++)
-                    {
-                        var vkp = V[k][p], vkq = V[k][q];
-                        V[k][p] = c * vkp - sn * vkq;
-                        V[k][q] = sn * vkp + c * vkq;
-                    }
-                }
-            }
-        }
-
-        var bi = 0;
-        for (i = 1; i < n; i++) { if (A[i][i] > A[bi][bi]) { bi = i; } }
-
-        return [V[0][bi], V[1][bi], V[2][bi], V[3][bi]];
-    }
 
     /* 求把 src 对齐到 dst 的刚体变换（4×4 行主序）
      * pairs: [{ s: [x,y,z], d: [x,y,z] }]
@@ -2133,7 +1843,14 @@
                 if (String(cands[k].id) === excludeId) { continue; }
                 var o = document.createElement('option');
                 o.value = String(cands[k].id);
-                o.textContent = cands[k].name;
+
+                /* 带上槽位：两个文件同名时（很常见，比如两次扫描都叫 m），
+                 * 只显示名字根本分不清哪个是参考、哪个是目标，
+                 * 选错层会让整次配准白做。 */
+                var slotTag = cands[k].slot === 'A' ? '左侧'
+                            : (cands[k].slot === 'B' ? '右侧' : '公共');
+                o.textContent = cands[k].name + ' · ' + slotTag;
+
                 sel.appendChild(o);
             }
             if (keepValue) { sel.value = keepValue; }
@@ -2513,30 +2230,6 @@
     }
 
     /* 从图层取出配准用的点集与法向 */
-    function icpSample(lay)
-    {
-        var d = lay.data;
-        if (!d || !d.positions) { return null; }
-
-        if (lay.kind === 'points')
-        {
-            return {
-                pos: d.positions,
-                nrm: d.normals || null,
-                count: d.count || Math.floor(d.positions.length / 3)
-            };
-        }
-
-        // 网格：优先用去重顶点 + 顶点法向
-        if (d.uniqVerts && d.remap && d.vertCount)
-        {
-            var n1 = global.MV.icp.computeVertexNormals(d.positions, d.remap, d.vertCount);
-            return { pos: d.uniqVerts, nrm: n1.normals, count: d.vertCount };
-        }
-
-        var n2 = global.MV.icp.computeVertexNormals(d.positions, null, null);
-        return { pos: d.positions, nrm: n2.normals, count: n2.count };
-    }
 
     function icpRun()
     {
@@ -2747,225 +2440,235 @@
         // 每帧只跑一轮，并用 rAF 调度：这样每一次迭代都会渲染一帧，
         // 能看到数据逐步收敛的过程。用 setTimeout 的话几十轮会在几毫秒内
         // 全部跑完，画面只会闪一两下。
-        function tick()
+        /* 三个阶段各自成函数：原来它们依次嵌在 tick 里，
+         * 加上参数准备与结果处理，整个 icpRun 有 432 行 ——
+         * 任何一处改动都得重新理解全貌。
+         * 仍留在 icpRun 内部是为了共用闭包状态（solver / cands / phase…），
+         * 改成对象字段反而要传一堆参数，更容易出错。 */
+
+        function stepCoarse()
         {
-            // ---- 阶段 1：粗配准 ----
-            if (phase === 'coarse')
+            var cs = coarseSolver.step();
+
+            /* 预览必须降频。
+             * applyPreviewMat 走的是数据级变换：备份全量顶点 → 写入变换后顶点
+             * → 释放并重建 GPU buffer → 上传（本模型约 1.3MB）。
+             * 粗配准每步都做一次，单帧光上传就要 20~30ms，
+             * 叠加每帧的计算量直接掉帧 —— 这是"卡顿"的真正来源。
+             * 改成每 4 步更新一次，视觉上仍是连续变化。 */
+            if (target && cs.matrix)
             {
-                var cs = coarseSolver.step();
-
-                /* 预览必须降频。
-                 * applyPreviewMat 走的是数据级变换：备份全量顶点 → 写入变换后顶点
-                 * → 释放并重建 GPU buffer → 上传（本模型约 1.3MB）。
-                 * 粗配准每步都做一次，单帧光上传就要 20~30ms，
-                 * 叠加每帧的计算量直接掉帧 —— 这是"卡顿"的真正来源。
-                 * 改成每 4 步更新一次，视觉上仍是连续变化。 */
-                if (target && cs.matrix)
+                if ((cs.done || (coarsePreviewTick % 4) === 0) && cs.matrix !== previewTagRef)
                 {
-                    if ((cs.done || (coarsePreviewTick % 4) === 0) && cs.matrix !== previewTagRef)
-                    {
-                        previewTagRef = cs.matrix;
-                        applyPreviewMat(target, cs.matrix);
-                    }
-                    coarsePreviewTick++;
+                    previewTagRef = cs.matrix;
+                    applyPreviewMat(target, cs.matrix);
                 }
-
-                if (info)
-                {
-                    info.textContent = '粗配准 ' + Math.round(cs.progress * 100) + '%' +
-                                       '   尝试 ' + cs.trial + '/' + cs.trials +
-                                       '   LCP ' + (cs.lcp * 100).toFixed(0) + '%';
-                }
-
-                if (!cs.done) { nextIteration(tick, 0); return; }
-
-                var cr = coarseSolver.result();
-                coarseSolver = null;
-                phase = 'verify';
-
-                /* 基准比较在 super4pcs 内部就完成了：
-                 * 初始 bestLCP = 单位阵在下采样点上的覆盖率，
-                 * 任何候选必须【严格超过】它才会被采纳，
-                 * 所以 usedBaseline 为真时返回的就是"原始位姿"。
-                 *
-                 * 这里不再加绝对阈值（原来那个 rejectLcp=0.10）——
-                 * 那个会把"比原始位姿好、但绝对值不高"的解也丢掉，
-                 * 与"不如原始位姿才退回"的要求相反。 */
-                function pct(v) { return (v * 100).toFixed(0) + '%'; }
-
-                if (!cr || !cr.matrix)
-                {
-                    coarseNote = '\n粗配准未得到解，使用单位阵';
-                    cands = [];
-                    bestInit = null;
-                }
-                else if (cr.usedBaseline && cr.lcp < 0.4)
-                {
-                    /* 基准本身就低：说明"只把质心对齐"都重合不了，
-                     * 需要旋转但搜不出来 —— 这种初值是负资产。 */
-                    coarseNote = '\n粗配准未找到合适位姿（最优 ' + pct(cr.lcp) +
-                                 ' ≤ 基准 ' + pct(cr.baselineLcp) + '），使用单位阵';
-                    cands = [];
-                    bestInit = null;
-                }
-                else if (cr.usedBaseline)
-                {
-                    /* 没有候选超过基准，但基准本身已经很高 ——
-                     * 意味着"质心对齐"就是这个解（cr.matrix 正是质心差补偿）。
-                     * 按需求直接采用它，而不是丢弃。 */
-                    coarseNote = '\n粗配准：原始位姿已足够（' + pct(cr.lcp) +
-                                 '），直接采用';
-                    cands = [{ mat: cr.matrix, score: cr.lcp }];
-                }
-                else
-                {
-                    coarseNote = '\n粗配准 ' + pct(cr.lcp) +
-                                 '（基准 ' + pct(cr.baselineLcp) + '，' +
-                                 cr.trial + '/' + cr.trials + ' 次尝试）';
-                    cands = [{ mat: cr.matrix, score: cr.lcp }];
-                }
-
-
-                nextIteration(tick, 0);
-                return;
+                coarsePreviewTick++;
             }
 
-            // ---- 阶段 2：逐个候选跑短 ICP 验证 ----
-            if (phase === 'verify')
+            if (info)
             {
-                if (!curProbe)
+                info.textContent = '粗配准 ' + Math.round(cs.progress * 100) + '%' +
+                                   '   尝试 ' + cs.trial + '/' + cs.trials +
+                                   '   LCP ' + (cs.lcp * 100).toFixed(0) + '%';
+            }
+
+            if (!cs.done) { nextIteration(tick, 0); return; }
+
+            var cr = coarseSolver.result();
+            coarseSolver = null;
+            phase = 'verify';
+
+            /* 基准比较在 super4pcs 内部就完成了：
+             * 初始 bestLCP = 单位阵在下采样点上的覆盖率，
+             * 任何候选必须【严格超过】它才会被采纳，
+             * 所以 usedBaseline 为真时返回的就是"原始位姿"。
+             *
+             * 这里不再加绝对阈值（原来那个 rejectLcp=0.10）——
+             * 那个会把"比原始位姿好、但绝对值不高"的解也丢掉，
+             * 与"不如原始位姿才退回"的要求相反。 */
+            function pct(v) { return (v * 100).toFixed(0) + '%'; }
+
+            if (!cr || !cr.matrix)
+            {
+                coarseNote = '\n粗配准未得到解，使用单位阵';
+                cands = [];
+                bestInit = null;
+            }
+            else if (cr.usedBaseline && cr.lcp < 0.4)
+            {
+                /* 基准本身就低：说明"只把质心对齐"都重合不了，
+                 * 需要旋转但搜不出来 —— 这种初值是负资产。 */
+                coarseNote = '\n粗配准未找到合适位姿（最优 ' + pct(cr.lcp) +
+                             ' ≤ 基准 ' + pct(cr.baselineLcp) + '），使用单位阵';
+                cands = [];
+                bestInit = null;
+            }
+            else if (cr.usedBaseline)
+            {
+                /* 没有候选超过基准，但基准本身已经很高 ——
+                 * 意味着"质心对齐"就是这个解（cr.matrix 正是质心差补偿）。
+                 * 按需求直接采用它，而不是丢弃。 */
+                coarseNote = '\n粗配准：原始位姿已足够（' + pct(cr.lcp) +
+                             '），直接采用';
+                cands = [{ mat: cr.matrix, score: cr.lcp }];
+            }
+            else
+            {
+                coarseNote = '\n粗配准 ' + pct(cr.lcp) +
+                             '（基准 ' + pct(cr.baselineLcp) + '，' +
+                             cr.trial + '/' + cr.trials + ' 次尝试）';
+                cands = [{ mat: cr.matrix, score: cr.lcp }];
+            }
+
+
+            nextIteration(tick, 0);
+            return;
+        }
+
+        function stepVerify()
+        {
+            if (!curProbe)
+            {
+                if (verifyIdx >= cands.length)
                 {
-                    if (verifyIdx >= cands.length)
+                    phase = 'icp';
+
+                    try { solver = buildMainSolver(); }
+                    catch (e2) { solver = null; }
+
+                    if (!solver)
                     {
-                        phase = 'icp';
-
-                        try { solver = buildMainSolver(); }
-                        catch (e2) { solver = null; }
-
-                        if (!solver)
-                        {
-                            if (info) { info.textContent = '配准失败：数据不足'; }
-                            xformInfo('ICP 失败', true);
-                            return;
-                        }
-
-                        if (bestInit)
-                        {
-                            coarseNote = '\n粗配准 ' + cands.length + ' 个候选，最优残差 ' +
-                                         bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿';
-                        }
-
-                        if (info) { info.textContent = '开始精配准…'; }
-                        nextIteration(tick);
+                        if (info) { info.textContent = '配准失败：数据不足'; }
+                        xformInfo('ICP 失败', true);
                         return;
                     }
 
-                    try
+                    if (bestInit)
                     {
-                        curProbe = global.MV.icp.createSolver(
-                            moving.pos, moving.nrm, fixed.pos, fixed.nrm,
-                            {
-                                maxIter: 12,
-                                sampleRatio: Math.min(1, sampleRatio * 2),
-                                normalThresh: thresh,
-                                tol: tol,
-                                maxDist: maxDist,
-                                initMat: cands[verifyIdx].mat
-                            });
+                        coarseNote = '\n粗配准 ' + cands.length + ' 个候选，最优残差 ' +
+                                     bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿';
                     }
-                    catch (e3) { curProbe = null; }
 
-                    if (!curProbe) { verifyIdx++; nextIteration(tick); return; }
+                    if (info) { info.textContent = '开始精配准…'; }
+                    nextIteration(tick);
+                    return;
                 }
 
-                var vr = curProbe.step();
-
-                // 候选验证也是逐步收敛的，同样实时反映
-                if (target)
+                try
                 {
-                    var vlive = curProbe.result();
-                    if (vlive && vlive.mat) { applyPreviewMat(target, vlive.mat); }
+                    curProbe = global.MV.icp.createSolver(
+                        moving.pos, moving.nrm, fixed.pos, fixed.nrm,
+                        {
+                            maxIter: 12,
+                            sampleRatio: Math.min(1, sampleRatio * 2),
+                            normalThresh: thresh,
+                            tol: tol,
+                            maxDist: maxDist,
+                            initMat: cands[verifyIdx].mat
+                        });
                 }
+                catch (e3) { curProbe = null; }
 
-                if (info)
-                {
-                    info.textContent = '验证候选 ' + (verifyIdx + 1) + '/' + cands.length +
-                                       '   迭代 ' + vr.iters + '   RMS ' + vr.rms.toFixed(3);
-                }
-
-                if (!vr.done) { nextIteration(tick); return; }
-
-                var pr = curProbe.result();
-                if (isFinite(pr.rms) && pr.rms < bestRms)
-                {
-                    bestRms = pr.rms;
-                    bestInit = cands[verifyIdx].mat;
-                }
-
-                curProbe = null;
-                verifyIdx++;
-                nextIteration(tick);
-                return;
+                if (!curProbe) { verifyIdx++; nextIteration(tick); return; }
             }
 
-            // ---- 阶段 3：正式 ICP ----
-            var r = solver.step();
+            var vr = curProbe.step();
 
-            // 每轮都把当前变换挂到预览上，配合 rAF 就能看到数据逐步移动
+            // 候选验证也是逐步收敛的，同样实时反映
             if (target)
             {
-                var live = solver.result();
-                applyPreviewMat(target, live.mat);
-                app.markDirty();
+                var vlive = curProbe.result();
+                if (vlive && vlive.mat) { applyPreviewMat(target, vlive.mat); }
             }
 
-            if (!r.done)
+            if (info)
             {
-                if (info)
-                {
-                    info.textContent = '迭代 ' + r.iters + ' / ' + maxIter +
-                        '   RMS ' + r.rms.toFixed(4) + '   点 ' + r.used;
-                }
-                nextIteration(tick);
-                return;
+                info.textContent = '验证候选 ' + (verifyIdx + 1) + '/' + cands.length +
+                                   '   迭代 ' + vr.iters + '   RMS ' + vr.rms.toFixed(3);
             }
 
-            var res = solver.result();
-            var dt = Date.now() - t0;
+            if (!vr.done) { nextIteration(tick); return; }
 
-            // 发散保护：残差超过数据尺度的一半，说明没配上。
-            // 这时矩阵里的平移可能已经累积到极大值，直接套用会把数据
-            // 甩出视野（看起来像"目标消失了"），所以宁可还原也不填。
-            var diverged = !isFinite(res.rms) || (diag > 0 && res.rms > diag * 0.5);
-
-            if (diverged)
+            var pr = curProbe.result();
+            if (isFinite(pr.rms) && pr.rms < bestRms)
             {
-                clearPreview();
-                app.markDirty();
-
-                if (info)
-                {
-                    info.textContent = '配准未收敛：迭代 ' + res.iters + ' 次后 RMS = ' +
-                        res.rms.toFixed(2) + '（数据尺度 ' + diag.toFixed(1) + '）\n' +
-                        '已放弃该结果，数据保持原位。可尝试：调低「采样」数值、\n' +
-                        '调大「迭代」，或先用 N-N 配准给一个接近的初值。';
-                }
-                xformInfo('配准未收敛，已放弃结果（数据未被移动）', true);
-                setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）');
-                return;
+                bestRms = pr.rms;
+                bestInit = cands[verifyIdx].mat;
             }
 
-            writeXformMat(res.mat);
+            curProbe = null;
+            verifyIdx++;
+            nextIteration(tick);
+            return;
+        }
 
-            var txt = '迭代 ' + res.iters + ' 次，RMS = ' + res.rms.toFixed(4) +
-                      '\n参与点 ' + res.used + '，' +
-                      (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
-                      '\n耗时 ' + dt + ' ms' + sampleNote + coarseNote;
-            if (info) { info.textContent = txt; }
+        function stepIcp()
+        {
+        var r = solver.step();
 
-            xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
-                '\n点「应用」把矩阵作用到「' + dstLay.name + '」', res.rms > 1);
-            setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
+        // 每轮都把当前变换挂到预览上，配合 rAF 就能看到数据逐步移动
+        if (target)
+        {
+            var live = solver.result();
+            applyPreviewMat(target, live.mat);
+            app.markDirty();
+        }
+
+        if (!r.done)
+        {
+            if (info)
+            {
+                info.textContent = '迭代 ' + r.iters + ' / ' + maxIter +
+                    '   RMS ' + r.rms.toFixed(4) + '   点 ' + r.used;
+            }
+            nextIteration(tick);
+            return;
+        }
+
+        var res = solver.result();
+        var dt = Date.now() - t0;
+
+        // 发散保护：残差超过数据尺度的一半，说明没配上。
+        // 这时矩阵里的平移可能已经累积到极大值，直接套用会把数据
+        // 甩出视野（看起来像"目标消失了"），所以宁可还原也不填。
+        var diverged = !isFinite(res.rms) || (diag > 0 && res.rms > diag * 0.5);
+
+        if (diverged)
+        {
+            clearPreview();
+            app.markDirty();
+
+            if (info)
+            {
+                info.textContent = '配准未收敛：迭代 ' + res.iters + ' 次后 RMS = ' +
+                    res.rms.toFixed(2) + '（数据尺度 ' + diag.toFixed(1) + '）\n' +
+                    '已放弃该结果，数据保持原位。可尝试：调低「采样」数值、\n' +
+                    '调大「迭代」，或先用 N-N 配准给一个接近的初值。';
+            }
+            xformInfo('配准未收敛，已放弃结果（数据未被移动）', true);
+            setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）');
+            return;
+        }
+
+        writeXformMat(res.mat);
+
+        var txt = '迭代 ' + res.iters + ' 次，RMS = ' + res.rms.toFixed(4) +
+                  '\n参与点 ' + res.used + '，' +
+                  (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
+                  '\n耗时 ' + dt + ' ms' + sampleNote + coarseNote;
+        if (info) { info.textContent = txt; }
+
+        xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
+            '\n点「应用」把矩阵作用到「' + dstLay.name + '」', res.rms > 1);
+        setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
+        }
+
+        function tick()
+        {
+            if (phase === 'coarse') { stepCoarse(); return; }
+            if (phase === 'verify') { stepVerify(); return; }
+            stepIcp();
         }
 
         setTimeout(tick, 30);
@@ -2974,33 +2677,9 @@
     /* 旋转对称检查的候选角度；轴在运行时按参考数据的 PCA 主轴确定，
      * 这样工件斜放时也能沿它自身的惯量轴去检查。 */
 
-    function mat4Mul(a, b)
-    {
-        var o = new Float64Array(16);
-        for (var r = 0; r < 4; r++)
-        {
-            for (var c = 0; c < 4; c++)
-            {
-                var sum = 0;
-                for (var k = 0; k < 4; k++) { sum += a[r * 4 + k] * b[k * 4 + c]; }
-                o[r * 4 + c] = sum;
-            }
-        }
-        return o;
-    }
     /* 世界坐标轴。曾用 PCA 主轴，但 axes 按方差降序、符号也不定，
      * 叫「绕X」时实际可能是绕 Z，结论无法解释；固定用世界轴后名实相符。
      * 需要沿工件自身惯量轴检查时，先把数据摆正再跑。 */
-    function xformPoints(src, m, out)
-    {
-        for (var i = 0; i < src.length; i += 3)
-        {
-            var x = src[i], y = src[i + 1], z = src[i + 2];
-            out[i]     = m[0] * x + m[1] * y + m[2] * z + m[3];
-            out[i + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
-            out[i + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
-        }
-    }
     function bindXform()
     {
         buildXformGrid();
@@ -3318,18 +2997,6 @@
         return bins;
     }
 
-    function rampColorAt(rampIdx, t)
-    {
-        var stops = RAMP_STOPS[rampIdx] || RAMP_STOPS[0];
-        var x = Math.max(0, Math.min(1, t)) * (stops.length - 1);
-        var i = Math.min(stops.length - 2, Math.floor(x));
-        var f = x - i;
-        var a = stops[i];
-        var b = stops[i + 1];
-        return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * f) + ',' +
-            Math.round(a[1] + (b[1] - a[1]) * f) + ',' +
-            Math.round(a[2] + (b[2] - a[2]) * f) + ')';
-    }
 
     /* 标量场分布直方图 + 当前显示范围标记 */
     /* 应用颜色范围输入（留空 = 数据全范围） */
@@ -3709,10 +3376,6 @@
     var colResolve = null;
     var colState = null;
 
-    function normKey(s)
-    {
-        return String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
-    }
 
     function defaultLabels(info)
     {
@@ -3869,40 +3532,6 @@
         return '';
     }
 
-    function planFromLabels(labels, names)
-    {
-        names = names || [];
-        var plan = { x: 0, y: 1, z: 2, normal: null, color: null, tag: -1, sf: [] };
-        var nx = -1, ny = -1, nz = -1, cr = -1, cg = -1, cb = -1;
-        var seq = 0;
-
-        for (var i = 0; i < labels.length; i++)
-        {
-            var L = labels[i];
-            if (L === 'nx') { nx = i; }
-            else if (L === 'ny') { ny = i; }
-            else if (L === 'nz') { nz = i; }
-            else if (L === 'r') { cr = i; }
-            else if (L === 'g') { cg = i; }
-            else if (L === 'b') { cb = i; }
-            else if (L === 'tag') { plan.tag = i; }
-            else if (L === 'sf')
-            {
-                seq++;
-                plan.sf.push({ i: i, name: names[i] ? names[i] : ('SF' + seq) });
-            }
-        }
-
-        if (nx >= 0 && ny >= 0 && nz >= 0)
-        {
-            plan.normal = [nx, ny, nz];
-        }
-        if (cr >= 0 && cg >= 0 && cb >= 0)
-        {
-            plan.color = [cr, cg, cb];
-        }
-        return plan;
-    }
 
     function autoColumnPlan(info)
     {
@@ -4008,26 +3637,8 @@
     }
 
     /* ---------------- 拾取信息面板 ---------------- */
-    function vecLen(a, b)
-    {
-        var dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-        return Math.sqrt(dx * dx + dy * dy + dz * dz);
-    }
 
     /* 顶点 b 处的夹角（度） */
-    function angleAt(a, b, c)
-    {
-        var v1 = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-        var v2 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
-        var l1 = Math.sqrt(v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]);
-        var l2 = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]);
-        if (!(l1 > 1e-12 && l2 > 1e-12))
-        {
-            return 0;
-        }
-        var d = (v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]) / (l1 * l2);
-        return Math.acos(Math.max(-1, Math.min(1, d))) * 180 / Math.PI;
-    }
 
     function renderPickBar(points, active)
     {

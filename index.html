@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.2.5" />
+<link rel="stylesheet" href="css/style.css?v=1.0.2.6" />
 </head>
 <body>
 <div id="app">
@@ -16,7 +16,7 @@
         <div class="brand">
             <span class="logo">3DV</span>
             <span class="title">3D Viewer</span>
-            <span class="sub">mesh / point cloud compare · v1.0.2.3</span>
+            <span class="sub" id="app-sub">3D data compare</span>
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
@@ -146,10 +146,10 @@
                         <div class="prop-row" data-prop="mesh">
                             <label>元素</label>
                             <div class="chk-grid">
-                                <label><input type="checkbox" id="p-faces" /> 面片</label>
-                                <label><input type="checkbox" id="p-wire" /> 线框</label>
-                                <label><input type="checkbox" id="p-verts" /> 顶点</label>
-                                <label title="只被一个三角形使用的边（开放边界）；封闭模型应无边界"><input type="checkbox" id="p-boundary" /> 边界</label>
+                                <label><span>面片</span><input type="checkbox" id="p-faces" /></label>
+                                <label><span>线框</span><input type="checkbox" id="p-wire" /></label>
+                                <label><span>顶点</span><input type="checkbox" id="p-verts" /></label>
+                                <label title="只被一个三角形使用的边（开放边界）；封闭模型应无边界"><span>边界</span><input type="checkbox" id="p-boundary" /></label>
                             </div>
                         </div>
                         <div class="prop-row" data-prop="mesh">
@@ -159,7 +159,7 @@
                         </div>
                         <div class="prop-row inline3" data-prop="mesh">
                             <label>面法向</label>
-                            <label class="inline"><input type="checkbox" id="p-normals" /> 显示</label>
+                            <label class="inline"><span>显示</span><input type="checkbox" id="p-normals" /></label>
                             <input type="range" id="p-normallen" min="0.1" max="6" step="0.1" title="法向长度（相对平均边长）" />
                             <span class="val" id="p-normallen-val">1.0</span>
                         </div>
@@ -296,8 +296,8 @@
                             <button id="btn-theme" title="切换深色 / 浅色主题">浅色</button>
                         </div>
                         <div class="row chk2">
-                            <label><input type="checkbox" id="opt-grid" checked /> 地面网格</label>
-                            <label><input type="checkbox" id="opt-axes" checked /> 坐标轴</label>
+                            <label><span>地面网格</span><input type="checkbox" id="opt-grid" checked /></label>
+                            <label><span>坐标轴</span><input type="checkbox" id="opt-axes" checked /></label>
                         </div>
                         <div class="row">
                             <span class="k">背景</span>
@@ -308,7 +308,7 @@
                     <div class="cfg-group">
                         <div class="group-title">光照</div>
                         <div class="row">
-                            <label class="wide"><input type="checkbox" id="opt-lightfollow" checked /> 跟随相机</label>
+                            <label class="wide"><span>跟随相机</span><input type="checkbox" id="opt-lightfollow" checked /></label>
                         </div>
                         <div class="row">
                             <span class="k">方位</span>
@@ -327,20 +327,25 @@
         <section class="panel tab-hidden" id="xform" data-tab="xform">
                 <div class="xform-side">
                     <div class="xform-head">
-            目标图层：<b id="xform-layer">（未选中）</b>
-        </div>
+                        <span class="group-title">目标图层</span>
+                        <b id="xform-layer">（未选中）</b>
+                    </div>
 
+        <div class="group-title">变换矩阵</div>
         <div id="xform-grid" class="xform-grid"></div>
 
-        <div class="xform-actions">
-            <button id="xform-identity">单位阵</button>
-            <button id="xform-copy">复制</button>
-            <button id="xform-paste">粘贴</button>
-            <button id="xform-inv">反变换</button>
+        <div class="xform-actions xform-actions-split">
+            <div class="btn-edit">
+                <button id="xform-identity">单位阵</button>
+                <button id="xform-copy">复制</button>
+                <button id="xform-paste">粘贴</button>
+                <button id="xform-inv" title="把当前矩阵替换为它的逆矩阵（不作用于数据）">逆矩阵</button>
+            </div>
             <button id="xform-apply" class="primary">应用</button>
         </div>
 
-        <div class="xform-tabs">
+            <div class="group-title">配准</div>
+            <div class="xform-tabs">
             <button class="xform-tab" data-pane="pairs">N-N</button>
             <button class="xform-tab active" data-pane="icp">ICP</button>
                     </div>
@@ -353,10 +358,12 @@
                 <span>参考</span><select id="reg-ref" title="固定不动的图层"></select>
                 <span>目标</span><select id="reg-dst" title="将被移动的图层"></select>
             </div>
-            <div class="xform-actions xform-reg-actions">
-                <button id="reg-start">开始选点</button>
-                <button id="reg-clear">清空</button>
-                <button id="reg-solve">计算矩阵</button>
+            <div class="xform-actions xform-actions-split">
+                <div class="btn-edit">
+                    <button id="reg-start">开始选点</button>
+                    <button id="reg-clear">清空</button>
+                </div>
+                <button id="reg-solve" class="primary">计算矩阵</button>
             </div>
             <div id="reg-list" class="xform-reg-list">尚未选点</div>
         </div>
@@ -364,45 +371,35 @@
         </div>
         <div class="xform-pane active" data-pane="icp">
         <div class="xform-reg xform-icp">
-            <div class="xform-reg-title">ICP 配准（Symmetric）</div>
             <div class="xform-reg-row">
                 <span>参考</span><select id="icp-ref" title="固定不动的图层"></select>
                 <span>目标</span><select id="icp-dst" title="将被移动的图层"></select>
             </div>
-            <div class="xform-reg-row xform-icp-params">
+            <div class="xform-icp-checks">
                 <label class="xform-check" title="先用 4 点全等搜索求一个初值，再交给 ICP 精配准。姿态差异大时能显著提高成功率，代价是启动慢一些">
-                    自动粗配准（4PCS）
+                    4PCS
                     <input type="checkbox" id="icp-coarse" checked>
+                </label>
+                <label class="xform-check" title="勾选后矩阵改动会立刻反映到视图，不写入顶点数据">
+                    预览
+                    <input type="checkbox" id="xform-preview-on" checked>
                 </label>
             </div>
 
-            <div class="xform-reg-row xform-icp-params">
-                <span>迭代</span><input id="icp-iter" type="text" value="50" title="最大迭代次数（上限 50）">
-                <span>采样%</span><input id="icp-sample" type="text" value="100" title="随机下采样百分比，100 = 不采样；数据量过大时会自动降低">
-                <span>角度°</span><input id="icp-angle" type="text" value="30" title="法向夹角超过该值的对应点丢弃">
-            </div>
-            <div class="xform-reg-row xform-icp-params">
-                <span>距离</span><input id="icp-maxdist" type="text" value="10" title="对应点距离上限，超过则丢弃；0 = 不限">
+                        <div class="xform-icp-params">
+                <label class="param"><span>迭代</span><input id="icp-iter" type="text" value="50" title="最大迭代次数（上限 50）"></label>
+                <label class="param"><span>采样%</span><input id="icp-sample" type="text" value="100" title="随机下采样百分比，100 = 全量"></label>
+                <label class="param"><span>角度°</span><input id="icp-angle" type="text" value="30" title="法向夹角超过该值的对应点丢弃"></label>
+                <label class="param"><span>距离</span><input id="icp-maxdist" type="text" value="10" title="对应点距离上限，超过则丢弃；0 = 自动"></label>
             </div>
             <div class="xform-actions xform-reg-actions">
-                <button id="icp-run">运行 ICP</button>
+                <button id="icp-run" class="primary">运行 ICP</button>
             </div>
             <div id="icp-info" class="xform-reg-list">未运行</div>
         </div>
 
         </div>
         </div>
-
-        <div class="xform-note">
-            v' = M · v（行主序，第 4 列为平移）；应用后直接改写顶点，点「反变换」用逆矩阵还原
-        </div>
-
-        <label class="xform-preview" title="勾选后编辑矩阵会立刻反映到视图，不写入数据">
-            
-            实时预览（不改动数据）
-            <input type="checkbox" id="xform-preview-on" checked>
-        </label>
-
         <div id="xform-info" class="xform-info"></div>
                 </div>
             </section>
@@ -615,21 +612,33 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.2.5"></script>
-    <script src="js/kdtree.js?v=1.0.2.5"></script>
-    <script src="js/icp.js?v=1.0.2.5"></script>
-    <script src="js/super4pcs.js?v=1.0.2.5"></script>
-    <script src="js/io.js?v=1.0.2.5"></script>
-    <script src="js/algo.js?v=1.0.2.5"></script>
-    <script src="js/render.js?v=1.0.2.5"></script>
+    <script src="js/core.js?v=1.0.2.6"></script>
+    <script src="js/kdtree.js?v=1.0.2.6"></script>
+    <script src="js/icp.js?v=1.0.2.6"></script>
+    <script src="js/super4pcs.js?v=1.0.2.6"></script>
+    <script src="js/io.js?v=1.0.2.6"></script>
+    <script src="js/algo.js?v=1.0.2.6"></script>
+    <script src="js/render.js?v=1.0.2.6"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.2.5"></script>
-    <script src="js/plugins/optimize.js?v=1.0.2.5"></script>
-    <script src="js/ui.js?v=1.0.2.5"></script>
-    <script src="js/app.js?v=1.0.2.5"></script>
+    <script src="js/plugins/registry.js?v=1.0.2.6"></script>
+    <script src="js/plugins/optimize.js?v=1.0.2.6"></script>
+    <script src="js/ui-util.js?v=1.0.2.6"></script>
+    <script src="js/ui.js?v=1.0.2.6"></script>
+    <script src="js/app.js?v=1.0.2.6"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->
 <!-- ===== 孔位优化 END ===== -->
+<script>
+/* 版本号自动跟随 index.html 的 ?v=，避免「三处手改漏一处」。
+ * 取第一个带 ?v= 的脚本地址即可 —— 所有资源共用同一个版本号。 */
+(function () {
+    var s = document.querySelector('script[src*="?v="]');
+    var el = document.getElementById('app-sub');
+    if (!s || !el) { return; }
+    var v = s.src.split('?v=')[1];
+    if (v) { el.textContent += ' · v' + v; }
+})();
+</script>
 </body>
 </html>

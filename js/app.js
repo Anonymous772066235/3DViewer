@@ -1415,6 +1415,52 @@
     };
 
     /* ---------------- 截图 ---------------- */
+    /* 把当前画面合成为一张可导出的位图。
+     *
+     * 双窗模式下两个视图之间有一条分隔线，但它是 #split-line 这个 DOM 元素，
+     * 浮在 WebGL 画布之上 —— 直接 canvas.toBlob() 是截不到它的。
+     * 这里先复制一份画布内容，再按视图矩形把空隙填成主题色，得到与屏幕一致的图。 */
+    App.prototype.grabImage = function ()
+    {
+        var src = this.canvas;
+
+        if (this.settings.singleView || !this.views || this.views.length < 2)
+        {
+            return src;
+        }
+
+        var r0 = this.views[0].rect;
+        var r1 = this.views[1].rect;
+        if (!r0 || !r1) { return src; }
+
+        // 两个视图之间的空隙（canvas 像素）
+        var gx = r0.x + r0.w;
+        var gw = r1.x - gx;
+        if (gw <= 0) { return src; }
+
+        var out = document.createElement('canvas');
+        out.width = src.width;
+        out.height = src.height;
+
+        var g = out.getContext('2d');
+        g.drawImage(src, 0, 0);
+
+        // 取主题里定义的分隔线颜色，保持与界面一致
+        var splitColor = 'rgba(88, 166, 255, .42)';
+        try
+        {
+            var v = global.getComputedStyle(document.documentElement)
+                .getPropertyValue('--split').trim();
+            if (v) { splitColor = v; }
+        }
+        catch (e) { /* 取不到就用默认值 */ }
+
+        g.fillStyle = splitColor;
+        g.fillRect(gx, 0, gw, src.height);
+
+        return out;
+    };
+
     App.prototype.screenshot = function ()
     {
         this.renderFrame();
@@ -1424,7 +1470,7 @@
         var name = 'view_' + stamp.getFullYear() + pad(stamp.getMonth() + 1) + pad(stamp.getDate()) +
             '_' + pad(stamp.getHours()) + pad(stamp.getMinutes()) + pad(stamp.getSeconds()) + '.png';
 
-        this.canvas.toBlob(function (blob)
+        this.grabImage().toBlob(function (blob)
         {
             if (!blob)
             {
