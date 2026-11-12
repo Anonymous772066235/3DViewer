@@ -2163,4 +2163,530 @@
     };
     })();
 
+    /* ==================== 导出（与解析对称） ====================
+     * 输入统一是图层数据 data：
+     *   kind       'mesh' | 'points'
+     *   positions  Float32Array；网格为「每 3 顶点一个三角形」的解索引形式
+     *   uniqVerts / remap   网格的唯一顶点表与索引（载入时已算好，无需重新焊接）
+     *   colors / normals / scalars  可选
+     * 输出 Blob，由调用方触发下载。
+     *
+     * 一律分块拼接：百万级三角形时一次性拼出一个字符串会爆内存。
+     */
+    (function ()
+    {
+        var CHUNK_TRI = 20000;
+        var CHUNK_ROW = 50000;
+
+        /* 6 位小数足够表达几何，又比 toString 短 */
+        function fx(v)
+        {
+            if (!isFinite(v)) { return '0'; }
+            var t = v.toFixed(6);
+            if (t.indexOf('.') >= 0)
+            {
+                t = t.replace(/0+$/, '');
+                if (t.charAt(t.length - 1) === '.') { t = t.slice(0, -1); }
+            }
+            return t === '-0' ? '0' : t;
+        }
+
+        function triCountOf(data)
+        {
+            return Math.floor((data.positions ? data.positions.length : 0) / 9);
+        }
+
+        function pointCountOf(data)
+        {
+            return Math.floor((data.positions ? data.positions.length : 0) / 3);
+        }
+
+        /* ---------------- STL（binary） ---------------- */
+        function stlBinary(data)
+        {
+            var pos = data.positions;
+            var tris = triCountOf(data);
+            if (!tris) { throw new Error('当前图层没有三角形'); }
+
+            var parts = [];
+            var head = new ArrayBuffer(84);
+            var hv = new DataView(head);
+            var title = 'binary STL exported by 3DViewer';
+            for (var i = 0; i < title.length && i < 80; i++)
+            {
+                hv.setUint8(i, title.charCodeAt(i));
+            }
+            hv.setUint32(80, tris, true);
+            parts.push(head);
+
+            for (var base = 0; base < tris; base += CHUNK_TRI)
+            {
+                var n = Math.min(CHUNK_TRI, tris - base);
+                var buf = new ArrayBuffer(n * 50);
+                var dv = new DataView(buf);
+                var off = 0;
+
+                for (var t = 0; t < n; t++)
+                {
+                    var ti = (base + t) * 9;
+                    var ax = pos[ti], ay = pos[ti + 1], az = pos[ti + 2];
+                    var bx = pos[ti + 3], by = pos[ti + 4], bz = pos[ti + 5];
+                    var cx = pos[ti + 6], cy = pos[ti + 7], cz = pos[ti + 8];
+
+                    /* 面法向由叉积现算，不依赖 data.normals（它是按角点存的，与面不对应） */
+                    var ux = bx - ax, uy = by - ay, uz = bz - az;
+                    var vx = cx - ax, vy = cy - ay, vz = cz - az;
+                    var nx = uy * vz - uz * vy;
+                    var ny = uz * vx - ux * vz;
+                    var nz = ux * vy - uy * vx;
+                    var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+                    if (len > 1e-12) { nx /= len; ny /= len; nz /= len; }
+                    else { nx = ny = nz = 0; }
+
+                    dv.setFloat32(off, nx, true); off += 4;
+                    dv.setFloat32(off, ny, true); off += 4;
+                    dv.setFloat32(off, nz, true); off += 4;
+
+                    dv.setFloat32(off, ax, true); off += 4;
+                    dv.setFloat32(off, ay, true); off += 4;
+                    dv.setFloat32(off, az, true); off += 4;
+                    dv.setFloat32(off, bx, true); off += 4;
+                    dv.setFloat32(off, by, true); off += 4;
+                    dv.setFloat32(off, bz, true); off += 4;
+                    dv.setFloat32(off, cx, true); off += 4;
+                    dv.setFloat32(off, cy, true); off += 4;
+                    dv.setFloat32(off, cz, true); off += 4;
+
+                    dv.setUint16(off, 0, true); off += 2;
+                }
+                parts.push(buf);
+            }
+
+            return new Blob(parts, { type: 'model/stl' });
+        }
+
+        /* ---------------- OBJ ---------------- */
+        function objText(data)
+        {
+            if (data.kind !== 'mesh') { throw new Error('OBJ 只支持网格图层'); }
+
+            var verts = data.uniqVerts;
+            var idx = data.remap;
+            if (!verts || !idx)
+            {
+                throw new Error('缺少唯一顶点表，无法导出 OBJ');
+            }
+
+            var parts = ['# exported by 3DViewer\n'];
+            var vCount = Math.floor(verts.length / 3);
+
+            for (var v0 = 0; v0 < vCount; v0 += CHUNK_TRI)
+            {
+                var v1 = Math.min(vCount, v0 + CHUNK_TRI);
+                var s = '';
+                for (var v = v0; v < v1; v++)
+                {
+                    s += 'v ' + fx(verts[v * 3]) + ' ' +
+                        fx(verts[v * 3 + 1]) + ' ' + fx(verts[v * 3 + 2]) + '\n';
+                }
+                parts.push(s);
+            }
+
+            var triCount = Math.floor(idx.length / 3);
+            for (var t0 = 0; t0 < triCount; t0 += CHUNK_TRI)
+            {
+                var t1 = Math.min(triCount, t0 + CHUNK_TRI);
+                var s2 = '';
+                for (var t = t0; t < t1; t++)
+                {
+                    /* OBJ 的索引从 1 开始 */
+                    s2 += 'f ' + (idx[t * 3] + 1) + ' ' +
+                        (idx[t * 3 + 1] + 1) + ' ' + (idx[t * 3 + 2] + 1) + '\n';
+                }
+                parts.push(s2);
+            }
+
+            return new Blob(parts, { type: 'text/plain' });
+        }
+
+        /* ---------------- 点云文本（CSV / XYZ） ---------------- */
+        function pointsText(data, sep, withHeader)
+        {
+            var pos = data.positions;
+            var n = pointCountOf(data);
+            if (!n) { throw new Error('当前图层没有点'); }
+
+            var sfs = data.scalars || [];
+            var parts = [];
+
+            if (withHeader)
+            {
+                var head = 'x' + sep + 'y' + sep + 'z';
+                for (var h = 0; h < sfs.length; h++)
+                {
+                    head += sep + (sfs[h].name || ('SF' + (h + 1)));
+                }
+                parts.push(head + '\n');
+            }
+
+            for (var r0 = 0; r0 < n; r0 += CHUNK_ROW)
+            {
+                var r1 = Math.min(n, r0 + CHUNK_ROW);
+                var s = '';
+                for (var r = r0; r < r1; r++)
+                {
+                    s += fx(pos[r * 3]) + sep + fx(pos[r * 3 + 1]) + sep + fx(pos[r * 3 + 2]);
+                    for (var k = 0; k < sfs.length; k++)
+                    {
+                        var vals = sfs[k].values;
+                        s += sep + (vals ? fx(vals[r]) : '');
+                    }
+                    s += '\n';
+                }
+                parts.push(s);
+            }
+
+            return new Blob(parts, { type: 'text/plain' });
+        }
+
+        /* ---------------- 顶点色映射到唯一顶点 ----------------
+         * 载入时颜色按「角点」存放（每三角形 3 份），导出 PLY / GLB 需要每顶点一份，
+         * 用 remap 取每个唯一顶点的首次出现即可。 */
+        function vertexColors(data, vCount)
+        {
+            var col = data.colors;
+            if (!col) { return null; }
+
+            var idx = data.remap;
+            if (!idx)
+            {
+                return col.length >= vCount * 3 ? col : null;
+            }
+
+            var out = new Float32Array(vCount * 3);
+            var seen = new Uint8Array(vCount);
+            var n = Math.min(idx.length, Math.floor(col.length / 3));
+
+            for (var i = 0; i < n; i++)
+            {
+                var u = idx[i];
+                if (u >= vCount || seen[u]) { continue; }
+                seen[u] = 1;
+                out[u * 3] = col[i * 3];
+                out[u * 3 + 1] = col[i * 3 + 1];
+                out[u * 3 + 2] = col[i * 3 + 2];
+            }
+            return out;
+        }
+
+        function safeName(str, fallback)
+        {
+            var t = String(str || '').replace(/[^0-9A-Za-z_\u4e00-\u9fa5]/g, '_');
+            return t || fallback;
+        }
+
+        /* ---------------- PLY（binary_little_endian） ----------------
+         * 网格写成「索引顶点 + 面表」，点云写成纯顶点元素。 */
+        function ply(data)
+        {
+            var isMesh = data.kind === 'mesh';
+            var verts;
+            var faces = null;
+            var vCount;
+
+            if (isMesh)
+            {
+                verts = data.uniqVerts;
+                faces = data.remap;
+                if (!verts || !faces) { throw new Error('缺少唯一顶点表，无法导出 PLY'); }
+                vCount = Math.floor(verts.length / 3);
+            }
+            else
+            {
+                verts = data.positions;
+                vCount = pointCountOf(data);
+            }
+            if (!vCount) { throw new Error('当前图层没有可导出的顶点'); }
+
+            var col = vertexColors(data, vCount);
+            var sfs = isMesh ? [] : (data.scalars || []);
+            var triCount = faces ? Math.floor(faces.length / 3) : 0;
+
+            var head = 'ply\n';
+            head += 'format binary_little_endian 1.0\n';
+            head += 'comment exported by 3DViewer\n';
+            head += 'element vertex ' + vCount + '\n';
+            head += 'property float x\nproperty float y\nproperty float z\n';
+            if (col)
+            {
+                head += 'property uchar red\nproperty uchar green\nproperty uchar blue\n';
+            }
+            for (var si = 0; si < sfs.length; si++)
+            {
+                head += 'property float ' + safeName(sfs[si].name, 'sf' + (si + 1)) + '\n';
+            }
+            if (triCount > 0)
+            {
+                head += 'element face ' + triCount + '\n';
+                head += 'property list uchar int vertex_indices\n';
+            }
+            head += 'end_header\n';
+
+            var parts = [head];
+            var stride = 12 + (col ? 3 : 0) + sfs.length * 4;
+
+            for (var v0 = 0; v0 < vCount; v0 += CHUNK_TRI)
+            {
+                var v1 = Math.min(vCount, v0 + CHUNK_TRI);
+                var buf = new ArrayBuffer((v1 - v0) * stride);
+                var dv = new DataView(buf);
+                var off = 0;
+
+                for (var v = v0; v < v1; v++)
+                {
+                    dv.setFloat32(off, verts[v * 3], true); off += 4;
+                    dv.setFloat32(off, verts[v * 3 + 1], true); off += 4;
+                    dv.setFloat32(off, verts[v * 3 + 2], true); off += 4;
+
+                    if (col)
+                    {
+                        dv.setUint8(off, Math.max(0, Math.min(255, Math.round(col[v * 3] * 255)))); off += 1;
+                        dv.setUint8(off, Math.max(0, Math.min(255, Math.round(col[v * 3 + 1] * 255)))); off += 1;
+                        dv.setUint8(off, Math.max(0, Math.min(255, Math.round(col[v * 3 + 2] * 255)))); off += 1;
+                    }
+
+                    for (var sk = 0; sk < sfs.length; sk++)
+                    {
+                        var vals = sfs[sk].values;
+                        dv.setFloat32(off, vals ? vals[v] : 0, true); off += 4;
+                    }
+                }
+                parts.push(buf);
+            }
+
+            if (triCount > 0)
+            {
+                for (var t0 = 0; t0 < triCount; t0 += CHUNK_TRI)
+                {
+                    var t1 = Math.min(triCount, t0 + CHUNK_TRI);
+                    var fbuf = new ArrayBuffer((t1 - t0) * 13);
+                    var fdv = new DataView(fbuf);
+                    var fo = 0;
+
+                    for (var t = t0; t < t1; t++)
+                    {
+                        fdv.setUint8(fo, 3); fo += 1;
+                        fdv.setInt32(fo, faces[t * 3], true); fo += 4;
+                        fdv.setInt32(fo, faces[t * 3 + 1], true); fo += 4;
+                        fdv.setInt32(fo, faces[t * 3 + 2], true); fo += 4;
+                    }
+                    parts.push(fbuf);
+                }
+            }
+
+            return new Blob(parts, { type: 'application/octet-stream' });
+        }
+
+        /* ---------------- PCD（binary） ----------------
+         * rgb 写成 32 位打包的 U 字段，与本工具的 PCD 解析互为逆运算。 */
+        function pcd(data)
+        {
+            if (data.kind !== 'points') { throw new Error('PCD 只支持点云图层'); }
+
+            var n = pointCountOf(data);
+            if (!n) { throw new Error('当前图层没有点'); }
+
+            var col = data.colors;
+            var sfs = data.scalars || [];
+
+            var fields = ['x', 'y', 'z'];
+            var sizes = [4, 4, 4];
+            var types = ['F', 'F', 'F'];
+            if (col) { fields.push('rgb'); sizes.push(4); types.push('U'); }
+            for (var i = 0; i < sfs.length; i++)
+            {
+                fields.push(safeName(sfs[i].name, 'sf' + (i + 1)));
+                sizes.push(4);
+                types.push('F');
+            }
+
+            var head = '# .PCD v0.7 - Point Cloud Data file format\n';
+            head += 'VERSION 0.7\n';
+            head += 'FIELDS ' + fields.join(' ') + '\n';
+            head += 'SIZE ' + sizes.join(' ') + '\n';
+            head += 'TYPE ' + types.join(' ') + '\n';
+            head += 'COUNT ' + fields.map(function () { return 1; }).join(' ') + '\n';
+            head += 'WIDTH ' + n + '\nHEIGHT 1\n';
+            head += 'VIEWPOINT 0 0 0 1 0 0 0\n';
+            head += 'POINTS ' + n + '\n';
+            head += 'DATA binary\n';
+
+            var parts = [head];
+            var stride = 12 + (col ? 4 : 0) + sfs.length * 4;
+
+            for (var r0 = 0; r0 < n; r0 += CHUNK_ROW)
+            {
+                var r1 = Math.min(n, r0 + CHUNK_ROW);
+                var buf = new ArrayBuffer((r1 - r0) * stride);
+                var dv = new DataView(buf);
+                var off = 0;
+
+                for (var r = r0; r < r1; r++)
+                {
+                    dv.setFloat32(off, data.positions[r * 3], true); off += 4;
+                    dv.setFloat32(off, data.positions[r * 3 + 1], true); off += 4;
+                    dv.setFloat32(off, data.positions[r * 3 + 2], true); off += 4;
+
+                    if (col)
+                    {
+                        var cr = Math.max(0, Math.min(255, Math.round(col[r * 3] * 255)));
+                        var cg = Math.max(0, Math.min(255, Math.round(col[r * 3 + 1] * 255)));
+                        var cb = Math.max(0, Math.min(255, Math.round(col[r * 3 + 2] * 255)));
+                        dv.setUint32(off, (cr << 16) | (cg << 8) | cb, true);
+                        off += 4;
+                    }
+
+                    for (var sk = 0; sk < sfs.length; sk++)
+                    {
+                        var vals = sfs[sk].values;
+                        dv.setFloat32(off, vals ? vals[r] : 0, true); off += 4;
+                    }
+                }
+                parts.push(buf);
+            }
+
+            return new Blob(parts, { type: 'application/octet-stream' });
+        }
+
+        /* ---------------- GLB（glTF 2.0 单文件） ----------------
+         * 导出时把 Z 轴向上转回 glTF 的 Y 轴向上：(x, z, -y)，
+         * 与载入时的 (x, -z, y) 互为逆运算。 */
+        function glb(data)
+        {
+            if (data.kind !== 'mesh') { throw new Error('GLB 只支持网格图层'); }
+
+            var verts = data.uniqVerts;
+            var faces = data.remap;
+            if (!verts || !faces) { throw new Error('缺少唯一顶点表，无法导出 GLB'); }
+
+            var vCount = Math.floor(verts.length / 3);
+            var triCount = Math.floor(faces.length / 3);
+            if (!vCount || !triCount) { throw new Error('当前图层没有三角形'); }
+
+            /* 位置：Z-up -> Y-up */
+            var pos = new Float32Array(vCount * 3);
+            var mn = [Infinity, Infinity, Infinity];
+            var mx = [-Infinity, -Infinity, -Infinity];
+
+            for (var i = 0; i < vCount; i++)
+            {
+                var x = verts[i * 3], y = verts[i * 3 + 1], z = verts[i * 3 + 2];
+                var gx = x, gy = z, gz = -y;
+
+                pos[i * 3] = gx;
+                pos[i * 3 + 1] = gy;
+                pos[i * 3 + 2] = gz;
+
+                if (gx < mn[0]) { mn[0] = gx; }
+                if (gy < mn[1]) { mn[1] = gy; }
+                if (gz < mn[2]) { mn[2] = gz; }
+                if (gx > mx[0]) { mx[0] = gx; }
+                if (gy > mx[1]) { mx[1] = gy; }
+                if (gz > mx[2]) { mx[2] = gz; }
+            }
+
+            var idx = new Uint32Array(triCount * 3);
+            for (var t = 0; t < triCount * 3; t++) { idx[t] = faces[t]; }
+
+            var col = vertexColors(data, vCount);
+
+            /* 组装 BIN：位置 → 索引 → 颜色，每段按 4 字节对齐 */
+            var posBytes = pos.byteLength;
+            var idxBytes = idx.byteLength;
+            var colBytes = col ? col.byteLength : 0;
+            var binLength = posBytes + idxBytes + colBytes;
+
+            var bin = new Uint8Array(binLength);
+            bin.set(new Uint8Array(pos.buffer, pos.byteOffset, posBytes), 0);
+            bin.set(new Uint8Array(idx.buffer, idx.byteOffset, idxBytes), posBytes);
+            if (col)
+            {
+                bin.set(new Uint8Array(col.buffer, col.byteOffset, colBytes), posBytes + idxBytes);
+            }
+
+            var bufferViews = [
+                { buffer: 0, byteOffset: 0, byteLength: posBytes, target: 34962 },
+                { buffer: 0, byteOffset: posBytes, byteLength: idxBytes, target: 34963 }
+            ];
+            var accessors = [
+                {
+                    bufferView: 0, componentType: 5126, count: vCount, type: 'VEC3',
+                    min: [mn[0], mn[1], mn[2]], max: [mx[0], mx[1], mx[2]]
+                },
+                { bufferView: 1, componentType: 5125, count: triCount * 3, type: 'SCALAR' }
+            ];
+            var attrs = { POSITION: 0 };
+
+            if (col)
+            {
+                bufferViews.push({
+                    buffer: 0, byteOffset: posBytes + idxBytes, byteLength: colBytes, target: 34962
+                });
+                accessors.push({
+                    bufferView: 2, componentType: 5126, count: vCount, type: 'VEC3'
+                });
+                attrs.COLOR_0 = 2;
+            }
+
+            var gltf = {
+                asset: { version: '2.0', generator: '3DViewer' },
+                scene: 0,
+                scenes: [{ nodes: [0] }],
+                nodes: [{ mesh: 0 }],
+                meshes: [{ primitives: [{ attributes: attrs, indices: 1 }] }],
+                buffers: [{ byteLength: binLength }],
+                bufferViews: bufferViews,
+                accessors: accessors
+            };
+
+            var jsonStr = JSON.stringify(gltf);
+            var jsonBytes = new global.TextEncoder().encode(jsonStr);
+            var jsonPad = (4 - (jsonBytes.length % 4)) % 4;
+            var binPad = (4 - (binLength % 4)) % 4;
+
+            var total = 12 + 8 + jsonBytes.length + jsonPad + 8 + binLength + binPad;
+            var out = new ArrayBuffer(total);
+            var dv = new DataView(out);
+            var u8 = new Uint8Array(out);
+
+            dv.setUint32(0, 0x46546C67, true);      /* 'glTF' */
+            dv.setUint32(4, 2, true);
+            dv.setUint32(8, total, true);
+
+            dv.setUint32(12, jsonBytes.length + jsonPad, true);
+            dv.setUint32(16, 0x4E4F534A, true);     /* 'JSON' */
+            u8.set(jsonBytes, 20);
+            for (var jp = 0; jp < jsonPad; jp++) { u8[20 + jsonBytes.length + jp] = 0x20; }
+
+            var binOff = 20 + jsonBytes.length + jsonPad;
+            dv.setUint32(binOff, binLength + binPad, true);
+            dv.setUint32(binOff + 4, 0x004E4942, true);  /* 'BIN' */
+            u8.set(bin, binOff + 8);
+
+            return new Blob([out], { type: 'model/gltf-binary' });
+        }
+
+        global.MV.exporters = {
+            stlBinary: stlBinary,
+            objText: objText,
+            pointsText: pointsText,
+            ply: ply,
+            pcd: pcd,
+            glb: glb,
+            /* 供 UI 判断按钮是否可用 */
+            triCount: triCountOf,
+            pointCount: pointCountOf
+        };
+    })();
+
 })(window);

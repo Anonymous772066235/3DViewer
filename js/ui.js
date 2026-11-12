@@ -407,17 +407,46 @@
         return s;
     }
 
+    /* 先把「用户数据」剥掉：文件名 / 图层名 / 路径里出现「异常」「错误」这类词，
+     * 不该让整条日志变红。剥不干净的（比如没加引号的文件名）再由「只看开头」兜住。 */
+    function stripUserData(s)
+    {
+        return String(s || '')
+            .replace(/"[^"]*"/g, '""')
+            .replace(/「[^」]*」/g, '「」')
+            .replace(/'[^']*'/g, "''")
+            .replace(/[A-Za-z]:\\[^\s，。；、）)]*/g, '<path>')
+            .replace(/https?:\/\/[^\s，。；、）)]*/g, '<url>');
+    }
+
+    /* 兜底分级：调用方没给 level 时才用。
+     *
+     * 不再「关键词出现即判红」—— 那样文件名里带「异常」「错误」的正常消息也会红。
+     * 改成匹配**消息形态**，因为真实错误消息都有固定句式：
+     *   「XX 失败：…」「无法…」「不支持…」「请先…」「已取消…」
+     * 而用户数据（文件名/图层名/路径）几乎不会长成这些形态。 */
     function classifyLog(text)
     {
-        var t = text || '';
-        if (/失败|错误|异常|无效|越界|不支持|无法|没[有法]|error|Error|FAIL/.test(t))
+        var t = stripUserData(text).slice(0, 32);
+
+        /* 开头就是错误语：失败 / 无法 / 不支持 / 未找到 / 越界 / 不可用 */
+        if (/^(失败|无法|不支持|未找到|越界|不可用|没有可显示)/.test(t))
         {
-            return 'err';
+            return 'fail';
         }
-        if (/取消|警告|注意|跳过|请先|未找到|未就绪|未拾取|warn|Warn/.test(t))
+
+        /* 「载入失败：」「优化失败:」这类「动作 + 失败 + 冒号」 */
+        if (/(失败|错误)\s*[:：]/.test(t))
+        {
+            return 'fail';
+        }
+
+        /* 提示/取消类 */
+        if (/^(取消|已取消|警告|注意|跳过|请先|未就绪|未拾取)/.test(t))
         {
             return 'warn';
         }
+
         return 'info';
     }
 
@@ -1190,6 +1219,13 @@
         if (elBox) { elBox.textContent = txt; }
     }
 
+    /* 精确到个位：属性面板用它，避免 111.0k 这种看不出实际规模 */
+    function exactCount(n)
+    {
+        n = Math.round(Number(n) || 0);
+        return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
     function renderProps()
     {
         // 选中「vertices」占位项时，只显示顶点信息区
@@ -1413,13 +1449,22 @@
 
         var d = layer.data;
         var txt;
+
+        /* 计数一律精确到个位（千分位分隔）：111,009 比 111.0k 更能说明规模 */
         if (layer.kind === 'mesh')
         {
-            txt = d.format + ' · ' + formatCount(d.count) + ' 三角形';
+            var triN = d.count || Math.floor((d.positions ? d.positions.length : 0) / 9);
+            var vN = d.vertCount || 0;
+
+            txt = d.format + ' · 面 ' + exactCount(triN);
+            if (vN) { txt += ' · 点 ' + exactCount(vN); }
         }
         else
         {
-            txt = d.format + ' · ' + formatCount(d.count) + ' 点';
+            txt = d.format + ' · 点 ' + exactCount(d.count);
+
+            var sfN = (d.scalars && d.scalars.length) || 0;
+            if (sfN) { txt += ' · 标量 ' + sfN + ' 列'; }
         }
         if (d.note)
         {
@@ -1427,7 +1472,7 @@
         }
         if (layer.kind === 'mesh' && layer.gpu && typeof layer.gpu.boundaryEdges === 'number')
         {
-            txt += ' · 边界 ' + formatCount(layer.gpu.boundaryEdges) + ' 边';
+            txt += ' · 边界 ' + exactCount(layer.gpu.boundaryEdges) + ' 边';
         }
         $('p-stat').textContent = txt;
 
@@ -1457,13 +1502,9 @@
             }
         }
 
-        if (!pathText)
-        {
-            pathText = layer.hasFileRef
-                ? '（拖入的文件：浏览器不提供绝对路径；引用已记录，可从「载入 → 最近」重开）'
-                : '（未能解析：浏览器不暴露本地路径；' +
-                  '把文件放进 HoleOptimize/data，或用 HOLEOPT_SEARCH 指定搜索根）';
-        }
+        /* 没有任何可用来源时不显示这一行：
+         * 用一段解释去占位，反而让「路径」这一项看起来像坏了 */
+        var pathRow = $('p-path') ? $('p-path').closest('.prop-row') : null;
 
         /* URL 形式加载时路径里可能是 %E6%A7%BD... 编码串，中文文件名会显示成乱码 */
         if (!pathFromFileApi)
@@ -1471,8 +1512,10 @@
             try { pathText = decodeURI(pathText); } catch (e3) { /* 保持原样 */ }
         }
 
-        $('p-path').textContent = pathText;
-        $('p-path').title = pathText;
+        $('p-path').textContent = pathText || '';
+        $('p-path').title = pathText || '';
+
+        if (pathRow) { pathRow.classList.toggle('show', !!pathText); }
     }
 
     /* ---------------- 进度 / 状态 ---------------- */
@@ -1501,16 +1544,32 @@
 
     /* 按关键字分级：错误 → 红，取消/警告 → 黄 */
 
+    /* 级别标签：颜色之外再给一个文字标识，色弱 / 打印 / 截图外传时也能分辨 */
+    function levelTag(kind)
+    {
+        return (kind === 'warn') ? 'WARN' : (kind === 'fail' ? 'FAIL' : 'INFO');
+    }
+
     function makeLogRow(rec)
     {
         var row = document.createElement('div');
-        row.className = 'st-log-row' + (rec.kind === 'info' ? '' : ' ' + rec.kind);
+        /* info 也给类名：标签要靠它上色 */
+        row.className = 'st-log-row ' + (rec.kind || 'info');
+
         var t = document.createElement('span');
         t.className = 't';
         t.textContent = rec.time;
+
+        var lv = document.createElement('span');
+        lv.className = 'lv';
+        lv.textContent = levelTag(rec.kind);
+
         var m = document.createElement('span');
+        m.className = 'm';
         m.textContent = rec.text;
+
         row.appendChild(t);
+        row.appendChild(lv);
         row.appendChild(m);
         return row;
     }
@@ -1527,14 +1586,54 @@
         if (box) { box.scrollTop = box.scrollHeight; }
     }
 
+    /* ---------------- 耗时统计 ----------------
+     * 只记超过阈值的操作：几十毫秒的事进日志只是噪音。
+     * 用 performance.now()：它不受系统时钟校正影响，跨 await 也准。 */
+    var TIMING_MIN_MS = 300;
+
+    function nowMs()
+    {
+        return (global.performance && global.performance.now)
+            ? global.performance.now() : Date.now();
+    }
+
+    function fmtDur(ms)
+    {
+        if (!(ms >= 0)) { return '0 ms'; }
+        if (ms < 1000) { return Math.round(ms) + ' ms'; }
+        if (ms < 60000) { return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s'; }
+
+        var m = Math.floor(ms / 60000);
+        var s = Math.round((ms - m * 60000) / 1000);
+        if (s >= 60) { m += 1; s = 0; }
+        return m + ' min' + (s ? ' ' + s + ' s' : '');
+    }
+
+    /* 写一条「[耗时] 操作 · 1.23 s（明细）」到状态栏与日志面板。
+     * force=true 时无视阈值 —— 载入这类「一次性、用户主动等」的操作，
+     * 即使只有 100 ms 也值得留痕：历史重开的常常是小文件，
+     * 不记的话用户会以为没有这个功能。 */
+    function logTiming(label, ms, note, force)
+    {
+        if (!force && !(ms >= TIMING_MIN_MS)) { return; }
+        setInfo('[耗时] ' + label + ' · ' + fmtDur(ms) + (note ? '（' + note + '）' : ''));
+    }
+
+    /* 日志级别：统一 4 个字母，未知值一律回退到兜底判定。
+     *   info  普通（继承正文色）
+     *   warn  警告（黄）
+     *   fail  失败（红） */
+    var LOG_LEVELS = { info: 1, warn: 1, fail: 1 };
+
     /* 追加一条历史；面板展开时同步追加 DOM */
-    function pushLog(text)
+    function pushLog(text, level)
     {
         var d = new Date();
         var rec = {
             time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()),
             text: String(text),
-            kind: classifyLog(text)
+            /* 调用方知道自己在报错误，就别让它去猜；拼错的级别回退到兜底 */
+            kind: (level && LOG_LEVELS[level]) ? level : classifyLog(text)
         };
         logBuf.push(rec);
         if (logBuf.length > LOG_MAX) { logBuf.shift(); }
@@ -1679,7 +1778,8 @@
                 var arr = [];
                 for (var i = 0; i < logBuf.length; i++)
                 {
-                    arr.push(logBuf[i].time + '  ' + logBuf[i].text);
+                    arr.push(logBuf[i].time + '  ' + levelTag(logBuf[i].kind) +
+                        '  ' + logBuf[i].text);
                 }
                 var txt = arr.join('\n');
                 function done() { setInfo('已复制 ' + logBuf.length + ' 条日志', true); }
@@ -2061,6 +2161,7 @@
     /* 把矩阵应用到图层：改 data + 重建 GPU */
     function applyXformToLayer(m, label)
     {
+        var tXform = nowMs();
         var layer = xformTargetLayer();
         if (!layer || !layer.data || !layer.data.positions)
         {
@@ -2135,6 +2236,10 @@
         }
         xformInfo(msg, false);
         setInfo(label + '已应用到 ' + layer.name);
+
+        var xCount = Math.floor(d.positions.length / (layer.kind === 'mesh' ? 9 : 3));
+        logTiming(label, nowMs() - tXform,
+            formatCount(xCount) + (layer.kind === 'mesh' ? ' 三角形' : ' 点'));
         return true;
     }
 
@@ -3019,6 +3124,9 @@
         setInfo(phase === 'coarse' ? '自动粗配准中…' : 'ICP 计算中…');
 
         var t0 = Date.now();
+        /* 另起一个 performance 时钟：粗配准与迭代分开计时，dt 仍用原来的 Date.now */
+        var tRun = nowMs();
+        var tCoarseEnd = 0;
 
         // 每帧只跑一轮，并用 rAF 调度：这样每一次迭代都会渲染一帧，
         // 能看到数据逐步收敛的过程。用 setTimeout 的话几十轮会在几毫秒内
@@ -3188,6 +3296,8 @@
 
         function stepIcp()
         {
+        /* 第一次进这里说明粗配准（含候选验证）已经结束 */
+        if (!tCoarseEnd) { tCoarseEnd = nowMs(); }
         var r = solver.step();
 
         // 每轮都把当前变换挂到预览上，配合 rAF 就能看到数据逐步移动
@@ -3230,7 +3340,8 @@
                     '调大「迭代」，或先用 N-N 配准给一个接近的初值。';
             }
             xformInfo('配准未收敛，已放弃结果（数据未被移动）', true);
-            setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）');
+            setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）', false, 'fail');
+            logTiming('ICP 配准（未收敛）', dt, '迭代 ' + res.iters + ' 次');
             return;
         }
 
@@ -3245,6 +3356,11 @@
         xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
             '\n点「应用」把矩阵作用到「' + dstLay.name + '」', res.rms > 1);
         setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
+        var coarseMs = tCoarseEnd ? (tCoarseEnd - tRun) : 0;
+        var iterMs = tCoarseEnd ? (nowMs() - tCoarseEnd) : 0;
+        var stageNote = '迭代 ' + res.iters + ' 次 · RMS ' + res.rms.toFixed(4);
+        if (coarseMs > 0) { stageNote += ' · 粗配准 ' + fmtDur(coarseMs) + ' / 迭代 ' + fmtDur(iterMs); }
+        logTiming('ICP 配准', dt, stageNote);
         }
 
         function tick()
@@ -3482,11 +3598,11 @@
     }
 
     /* 写状态栏单行；noLog 为 true 时只更新摘要、不记历史 */
-    function setInfo(text, noLog)
+    function setInfo(text, noLog, level)
     {
         var el = $('st-info');
         if (el) { el.textContent = text; }
-        if (!noLog) { pushLog(text); }
+        if (!noLog) { pushLog(text, level); }
     }
 
     function setStats(fps, layerCount, triangles, points)
@@ -4365,6 +4481,7 @@
         bindMenus();
         bindRecent();
         bindSplitDrag();
+        bindExportMenu();
         bindColorPop();
         bindStatusbar();
         bindXform();
@@ -5237,11 +5354,76 @@
     }
 
     /* ---- bindMenus ---- */
+    /* 导出菜单：按当前选中图层决定哪些项可用。
+     * 用 disabled 而不是隐藏 —— 用户能看到「有这项但这次用不了」，
+     * 悬停时 title 会说明原因。 */
+    function renderExportMenu()
+    {
+        var l = app && app.getSelected ? app.getSelected() : null;
+        var isMesh = !!(l && l.kind === 'mesh');
+        var isPoints = !!(l && l.kind === 'points');
+
+        var label = $('exp-target');
+        if (label)
+        {
+            label.textContent = l
+                ? ('当前图层：' + l.name + '（' + (isMesh ? 'mesh' : 'points') + '）')
+                : '未选中图层';
+        }
+
+        function setItem(id, ok, why)
+        {
+            var el = $(id);
+            if (!el) { return; }
+            el.disabled = !ok;
+            el.title = ok ? (el.getAttribute('data-tip') || '') : why;
+        }
+
+        setItem('exp-raw', !!(l && l.sourceFile),
+            l ? '该图层没有原始文件（URL 载入或派生的图层）' : '先在场景树里选中一个图层');
+        setItem('exp-stl', isMesh, l ? 'STL 只支持网格图层' : '先在场景树里选中一个图层');
+        setItem('exp-obj', isMesh, l ? 'OBJ 只支持网格图层' : '先在场景树里选中一个图层');
+        setItem('exp-csv', isPoints, l ? '点云文本只支持点云图层' : '先在场景树里选中一个图层');
+        setItem('exp-xyz', isPoints, l ? '点云文本只支持点云图层' : '先在场景树里选中一个图层');
+        setItem('exp-ply', isMesh || isPoints, '先在场景树里选中一个图层');
+        setItem('exp-pcd', isPoints, l ? 'PCD 只支持点云图层' : '先在场景树里选中一个图层');
+        setItem('exp-glb', isMesh, l ? 'GLB 只支持网格图层' : '先在场景树里选中一个图层');
+    }
+
+    function bindExportMenu()
+    {
+        var items = [
+            ['exp-raw', 'raw'],
+            ['exp-stl', 'stl'],
+            ['exp-obj', 'obj'],
+            ['exp-csv', 'csv'],
+            ['exp-xyz', 'xyz'],
+            ['exp-ply', 'ply'],
+            ['exp-pcd', 'pcd'],
+            ['exp-glb', 'glb']
+        ];
+
+        for (var i = 0; i < items.length; i++)
+        {
+            (function (id, fmt)
+            {
+                var el = $(id);
+                if (!el) { return; }
+                el.addEventListener('click', function ()
+                {
+                    if (el.disabled) { return; }
+                    app.exportSelected(fmt);
+                });
+            })(items[i][0], items[i][1]);
+        }
+    }
+
     function bindMenus()
     {
         // 顶栏下拉：载入 / 插件 / 工具，三者互斥，点任一项后自动收起
         var topMenus = [
             { btn: $('btn-load'), menu: $('load-menu') },
+            { btn: $('btn-export'), menu: $('export-menu') },
             { btn: $('btn-plugins'), menu: $('plugins-menu') },
             { btn: $('btn-tools'), menu: $('tools-menu') }
         ];
@@ -5278,6 +5460,7 @@
                     if (willOpen)
                     {
                         if (it.menu.id === 'load-menu') { renderLoadRecent(); }
+                        if (it.menu.id === 'export-menu') { renderExportMenu(); }
                         it.menu.classList.remove('hidden');
                         it.btn.classList.add('active');
                     }
@@ -5750,6 +5933,9 @@
         solveRigid: solveRigid,
         setStats: setStats,
         showConfirm: showConfirm,
+        nowMs: nowMs,
+        fmtDur: fmtDur,
+        logTiming: logTiming,
         showColumnDialog: showColumnDialog,
         autoColumnPlan: autoColumnPlan,
         applyLayoutMode: applyLayoutMode,

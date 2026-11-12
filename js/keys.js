@@ -93,6 +93,7 @@
 
         { k: 'o', g: '文件', label: '载入菜单', run: function () { click('btn-load'); } },
         { k: 's', g: '文件', label: '截图', run: function () { click('btn-shot'); } },
+        { k: 'Shift+s', g: '文件', label: '导出菜单', run: function () { click('btn-export'); } },
         { k: 'Delete', g: '文件', label: '删除选中图层', run: function (a)
             { if (a.selectedId !== null) { a.removeLayer(a.selectedId); } } },
         { k: 'Shift+Delete', g: '文件', label: '清空全部图层', run: function () { click('btn-clear'); } },

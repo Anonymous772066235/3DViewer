@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.3.0" />
+<link rel="stylesheet" href="css/style.css?v=1.0.3.1" />
 </head>
 <body>
 <div id="app">
@@ -34,6 +34,22 @@
             </div>
             <button id="btn-single" title="合并为单视口（快捷键 1 / 2）">单窗</button>
             <button id="btn-shot" title="导出当前画面为 PNG（快捷键 S）">截图</button>
+            <div id="export-menu-wrap" class="menu-wrap">
+                <button id="btn-export" class="menu-btn" title="导出当前图层（快捷键 Shift+S）">导出</button>
+                <div id="export-menu" class="menu hidden">
+                    <div class="menu-label" id="exp-target">未选中图层</div>
+                    <button id="exp-raw" data-tip="导出载入时的原始文件，字节一致">原始文件</button>
+                    <button id="exp-stl" data-tip="二进制 STL（按当前几何）">STL（binary）</button>
+                    <button id="exp-obj" data-tip="OBJ，复用唯一顶点表">OBJ</button>
+                    <div class="menu-sep"></div>
+                    <button id="exp-csv" data-tip="点云 CSV：x,y,z 加标量列">点云 CSV</button>
+                    <button id="exp-xyz" data-tip="点云 XYZ：空白分隔，无表头">点云 XYZ</button>
+                    <div class="menu-sep"></div>
+                    <button id="exp-ply" data-tip="PLY（binary）：网格带面表，点云带颜色与标量">PLY</button>
+                    <button id="exp-pcd" data-tip="PCD（binary）：x,y,z + rgb + 标量">PCD</button>
+                    <button id="exp-glb" data-tip="GLB：glTF 2.0 单文件，自动转 Y 轴向上">GLB</button>
+                </div>
+            </div>
                 <button id="btn-fit" title="按当前数据铺满视口（快捷键 F）">适应</button>
             <button id="btn-clear" title="清空所有图层（快捷键 Shift+Delete）">清空</button>
             <div id="plugin-menu-wrap" class="menu-wrap">
@@ -177,18 +193,18 @@
                             <select id="p-shade">
                                 <option value="1">光照</option>
                                 <option value="0">纯色</option>
-                                <option value="2">按法向（背面黑）</option>
+                                <option value="2">法向</option>
                             </select>
                         </div>
                         <div class="prop-row" data-prop="points">
                             <label>模式</label>
                             <select id="p-pointcolor">
                                 <option value="0">单色</option>
-                                <option value="1">按高度</option>
-                                <option value="2">按法向</option>
-                                <option value="3">按标签</option>
-                                <option value="4">顶点色</option>
-                                <option value="5">标量场</option>
+                                <option value="1">高度</option>
+                                <option value="2">法向</option>
+                                <option value="3">标签</option>
+                                <option value="4">顶点</option>
+                                <option value="5">标量</option>
                             </select>
                         </div>
                         <div class="prop-row" data-prop="points">
@@ -616,16 +632,16 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.3.0"></script>
-    <script src="js/io.js?v=1.0.3.0"></script>
-    <script src="js/algo.js?v=1.0.3.0"></script>
-    <script src="js/render.js?v=1.0.3.0"></script>
+    <script src="js/core.js?v=1.0.3.1"></script>
+    <script src="js/io.js?v=1.0.3.1"></script>
+    <script src="js/algo.js?v=1.0.3.1"></script>
+    <script src="js/render.js?v=1.0.3.1"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.3.0"></script>
-    <script src="js/plugins/optimize.js?v=1.0.3.0"></script>
-    <script src="js/ui.js?v=1.0.3.0"></script>
-    <script src="js/keys.js?v=1.0.3.0"></script>
-    <script src="js/app.js?v=1.0.3.0"></script>
+    <script src="js/plugins/registry.js?v=1.0.3.1"></script>
+    <script src="js/plugins/optimize.js?v=1.0.3.1"></script>
+    <script src="js/ui.js?v=1.0.3.1"></script>
+    <script src="js/keys.js?v=1.0.3.1"></script>
+    <script src="js/app.js?v=1.0.3.1"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

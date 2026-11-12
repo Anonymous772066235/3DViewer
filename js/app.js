@@ -359,7 +359,7 @@
             {
                 if (global.MV.ui && global.MV.ui.setInfo)
                 {
-                    global.MV.ui.setInfo('载入失败：' + (e && e.message ? e.message : e));
+                    global.MV.ui.setInfo('载入失败：' + (e && e.message ? e.message : e), false, 'fail');
                 }
             });
         }
@@ -419,15 +419,20 @@
         global.MV.ui.setProgress(true, '下载 ' + url, 0);
         try
         {
+            var tDl = global.MV.ui.nowMs();
+            var file_dl = 0;
             var resp = await global.fetch(url, { cache: 'no-store' });
             if (!resp.ok)
             {
                 throw new Error('HTTP ' + resp.status);
             }
             var buf = await resp.arrayBuffer();
+            /* 下载耗时记在 File 上，载入的汇总日志会把它算进总时长 */
+            file_dl = global.MV.ui.nowMs() - tDl;
             // /file?path=... 这类地址的末段没有文件名，允许调用方直接给
             var name = nameHint || decodeURIComponent((url.split('/').pop() || 'model').split('?')[0]);
             var file = new global.File([buf], name);
+            file._downloadMs = file_dl;
 
             // 记录完整访问地址（浏览器能拿到的最接近“绝对路径”的信息）
             try
@@ -445,7 +450,7 @@
         {
             global.MV.ui.setProgress(false, '');
             global.MV.ui.setInfo('URL 载入失败: ' + err.message +
-                '（file:// 下无法读取本地文件，请用 serve.bat 启动本地服务）');
+                '（file:// 下无法读取本地文件，请用 serve.bat 启动本地服务）', false, 'fail');
         }
     };
 
@@ -1309,7 +1314,7 @@
                 }
                 if (guard.cancel)
                 {
-                    global.MV.ui.setInfo('已取消载入：' + file.name);
+                    global.MV.ui.setInfo('已取消载入：' + file.name, false, 'warn');
                     continue;
                 }
                 if (guard.pct)
@@ -1323,10 +1328,10 @@
                 global.MV.ui.setProgress(false, '');
                 if (err && err.message === '__abort__')
                 {
-                    global.MV.ui.setInfo('已取消载入');
+                    global.MV.ui.setInfo('已取消载入', false, 'warn');
                     break;
                 }
-                global.MV.ui.setInfo('载入失败: ' + file.name + ' — ' + err.message);
+                global.MV.ui.setInfo('载入失败: ' + file.name + ' — ' + err.message, false, 'fail');
                 console.error(err);
             }
         }
@@ -1352,7 +1357,9 @@
        就按“文件名 + 大小”在 HoleOptimize/data 下反查（命中才填，静默失败） */
     App.prototype.locateSource = function (layer)
     {
-        if (layer.sourceUrl || !layer.sourceFile || !global.fetch)
+        /* 只在「还没有路径」时反查。URL 载入也走这里 —— 用 ?url= 打开
+         * 数据目录里的文件时，同样能补出真实路径。 */
+        if (layer.absPath || !layer.sourceFile || !global.fetch)
         {
             return;
         }
@@ -1414,11 +1421,17 @@
     App.prototype.loadOne = async function (file, slots, limitOpts)
     {
         var self = this;
+        var UI = global.MV.ui;
+        var tOpen = UI.nowMs();
+        var dlMs = file._downloadMs || 0;
+        /* 是否来自「载入 → 最近」：日志里标出来，便于区分重开与首次导入 */
+        var fromRecent = !!this._recentLoading;
         // 只有「导入前完全没有图层」才自动适配视角；之后导入一律保持当前相机
         var wasEmpty = this.layers.length === 0;
 
         global.MV.ui.setProgress(true, '读取 ' + file.name, 0);
 
+        var tParse = UI.nowMs();
         var data = await global.MV.loaders.loadFile(file,
             {
                 maxTriangles: (limitOpts && limitOpts.maxTriangles) ||
@@ -1445,10 +1458,12 @@
                 return global.MV.ui.showColumnDialog(info);
             });
 
+        var parseMs = UI.nowMs() - tParse;
+
         if (!data)
         {
             global.MV.ui.setProgress(false, '');
-            global.MV.ui.setInfo('已取消导入 ' + file.name);
+            global.MV.ui.setInfo('已取消导入 ' + file.name, false, 'warn');
             this.loading = false;
             return;
         }
@@ -1462,6 +1477,22 @@
             // 记住原始文件：供“孔位优化”上传原始字节（bridge 服务使用）
             layer.sourceFile = file;
             layer.sourceUrl = file.sourceUrl || '';   // 来源地址（?url= 载入时有值）
+
+            /* /file?path= 这类地址的参数里就是真实绝对路径，直接落成 absPath：
+             * 不必再等 /locate 去「按名字猜」，也保证了属性面板一定有路径可显示 */
+            if (layer.sourceUrl)
+            {
+                try
+                {
+                    var su0 = new global.URL(layer.sourceUrl, global.location.href);
+                    if (su0.pathname === '/file')
+                    {
+                        var pp0 = su0.searchParams.get('path');
+                        if (pp0) { layer.absPath = pp0; }
+                    }
+                }
+                catch (e0) { /* 非标准地址，忽略 */ }
+            }
             // 拖入 / 选择来的文件持有一个文件句柄（浏览器不给路径，但能重开）
             layer.hasFileRef = !!(global.MV.ui.handleOf && global.MV.ui.handleOf(file));
             self.locateSource(layer);                 // 异步补全磁盘绝对路径（能查到才显示）
@@ -1643,6 +1674,17 @@
         }
         global.MV.ui.setInfo(file.name + ' — ' + info);
 
+        /* 载入是唯一「进度条走完就什么都没留下」的耗时操作，
+         * 这里补一条汇总：总时长 + 三段明细，方便回看换机/换数据后的差异 */
+        var allMs = UI.nowMs() - tOpen + dlMs;
+        var buildMs = Math.max(0, allMs - dlMs - parseMs);
+        var segs = [];
+        if (dlMs > 0) { segs.push('下载 ' + UI.fmtDur(dlMs)); }
+        segs.push('解析 ' + UI.fmtDur(parseMs));
+        segs.push('建层 ' + UI.fmtDur(buildMs));
+        UI.logTiming((fromRecent ? '载入（历史）' : '载入') + ' ' + file.name,
+            allMs, segs.join(' / '), true);
+
         await new Promise(function (r) { setTimeout(r, 0); });
     };
 
@@ -1739,6 +1781,111 @@
                 global.MV.ui.setInfo(msg + ' · 当前环境不支持剪贴板');
             }
         }, 'image/png');
+    };
+
+    /* 统一的 Blob 下载：网页拿不到绝对路径，只能交给浏览器下载目录 */
+    App.prototype.downloadBlob = function (blob, fileName)
+    {
+        var url = global.URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        global.setTimeout(function () { global.URL.revokeObjectURL(url); }, 5000);
+    };
+
+    /* 导出当前选中图层；fmt: raw / stl / obj / csv / xyz */
+    App.prototype.exportSelected = function (fmt)
+    {
+        var l = this.getSelected();
+        if (!l)
+        {
+            global.MV.ui.setInfo('先在场景树里选中一个图层');
+            return false;
+        }
+
+        var E = global.MV.exporters;
+        if (!E) { global.MV.ui.setInfo('导出模块未加载'); return false; }
+
+        var blob = null;
+        var fileName = '';
+        var tExp = global.MV.ui.nowMs();
+
+        try
+        {
+            if (fmt === 'raw')
+            {
+                if (!l.sourceFile)
+                {
+                    throw new Error('该图层没有原始文件（URL 载入或派生的图层）');
+                }
+                blob = l.sourceFile;
+                fileName = l.sourceFile.name;
+            }
+            else if (fmt === 'stl')
+            {
+                blob = E.stlBinary(l.data);
+                fileName = this.exportName(l, 'stl');
+            }
+            else if (fmt === 'obj')
+            {
+                blob = E.objText(l.data);
+                fileName = this.exportName(l, 'obj');
+            }
+            else if (fmt === 'csv')
+            {
+                blob = E.pointsText(l.data, ',', true);
+                fileName = this.exportName(l, 'csv');
+            }
+            else if (fmt === 'xyz')
+            {
+                blob = E.pointsText(l.data, ' ', false);
+                fileName = this.exportName(l, 'xyz');
+            }
+            else if (fmt === 'ply')
+            {
+                blob = E.ply(l.data);
+                fileName = this.exportName(l, 'ply');
+            }
+            else if (fmt === 'pcd')
+            {
+                blob = E.pcd(l.data);
+                fileName = this.exportName(l, 'pcd');
+            }
+            else if (fmt === 'glb')
+            {
+                blob = E.glb(l.data);
+                fileName = this.exportName(l, 'glb');
+            }
+            else
+            {
+                throw new Error('未知的导出格式');
+            }
+        }
+        catch (err)
+        {
+            global.MV.ui.setInfo('导出失败：' + err.message, false, 'fail');
+            return false;
+        }
+
+        this.downloadBlob(blob, fileName);
+        global.MV.ui.setInfo('已导出 ' + fileName + '（浏览器下载目录）');
+        global.MV.ui.logTiming('导出 ' + fmt.toUpperCase(), global.MV.ui.nowMs() - tExp,
+            global.MV.memguard ? global.MV.memguard.fmtBytes(blob.size) : (blob.size + ' B'));
+        return true;
+    };
+
+    /* 用图层名做文件名：去掉路径分隔符等非法字符 */
+    App.prototype.exportName = function (layer, ext)
+    {
+        var base = String(layer.name || 'layer')
+            .replace(/[\\/:*?"<>|]+/g, '_')
+            .replace(/\s+/g, '_')
+            .replace(/\.[^.]*$/, '');
+
+        return (base || 'layer') + '.' + ext;
     };
 
     /* 恢复默认朝向（回到初始的斜 45° 俯视） */

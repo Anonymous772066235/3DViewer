@@ -800,11 +800,28 @@ body.split-dragging {
     white-space: pre-wrap;
     word-break: break-word;
 }
-.st-log-row > .t { flex: 0 0 auto; opacity: .55; }
-.st-log-row.err { color: #ff6b6b; }
-.st-log-row.warn { color: #e0a63c; }
+/* 日志级别（统一 4 个字母）：
+ *   info  继承日志区默认色（--dim 说明灰）
+ *   warn  黄  #e0a63c / 浅色 #9a6a00
+ *   fail  红  #ff6b6b / 浅色 #c62828 */
+.st-log-row > .t { flex: 0 0 auto; opacity: .55; font-variant-numeric: tabular-nums; }
 
-body.theme-light .st-log-row.err { color: #c62828; }
+/* 级别标签：定宽等宽，保证各行的消息左端对齐 */
+.st-log-row > .lv {
+    flex: 0 0 30px;
+    font-size: 10px;
+    line-height: 17px;
+    letter-spacing: .02em;
+    text-align: left;
+    opacity: .85;
+}
+.st-log-row.info > .lv { opacity: .45; }
+
+.st-log-row.fail { color: #ff6b6b; }
+.st-log-row.warn { color: #e0a63c; }
+.st-log-row > .m { flex: 1 1 auto; min-width: 0; }
+
+body.theme-light .st-log-row.fail { color: #c62828; }
 body.theme-light .st-log-row.warn { color: #9a6a00; }
 
 /* 单行摘要（始终可见） */

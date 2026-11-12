@@ -136,6 +136,7 @@
         }
 
         running = true;
+        var tOpt = global.MV.ui.nowMs();
         var btn = $id('btn-optimize');
         if (btn)
         {
@@ -264,6 +265,7 @@
             }
 
             say('优化完成，已自动载入右侧：' + name);
+            global.MV.ui.logTiming('孔位优化', global.MV.ui.nowMs() - tOpt, 'CLI 往返');
         }
         catch (err)
         {
@@ -273,6 +275,7 @@
             }
             showError('孔位优化失败', err.message || String(err));
             say('优化失败：' + (err.brief || String(err.message || err).split('\n')[0]));
+            global.MV.ui.logTiming('孔位优化（失败）', global.MV.ui.nowMs() - tOpt, 'CLI 往返');
         }
         finally
         {

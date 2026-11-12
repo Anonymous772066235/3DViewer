@@ -803,6 +803,7 @@
 
     function applySplit()
     {
+        var tSplit = global.MV.ui.nowMs();
         if (!preview)
         {
             say('还没有可应用的预览');
@@ -850,6 +851,10 @@
         a.markDirty();
         setMode(null);
         say('已拆分：' + lSeg.name + ' / ' + lRem.name + '（原图层已隐藏）');
+
+        var totalV = seg.positions.length + rem.positions.length;
+        var keepPct = totalV > 0 ? Math.round(seg.positions.length * 100 / totalV) : 0;
+        global.MV.ui.logTiming('裁剪拆分', global.MV.ui.nowMs() - tSplit, '保留 ' + keepPct + '%');
     }
 
     /* ---------------- 事件 ---------------- */
