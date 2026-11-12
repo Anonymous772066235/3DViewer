@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.2.8" />
+<link rel="stylesheet" href="css/style.css?v=1.0.2.9" />
 </head>
 <body>
 <div id="app">
@@ -25,6 +25,11 @@
                     <button id="btn-load-before" title="载入到 左侧 (A)">左侧 (A)</button>
                     <button id="btn-load-after" title="载入到 右侧 (B)">右侧 (B)</button>
                     <button id="btn-load-both" title="载入到 两侧 (B)">公共 (S)</button>
+                    <div class="menu-sep"></div>
+                    <div class="menu-label">最近</div>
+                    <div id="load-recent" class="load-recent"></div>
+                    <div class="menu-sep"></div>
+                    <button id="btn-recent-clear" class="menu-quiet" title="清空载入历史">清空历史</button>
                 </div>
             </div>
             <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗</button>
@@ -612,15 +617,15 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.2.8"></script>
-    <script src="js/io.js?v=1.0.2.8"></script>
-    <script src="js/algo.js?v=1.0.2.8"></script>
-    <script src="js/render.js?v=1.0.2.8"></script>
+    <script src="js/core.js?v=1.0.2.9"></script>
+    <script src="js/io.js?v=1.0.2.9"></script>
+    <script src="js/algo.js?v=1.0.2.9"></script>
+    <script src="js/render.js?v=1.0.2.9"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.2.8"></script>
-    <script src="js/plugins/optimize.js?v=1.0.2.8"></script>
-    <script src="js/ui.js?v=1.0.2.8"></script>
-    <script src="js/app.js?v=1.0.2.8"></script>
+    <script src="js/plugins/registry.js?v=1.0.2.9"></script>
+    <script src="js/plugins/optimize.js?v=1.0.2.9"></script>
+    <script src="js/ui.js?v=1.0.2.9"></script>
+    <script src="js/app.js?v=1.0.2.9"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

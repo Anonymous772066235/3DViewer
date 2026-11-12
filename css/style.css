@@ -2841,3 +2841,102 @@ button.primary:disabled {
     justify-content: space-between;
     gap: 6px;
 }
+
+/* ================== 载入历史（下拉菜单内） ================== */
+.menu-sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--line);
+}
+
+.menu-label {
+    padding: 4px 10px 2px;
+    font-size: 11px;
+    color: var(--dim);
+}
+
+.load-recent {
+    max-height: 232px;
+    overflow-y: auto;
+}
+
+.load-recent .recent-empty {
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--dim);
+}
+
+.recent-item {
+    display: flex;
+    align-items: stretch;
+}
+
+.recent-item .recent-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 4px 8px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.recent-item .recent-main:hover { background: var(--bg-hover); }
+
+.recent-item .recent-name {
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.recent-item .recent-meta {
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 10px;
+    color: var(--dim);
+}
+
+/* 查不到绝对路径的条目（磁盘选择且服务未运行）：置灰，点击会提示重新选择 */
+.recent-item.unusable .recent-name { color: var(--dim); }
+
+.recent-item .recent-del {
+    flex: 0 0 auto;
+    width: 22px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.recent-item .recent-del:hover {
+    color: var(--danger);
+    background: var(--bg-hover);
+}
+
+.menu-quiet {
+    width: 100%;
+    padding: 5px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.menu-quiet:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+}

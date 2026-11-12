@@ -1431,10 +1431,46 @@
         }
         $('p-stat').textContent = txt;
 
-        var pathText = layer.absPath || layer.sourceUrl ||
-            '（未解析：浏览器不暴露本地路径；放入 data 目录或用 HOLEOPT_SEARCH 指定搜索根）';
-        /* URL 形式加载时路径里是 %E6%A7%BD... 这样的编码串，中文文件名会显示成乱码 */
-        try { pathText = decodeURI(pathText); } catch (e) { /* 保持原样 */ }
+        /* 路径栏的优先级：
+         *   1. absPath —— /locate 反查到的绝对路径，最准确
+         *   2. /file?path= 地址里的 path 参数 —— 这类载入本身就是按路径开的
+         *   3. sourceUrl —— 普通 URL 载入
+         * 都没有就说明确实解析不出来，给出可操作的提示而不是空白。 */
+        var pathText = layer.absPath || '';
+        var pathFromFileApi = false;
+
+        if (!pathText && layer.sourceUrl)
+        {
+            try
+            {
+                var su = new global.URL(layer.sourceUrl, global.location.href);
+                if (su.pathname === '/file')
+                {
+                    var pp = su.searchParams.get('path');
+                    if (pp) { pathText = pp; pathFromFileApi = true; }
+                }
+                if (!pathText) { pathText = layer.sourceUrl; }
+            }
+            catch (e2)
+            {
+                pathText = layer.sourceUrl;
+            }
+        }
+
+        if (!pathText)
+        {
+            pathText = layer.hasFileRef
+                ? '（拖入的文件：浏览器不提供绝对路径；引用已记录，可从「载入 → 最近」重开）'
+                : '（未能解析：浏览器不暴露本地路径；' +
+                  '把文件放进 HoleOptimize/data，或用 HOLEOPT_SEARCH 指定搜索根）';
+        }
+
+        /* URL 形式加载时路径里可能是 %E6%A7%BD... 编码串，中文文件名会显示成乱码 */
+        if (!pathFromFileApi)
+        {
+            try { pathText = decodeURI(pathText); } catch (e3) { /* 保持原样 */ }
+        }
+
         $('p-path').textContent = pathText;
         $('p-path').title = pathText;
     }
@@ -4327,6 +4363,7 @@
         bindProps();
         bindViewOpts();
         bindMenus();
+        bindRecent();
         bindColorPop();
         bindStatusbar();
         bindXform();
@@ -4742,6 +4779,371 @@
         });
     }
 
+    /* ============ 文件句柄（File System Access） ============
+     * 浏览器不会把拖入文件的绝对路径交给页面，所以「重开」不能靠路径。
+     * getAsFileSystemHandle() 给出的 FileSystemFileHandle 是对该文件的真实引用，
+     * 可以存进 IndexedDB 跨会话保留；再次打开时用 queryPermission / getFile 取回。
+     * 这样任意目录（桌面、U 盘、网络盘）的文件都能从历史重新导入，且不靠猜测。
+     */
+    var HANDLE_DB = 'viewer3d-fs';
+    var HANDLE_STORE = 'handles';
+
+    /* 本次会话内的 file → handle 映射（避免把属性挂在 File 对象上） */
+    var fileHandleMap = (global.WeakMap ? new global.WeakMap() : null);
+
+    function setHandleOf(file, handle)
+    {
+        if (fileHandleMap && file && handle) { fileHandleMap.set(file, handle); }
+    }
+
+    function handleOf(file)
+    {
+        return (fileHandleMap && file) ? (fileHandleMap.get(file) || null) : null;
+    }
+
+    /* 连接复用：每次读写都 open 一次既慢又可能被其它标签页的升级阻塞 */
+    var handleDbPromise = null;
+
+    function handleDb()
+    {
+        if (handleDbPromise) { return handleDbPromise; }
+
+        handleDbPromise = new Promise(function (resolve, reject)
+        {
+            if (!global.indexedDB)
+            {
+                reject(new Error('浏览器不支持 IndexedDB'));
+                return;
+            }
+            var req = global.indexedDB.open(HANDLE_DB, 1);
+            req.onupgradeneeded = function ()
+            {
+                var db = req.result;
+                if (!db.objectStoreNames.contains(HANDLE_STORE))
+                {
+                    db.createObjectStore(HANDLE_STORE);
+                }
+            };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function ()
+            {
+                handleDbPromise = null;
+                reject(req.error || new Error('IndexedDB 打开失败'));
+            };
+        });
+
+        return handleDbPromise;
+    }
+
+    /* 加超时：宁可报错，也不要让「正在恢复…」一直挂着 */
+    function withTimeout(promise, ms, text)
+    {
+        return new Promise(function (resolve, reject)
+        {
+            var done = false;
+            var timer = setTimeout(function ()
+            {
+                if (done) { return; }
+                done = true;
+                reject(new Error(text || '操作超时'));
+            }, ms || 8000);
+
+            promise.then(function (v)
+            {
+                if (done) { return; }
+                done = true;
+                clearTimeout(timer);
+                resolve(v);
+            }, function (e)
+            {
+                if (done) { return; }
+                done = true;
+                clearTimeout(timer);
+                reject(e);
+            });
+        });
+    }
+
+    function handlePut(id, handle)
+    {
+        return handleDb().then(function (db)
+        {
+            return new Promise(function (resolve, reject)
+            {
+                var tx = db.transaction(HANDLE_STORE, 'readwrite');
+                tx.objectStore(HANDLE_STORE).put(handle, id);
+                tx.oncomplete = function () { resolve(id); };
+                tx.onerror = function () { reject(tx.error || new Error('写入失败')); };
+            });
+        });
+    }
+
+    function handleGet(id)
+    {
+        return handleDb().then(function (db)
+        {
+            return new Promise(function (resolve, reject)
+            {
+                var tx = db.transaction(HANDLE_STORE, 'readonly');
+                var rq = tx.objectStore(HANDLE_STORE).get(id);
+                rq.onsuccess = function () { resolve(rq.result || null); };
+                rq.onerror = function () { reject(rq.error || new Error('读取失败')); };
+            });
+        });
+    }
+
+    function handleDel(id)
+    {
+        return handleDb().then(function (db)
+        {
+            return new Promise(function (resolve)
+            {
+                var tx = db.transaction(HANDLE_STORE, 'readwrite');
+                tx.objectStore(HANDLE_STORE).delete(id);
+                tx.oncomplete = function () { resolve(true); };
+                tx.onerror = function () { resolve(false); };
+            });
+        }).catch(function () { });
+    }
+
+    /* 取回文件：必要时请求一次读权限（点击条目本身是用户手势，满足要求） */
+    function reopenHandle(id)
+    {
+        return withTimeout(handleGet(id), 8000, '读取文件引用超时').then(function (h)
+        {
+            if (!h) { throw new Error('这条历史没有可用的文件引用'); }
+
+            var opts = { mode: 'read' };
+            var q = h.queryPermission ? h.queryPermission(opts) : Promise.resolve('granted');
+
+            /* 取回文件后把句柄绑回 File：这样重开的图层同样带 hasFileRef，
+             * 路径栏会继续提示「拖入的文件」，而不是退化成完全未知。 */
+            function take()
+            {
+                return h.getFile().then(function (f)
+                {
+                    setHandleOf(f, h);
+                    return f;
+                });
+            }
+
+            return q.then(function (st)
+            {
+                if (st === 'granted') { return take(); }
+                if (!h.requestPermission) { throw new Error('无法请求文件读取权限'); }
+                return h.requestPermission(opts).then(function (st2)
+                {
+                    if (st2 === 'granted') { return take(); }
+                    throw new Error('未获得读取权限');
+                });
+            });
+        });
+    }
+
+    /* ==================== 载入历史（最近 10 个） ====================
+     * 只有两类条目能真正重开：
+     *   url  —— 由 ?url= 载入，sourceUrl 是完整地址，可直接再取
+     *   path —— 磁盘选择 / 拖拽的文件：浏览器不给路径，但 /locate 能按
+     *           「文件名 + 大小」反查出绝对路径，再由 GET /file?path= 回读
+     * disk 是查不到路径的残条目，只能提示用户重新选择。
+     */
+    var RECENT_KEY = 'viewer3d.recent';
+    var RECENT_MAX = 10;
+
+    function recentRead()
+    {
+        try
+        {
+            var raw = global.localStorage.getItem(RECENT_KEY);
+            var arr = raw ? JSON.parse(raw) : [];
+            return Object.prototype.toString.call(arr) === '[object Array]' ? arr : [];
+        }
+        catch (e) { return []; }
+    }
+
+    function recentWrite(list)
+    {
+        try
+        {
+            global.localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
+        }
+        catch (e) { /* 配额已满 / 隐私模式 */ }
+    }
+
+    function recentKeyOf(it)
+    {
+        if (it && it.kind === 'path' && it.path) { return 'p|' + it.path; }
+        if (it && it.kind === 'url' && it.url) { return 'u|' + it.url; }
+        return 'd|' + ((it && it.name) || '') + '|' + ((it && it.size) || 0);
+    }
+
+    function recentSlotLabel(code)
+    {
+        return ({ A: '左侧', B: '右侧', S: '公共' })[code] || '公共';
+    }
+
+    function recentAgo(t)
+    {
+        if (!t) { return ''; }
+        var d = Math.max(0, Date.now() - t) / 1000;
+        if (d < 60) { return '刚刚'; }
+        if (d < 3600) { return Math.floor(d / 60) + ' 分钟前'; }
+        if (d < 86400) { return Math.floor(d / 3600) + ' 小时前'; }
+        return Math.floor(d / 86400) + ' 天前';
+    }
+
+    function recentSize(n)
+    {
+        if (!n) { return ''; }
+        return n < 1048576
+            ? Math.round(n / 1024) + ' KB'
+            : (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    /* 记录一次成功载入；同一条目重复载入只更新时间并置顶 */
+    function pushRecent(entry)
+    {
+        if (!entry || !entry.name) { return; }
+
+        var list = recentRead();
+        var key = recentKeyOf(entry);
+        var out = [entry];
+
+        for (var i = 0; i < list.length && out.length < RECENT_MAX; i++)
+        {
+            if (recentKeyOf(list[i]) !== key) { out.push(list[i]); }
+        }
+
+        recentWrite(out);
+        renderLoadRecent();
+    }
+
+    /* /locate 命中后，把「无法重开」的 disk 条目升级成可按路径重开的 path 条目 */
+    function upgradeRecentPath(name, size, absPath)
+    {
+        if (!name || !absPath) { return; }
+
+        var list = recentRead();
+        var changed = false;
+
+        for (var i = 0; i < list.length; i++)
+        {
+            var it = list[i];
+            if (it.kind === 'disk' && it.name === name && (it.size || 0) === (size || 0))
+            {
+                list[i] = {
+                    kind: 'path',
+                    path: absPath,
+                    name: it.name,
+                    size: it.size,
+                    slot: it.slot,
+                    t: it.t
+                };
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            recentWrite(list);
+            renderLoadRecent();
+        }
+    }
+
+    function removeRecent(idx)
+    {
+        var list = recentRead();
+        if (idx < 0 || idx >= list.length) { return; }
+        list.splice(idx, 1);
+        recentWrite(list);
+        renderLoadRecent();
+    }
+
+    function renderLoadRecent()
+    {
+        var box = $('load-recent');
+        if (!box) { return; }
+
+        var list = recentRead();
+        box.innerHTML = '';
+
+        if (!list.length)
+        {
+            var empty = document.createElement('div');
+            empty.className = 'recent-empty';
+            empty.textContent = '（暂无记录）';
+            box.appendChild(empty);
+            return;
+        }
+
+        for (var i = 0; i < list.length; i++)
+        {
+            (function (it, idx)
+            {
+                var row = document.createElement('div');
+                row.className = 'recent-item' + (it.kind === 'disk' ? ' unusable' : '');
+
+                var main = document.createElement('button');
+                main.className = 'recent-main';
+                main.title = it.kind === 'path' ? it.path
+                    : (it.kind === 'url' ? it.url
+                        : (it.kind === 'handle'
+                            ? it.name + '（浏览器托管的文件引用，不暴露真实路径）'
+                            : it.name + '（查不到路径，需重新选择文件）'));
+
+                var nm = document.createElement('span');
+                nm.className = 'recent-name';
+                nm.textContent = it.name;
+                main.appendChild(nm);
+
+                var meta = document.createElement('span');
+                meta.className = 'recent-meta';
+                meta.textContent = [
+                    recentSlotLabel(it.slot),
+                    recentSize(it.size),
+                    recentAgo(it.t),
+                    it.kind === 'disk' ? '需重新选择'
+                        : (it.kind === 'handle' ? '可重开' : '')
+                ].filter(Boolean).join(' · ');
+                main.appendChild(meta);
+
+                main.addEventListener('click', function ()
+                {
+                    if (global.MV.app && global.MV.app.openRecent) { global.MV.app.openRecent(it); }
+                });
+
+                var del = document.createElement('button');
+                del.className = 'recent-del';
+                del.title = '从历史中移除';
+                del.textContent = '×';
+                del.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    removeRecent(idx);
+                });
+
+                row.appendChild(main);
+                row.appendChild(del);
+                box.appendChild(row);
+            })(list[i], i);
+        }
+    }
+
+    function bindRecent()
+    {
+        var btn = $('btn-recent-clear');
+        if (btn)
+        {
+            btn.addEventListener('click', function (ev)
+            {
+                ev.stopPropagation();
+                recentWrite([]);
+                renderLoadRecent();
+            });
+        }
+        renderLoadRecent();
+    }
+
     /* ---- bindMenus ---- */
     function bindMenus()
     {
@@ -4783,6 +5185,7 @@
                     hideTopMenus();
                     if (willOpen)
                     {
+                        if (it.menu.id === 'load-menu') { renderLoadRecent(); }
                         it.menu.classList.remove('hidden');
                         it.btn.classList.add('active');
                     }
@@ -5254,6 +5657,14 @@
 
     global.MV.ui = {
         init: init,
+        pushRecent: pushRecent,
+        saveHandle: handlePut,
+        dropHandle: handleDel,
+        reopenHandle: reopenHandle,
+        setHandleOf: setHandleOf,
+        handleOf: handleOf,
+        upgradeRecentPath: upgradeRecentPath,
+        renderLoadRecent: renderLoadRecent,
         renderTree: renderTree,
         refreshUI: refreshUI,
         forceRenderTree: forceRenderTree,
@@ -5395,10 +5806,44 @@
                 return;
             }
 
+            /* getAsFileSystemHandle 必须在事件回调里同步发起（等异步回来就失效了），
+             * 拿到句柄后与 File 一一配对；句柄用于「下次从历史重开」，与路径无关。 */
+            var items = e.dataTransfer.items || [];
+            var pending = [];
+            for (var hi = 0; hi < files.length; hi++)
+            {
+                var it = items[hi];
+                /* 合成事件 / 非真实拖拽时 getAsFileSystemHandle 可能同步抛错，
+                 * 这里单独兜住，绝不能因此让整次拖入失败 */
+                try
+                {
+                    pending.push((it && it.getAsFileSystemHandle)
+                        ? Promise.resolve(it.getAsFileSystemHandle())
+                            .then(null, function () { return null; })
+                        : Promise.resolve(null));
+                }
+                catch (e2)
+                {
+                    pending.push(Promise.resolve(null));
+                }
+            }
+
             var slot = slotAt(e.clientX);
             var where = slot === 'A' ? '左侧 (A)' : (slot === 'B' ? '右侧 (B)' : '公共场景');
             global.MV.ui.setInfo('正在导入 ' + files.length + ' 个文件到' + where + ' …');
-            self.addFiles(files, slot);
+
+            Promise.all(pending).then(function (handles)
+            {
+                for (var k = 0; k < files.length; k++)
+                {
+                    var hd = handles[k];
+                    if (hd && hd.kind === 'file') { setHandleOf(files[k], hd); }
+                }
+                self.addFiles(files, slot);
+            }, function ()
+            {
+                self.addFiles(files, slot);   // 取句柄失败也要能导入
+            });
         });
     };
 

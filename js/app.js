@@ -368,7 +368,52 @@
         }
     };
 
-    App.prototype.loadFromUrl = async function (url, slot)
+    /* 载入历史点一条：
+     *   url  —— 直接再取该地址
+     *   path —— 由服务端 GET /file?path= 回读（浏览器自己读不了本地路径）
+     *   disk —— 拿不到路径，只能提示重新选择 */
+    App.prototype.openRecent = function (item)
+    {
+        if (!item) { return; }
+
+        var slot = item.slot || 'A';
+
+        // 标记本次载入来自历史：成功后只把原条目置顶，不再追加重复记录
+        this._recentLoading = item;
+
+        if (item.kind === 'url' && item.url)
+        {
+            this.loadFromUrl(item.url, slot, item.name);
+            return;
+        }
+
+        if (item.kind === 'path' && item.path)
+        {
+            this.loadFromUrl('/file?path=' + encodeURIComponent(item.path), slot, item.name);
+            return;
+        }
+
+        if (item.kind === 'handle' && item.handleId)
+        {
+            var self = this;
+            global.MV.ui.setInfo('正在恢复「' + item.name + '」…');
+            global.MV.ui.reopenHandle(item.handleId).then(function (file)
+            {
+                return self.addFiles([file], slot);
+            }).then(null, function (err)
+            {
+                global.MV.ui.setInfo('无法恢复「' + item.name + '」：' + err.message +
+                    '（文件可能已被移动或删除）');
+            });
+            return;
+        }
+
+        global.MV.ui.setInfo('「' + item.name +
+            '」当初由本地选择载入，浏览器拿不到它的路径，请重新选择文件');
+        this.pickFiles(slot);
+    };
+
+    App.prototype.loadFromUrl = async function (url, slot, nameHint)
     {
         global.MV.ui.setProgress(true, '下载 ' + url, 0);
         try
@@ -379,7 +424,8 @@
                 throw new Error('HTTP ' + resp.status);
             }
             var buf = await resp.arrayBuffer();
-            var name = decodeURIComponent((url.split('/').pop() || 'model').split('?')[0]);
+            // /file?path=... 这类地址的末段没有文件名，允许调用方直接给
+            var name = nameHint || decodeURIComponent((url.split('/').pop() || 'model').split('?')[0]);
             var file = new global.File([buf], name);
 
             // 记录完整访问地址（浏览器能拿到的最接近“绝对路径”的信息）
@@ -1113,6 +1159,43 @@
     App.prototype.pickFiles = function (slot)
     {
         this.pendingSlot = slot;
+
+        /* 支持 File System Access 的浏览器走 showOpenFilePicker：
+         * 与拖入一致能拿到 FileSystemFileHandle，历史里就能无损重开。
+         * 不支持或调用失败时退回 <input type=file>（只能靠 /locate 补路径）。 */
+        if (global.showOpenFilePicker)
+        {
+            var self = this;
+            global.showOpenFilePicker({ multiple: true })
+                .then(function (handles)
+                {
+                    var files = [];
+                    var chain = Promise.resolve();
+                    for (var i = 0; i < handles.length; i++)
+                    {
+                        (function (h)
+                        {
+                            chain = chain.then(function () { return h.getFile(); })
+                                .then(function (f)
+                                {
+                                    files.push(f);
+                                    if (global.MV.ui.setHandleOf) { global.MV.ui.setHandleOf(f, h); }
+                                });
+                        })(handles[i]);
+                    }
+                    return chain.then(function ()
+                    {
+                        if (files.length) { return self.addFiles(files, slot); }
+                    });
+                })
+                .catch(function (err)
+                {
+                    if (err && err.name === 'AbortError') { return; }   // 用户取消
+                    document.getElementById('file-input').click();
+                });
+            return;
+        }
+
         document.getElementById('file-input').click();
     };
 
@@ -1206,6 +1289,11 @@
             if (j && j.path)
             {
                 layer.absPath = j.path;
+                if (global.MV.ui.upgradeRecentPath)
+                {
+                    // 让历史里那条「需重新选择」变成可按路径重开
+                    global.MV.ui.upgradeRecentPath(f.name, f.size, j.path);
+                }
                 global.MV.ui.refreshUI();
             }
         }).catch(function ()
@@ -1295,6 +1383,8 @@
             // 记住原始文件：供“孔位优化”上传原始字节（bridge 服务使用）
             layer.sourceFile = file;
             layer.sourceUrl = file.sourceUrl || '';   // 来源地址（?url= 载入时有值）
+            // 拖入 / 选择来的文件持有一个文件句柄（浏览器不给路径，但能重开）
+            layer.hasFileRef = !!(global.MV.ui.handleOf && global.MV.ui.handleOf(file));
             self.locateSource(layer);                 // 异步补全磁盘绝对路径（能查到才显示）
             if (layer.kind === 'mesh')
             {
@@ -1387,6 +1477,64 @@
             if (!firstLayer)
             {
                 firstLayer = layer;
+            }
+        }
+
+        /* 记入载入历史：URL 来源直接记完整地址；磁盘来源先记「残条目」，
+         * 等 /locate 反查到绝对路径后再升级成可重开的 path 条目。
+         * 自动化场景（?demo=）不写，避免污染列表。 */
+        if (global.MV.ui && global.MV.ui.pushRecent &&
+            !(global.MV.config && global.MV.config.demo))
+        {
+            var fromHistory = self._recentLoading;
+            self._recentLoading = null;
+
+            /* 拿到句柄就存进 IndexedDB —— 句柄是对文件的真实引用，
+             * 下次从历史重开时不需要路径、也不需要按文件名去猜。 */
+            var fh = global.MV.ui.handleOf ? global.MV.ui.handleOf(file) : null;
+            var handleId = '';
+            if (fh && global.MV.ui.saveHandle)
+            {
+                handleId = 'h' + Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 7);
+                global.MV.ui.saveHandle(handleId, fh);
+            }
+
+            if (fromHistory)
+            {
+                // 从历史点开的：沿用原条目，别被 /file 地址覆盖成新的 url 记录
+                global.MV.ui.pushRecent({
+                    kind: fromHistory.kind,
+                    path: fromHistory.path,
+                    url: fromHistory.url,
+                    handleId: fromHistory.handleId || handleId,
+                    name: fromHistory.name,
+                    size: fromHistory.size,
+                    slot: slots[0],
+                    t: Date.now()
+                });
+            }
+            else if (handleId)
+            {
+                global.MV.ui.pushRecent({
+                    kind: 'handle',
+                    handleId: handleId,
+                    name: file.name,
+                    size: file.size,
+                    slot: slots[0],
+                    t: Date.now()
+                });
+            }
+            else
+            {
+                global.MV.ui.pushRecent({
+                    kind: file.sourceUrl ? 'url' : 'disk',
+                    url: file.sourceUrl || '',
+                    name: file.name,
+                    size: file.size,
+                    slot: slots[0],
+                    t: Date.now()
+                });
             }
         }
 

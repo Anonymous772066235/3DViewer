@@ -70,6 +70,38 @@ for _extra in re.split(r'[;|]', os.environ.get('HOLEOPT_SEARCH', '')):
 PORT = int(os.environ.get('HOLEOPT_PORT', '8790'))
 TIMEOUT = int(os.environ.get('HOLEOPT_TIMEOUT', '1800'))   # 秒
 
+# 允许通过 /file 回读的扩展名（与前端 <input accept> 对齐）
+VIEW_EXT = ('.stl', '.obj', '.ply', '.txt', '.xyz', '.csv', '.asc', '.pts')
+
+
+def servable_path(raw):
+    """把 /file?path= 的参数解析成可读的绝对路径。
+
+    安全约束（缺一不可）：
+      1. 必须是绝对路径，且确实是个文件
+      2. 扩展名在白名单内，避免变成任意文件读取
+      3. realpath 之后仍落在 SEARCH_ROOTS 的 realpath 之内
+         —— 这一步同时挡掉 ../ 穿越和符号链接逃逸
+    """
+    if not raw:
+        return None
+    try:
+        p = os.path.normpath(raw)
+    except Exception:
+        return None
+    if not os.path.isabs(p) or not os.path.isfile(p):
+        return None
+    if os.path.splitext(p)[1].lower() not in VIEW_EXT:
+        return None
+
+    real = os.path.realpath(p)
+    for root in SEARCH_ROOTS:
+        r = os.path.realpath(root)
+        if real == r or real.startswith(r + os.sep):
+            return real
+    return None
+
+
 MESH_EXT = ('.stl', '.obj')
 
 # ---------------- 日志（控制台 + bridge.log） ----------------

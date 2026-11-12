@@ -9,6 +9,7 @@
 """
 import mimetypes
 import os
+import shutil
 import sys
 import threading
 import urllib.parse
@@ -46,10 +47,48 @@ class Handler(opt.Handler):
             })
             return
 
+        if path.startswith('/file'):
+            return self._serve_file()
+
         if path.startswith('/log') or path.startswith('/locate'):
             return opt.Handler.do_GET(self)
 
         self._serve_static(path)
+
+    def _serve_file(self):
+        """按绝对路径回读数据文件（供「载入历史」重开用）。
+
+        只接受本机请求，路径必须落在 opt.SEARCH_ROOTS 之内；
+        以流式方式发出，避免把几百 MB 的文件整体读进内存。
+        """
+        if self.client_address[0] not in ('127.0.0.1', '::1'):
+            self._json(403, {'error': 'only localhost'})
+            return
+
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        raw = urllib.parse.unquote((q.get('path') or [''])[0])
+        full = opt.servable_path(raw)
+        if not full:
+            self._json(404, {'error': 'not allowed or not found', 'path': raw})
+            return
+
+        ctype = mimetypes.guess_type(full)[0] or 'application/octet-stream'
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            self._json(500, {'error': 'stat failed'})
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(size))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            with open(full, 'rb') as fh:
+                shutil.copyfileobj(fh, self.wfile, 1 << 20)
+        except Exception:
+            pass        # 客户端中途取消
 
     def _serve_static(self, path):
         rel = urllib.parse.unquote(path).lstrip('/')
