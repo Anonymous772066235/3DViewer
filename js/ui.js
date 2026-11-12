@@ -4364,6 +4364,7 @@
         bindViewOpts();
         bindMenus();
         bindRecent();
+        bindSplitDrag();
         bindColorPop();
         bindStatusbar();
         bindXform();
@@ -4439,14 +4440,6 @@
             if (cb)
             {
                 cb(null);
-            }
-        });
-
-        document.addEventListener('keydown', function (ev)
-        {
-            if (ev.key === 'Escape' && !$('modal').classList.contains('hidden'))
-            {
-                hideConfirm();
             }
         });
 
@@ -5144,6 +5137,105 @@
         renderLoadRecent();
     }
 
+    /* ---- 双窗分隔线：左右拖动 ----
+     * 拖到接近边缘（<5% 或 >95%）时，比例会缓动到贴边并切进单窗模式，
+     * 退出单窗时再从贴边展开回原比例，避免「啪」地跳变。 */
+    function bindSplitDrag()
+    {
+        var line = $('split-line');
+        var area = $('view-area');
+        if (!line || !area) { return; }
+
+        var dragging = false;
+
+        function ratioAt(clientX)
+        {
+            var r = area.getBoundingClientRect();
+            if (r.width < 20) { return 0.5; }
+            return (clientX - r.left) / r.width;
+        }
+
+        /* 角标「左侧 (A)」离视口左缘 12px，两侧各留一点余量；
+         * 视图一旦窄到这个宽度角标就会被裁掉，那之前就切单窗 */
+        function tagNeed()
+        {
+            var l = $('tag-left'), r = $('tag-right');
+            var w = Math.max(l ? l.offsetWidth : 0, r ? r.offsetWidth : 0);
+            return w + 30;
+        }
+
+        function collapse(dir)
+        {
+            var app = global.MV.app;
+            if (!app) { return; }
+
+            app.animateSplitRatio(dir < 0 ? 0 : 1, 170, function ()
+            {
+                app.setSingleView(true);
+            });
+        }
+
+        function stop()
+        {
+            if (!dragging) { return; }
+            dragging = false;
+            document.body.classList.remove('split-dragging');
+        }
+
+        line.addEventListener('pointerdown', function (ev)
+        {
+            var app = global.MV.app;
+            if (!app || app.settings.singleView) { return; }
+
+            dragging = true;
+            document.body.classList.add('split-dragging');
+            if (line.setPointerCapture)
+            {
+                try { line.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+            }
+            ev.preventDefault();
+        });
+
+        global.addEventListener('pointermove', function (ev)
+        {
+            if (!dragging) { return; }
+
+            var r = ratioAt(ev.clientX);
+
+            /* 判据从「固定的 5%」改成「放不下角标」：
+             * 任一侧比角标还窄，角标就会被视口裁掉，此时直接切单窗 */
+            var need = tagNeed();
+            var W = area.clientWidth;
+            var leftW = W * r;
+            var rightW = W - leftW - 2;
+
+            if (leftW <= need)
+            {
+                stop();
+                collapse(-1);
+                return;
+            }
+            if (rightW <= need)
+            {
+                stop();
+                collapse(1);
+                return;
+            }
+
+            global.MV.app.setSplitRatio(r);
+        });
+
+        global.addEventListener('pointerup', stop);
+        global.addEventListener('pointercancel', stop);
+
+        /* 窗口尺寸变化后，分隔线的像素位置要按新宽度重算 */
+        global.addEventListener('resize', function ()
+        {
+            var app = global.MV.app;
+            if (app) { app.setSplitRatio(app.settings.splitRatio); }
+        });
+    }
+
     /* ---- bindMenus ---- */
     function bindMenus()
     {
@@ -5209,14 +5301,6 @@
         });
 
         document.addEventListener('click', hideTopMenus);
-
-        window.addEventListener('keydown', function (ev)
-        {
-            if (ev.key === 'Escape')
-            {
-                hideTopMenus();
-            }
-        });
 
         // ?menu=1 默认展开工具菜单（便于截图 / 直达）
         if ((global.MV.config || {}).menu)
@@ -5302,14 +5386,6 @@
                 }
                 close();
             }, true);
-
-            window.addEventListener('keydown', function (ev)
-            {
-                if (ev.key === 'Escape')
-                {
-                    close();
-                }
-            });
 
             if ((global.MV.config || {}).colors)
             {

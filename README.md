@@ -63,7 +63,7 @@ index.html?single=1&url=model.stl&slot=A&url2=model_points.xyz&slot2=B
 | | |
 |---|---|
 | **双窗并排** | 左右两个独立视口各放一份数据，相机可独立或同步；支持把一侧作半透明叠加层投到另一侧 |
-| **多格式** | STL（binary / ASCII）、OBJ、PLY、点云文本（xyz / csv / txt） |
+| **多格式** | STL（binary / ASCII）、OBJ、PLY、OFF、GLB / glTF、PCD（ascii / binary）、点云文本（xyz / csv / txt / pts …） |
 | **三维裁剪** | 矩形 / 多边形框选，空格连续追加选区，一次拆成「选中」与「剩余」两个图层 |
 | **孔径测量** | 点击拾取点位，实时计算两点距离 |
 | **数据对齐** | N-N 手动选点配准（三维序号标记 + 实时 RMS）、ICP 精配准（可选 4PCS 全局粗配准）、4×4 矩阵直接编辑与取逆 |
@@ -130,6 +130,9 @@ python server/serve.py
 | 三角网格 | `.stl` | binary / ASCII；STL 无共享顶点信息，加载时按坐标去重（约省 80% 顶点） |
 | 三角网格 | `.obj` | 保留原始 `v` / `f` 拓扑，不做顶点合并 |
 | 三角网格 | `.ply` | ASCII / binary |
+| 三角网格 | `.off` / `.coff` | 任意边形按扇形三角化；COFF 读取顶点色 |
+| 三角网格 | `.glb` / `.gltf` | glTF 2.0；GLB 自包含，`.gltf` 需内联 `data:` buffer；自动把 Y 轴向上转成 Z 轴向上 |
+| 点云 | `.pcd` | ascii / binary；读取 `rgb` 字段并解包成顶点色 |
 | 点云 | `.xyz` `.csv` `.txt` | 空白或逗号分隔，支持额外标量列 |
 
 超过内存预算时会在加载前弹窗确认，可选择按比例下采样。

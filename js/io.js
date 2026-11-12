@@ -1323,19 +1323,614 @@
         };
     }
 
+    /* ==================== 新增格式：OFF / PCD / glTF ==================== */
+
+    /* 逐点统计包围盒（BBox 只有 empty/merge，没有累加器） */
+    function bboxAccum(pos, count)
+    {
+        var b = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+        for (var i = 0; i < count; i++)
+        {
+            var x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+            if (x < b.min[0]) { b.min[0] = x; }
+            if (y < b.min[1]) { b.min[1] = y; }
+            if (z < b.min[2]) { b.min[2] = z; }
+            if (x > b.max[0]) { b.max[0] = x; }
+            if (y > b.max[1]) { b.max[1] = y; }
+            if (z > b.max[2]) { b.max[2] = z; }
+        }
+        if (!isFinite(b.min[0])) { b.min = [0, 0, 0]; b.max = [0, 0, 0]; }
+        return b;
+    }
+
+    function readText(file)
+    {
+        if (file.text) { return file.text(); }
+        return new Promise(function (resolve, reject)
+        {
+            var fr = new global.FileReader();
+            fr.onload = function () { resolve(fr.result); };
+            fr.onerror = function () { reject(fr.error || new Error('读取失败')); };
+            fr.readAsText(file);
+        });
+    }
+
+    /* ---------------- OFF / COFF ---------------- */
+    async function parseOFF(file, opts, onProgress)
+    {
+        var o = opts || {};
+        var text = await readText(file);
+        var lines = text.split(/\r?\n/);
+        var li = 0;
+
+        function nextDataLine()
+        {
+            while (li < lines.length)
+            {
+                var l = lines[li++];
+                var t = l ? l.trim() : '';
+                if (t && t.charAt(0) !== '#') { return t; }
+            }
+            return '';
+        }
+
+        var head = nextDataLine();
+        var m = /^(C?OFF)\b(.*)$/i.exec(head);
+        if (!m) { throw new Error('不是有效的 OFF 文件：首行应为 OFF 或 COFF'); }
+
+        var withColor = /^C/i.test(m[1]);
+        var counts = (m[2] || '').trim() || nextDataLine();
+        var c = counts.split(/\s+/);
+        var nv = parseInt(c[0], 10) || 0;
+        var nf = parseInt(c[1], 10) || 0;
+        if (!nv) { throw new Error('OFF 文件里没有顶点'); }
+
+        if (onProgress) { await onProgress(0.2, 'OFF 顶点 ' + nv); }
+
+        var pos = new Float32Array(nv * 3);
+        var col = withColor ? new Float32Array(nv * 3) : null;
+
+        for (var v = 0; v < nv; v++)
+        {
+            var p = nextDataLine().split(/\s+/);
+            pos[v * 3] = +p[0];
+            pos[v * 3 + 1] = +p[1];
+            pos[v * 3 + 2] = +p[2];
+
+            if (col)
+            {
+                var r = +p[3], g = +p[4], b = +p[5];
+                /* 有的导出写 0-255，有的写 0-1 */
+                if (r > 1 || g > 1 || b > 1) { r /= 255; g /= 255; b /= 255; }
+                col[v * 3] = r; col[v * 3 + 1] = g; col[v * 3 + 2] = b;
+            }
+        }
+
+        var maxTri = o.maxTriangles || DEFAULT_MAX_TRIANGLES;
+
+        /* 面可以是任意边形，三角化后的顶点数无法预先算出，
+         * 所以用动态累加器而不是按 nf*9 预分配（四边形按 9 算会越界） */
+        var posAcc = new F32Accum(4096);
+        var colAcc = col ? new F32Accum(4096) : null;
+        var tri = 0;
+        var full = false;
+
+        for (var f = 0; f < nf && !full; f++)
+        {
+            var q = nextDataLine().split(/\s+/);
+            var n = parseInt(q[0], 10) || 0;
+            if (n < 3) { continue; }
+
+            for (var k = 1; k + 2 <= n; k++)
+            {
+                if (tri >= maxTri) { full = true; break; }
+
+                var ids = [parseInt(q[k], 10), parseInt(q[k + 1], 10), parseInt(q[k + 2], 10)];
+                var bad = false;
+                for (var e = 0; e < 3; e++)
+                {
+                    if (!(ids[e] >= 0 && ids[e] < nv)) { bad = true; }
+                }
+                if (bad) { continue; }
+
+                for (var m = 0; m < 3; m++)
+                {
+                    var vi = ids[m];
+                    posAcc.push3(pos[vi * 3], pos[vi * 3 + 1], pos[vi * 3 + 2]);
+                    if (colAcc) { colAcc.push3(col[vi * 3], col[vi * 3 + 1], col[vi * 3 + 2]); }
+                }
+                tri++;
+            }
+        }
+
+        if (!tri) { throw new Error('OFF 文件里没有面片'); }
+
+        var outPos = posAcc.result();
+        var res = {
+            kind: 'mesh',
+            positions: outPos,
+            count: tri,
+            bbox: bboxAccum(outPos, tri * 3),
+            format: withColor ? 'COFF' : 'OFF',
+            truncated: full,
+            totalSource: nf,
+            note: full ? ('仅载入前 ' + tri + ' 个三角形') : ''
+        };
+        if (colAcc) { res.colors = colAcc.result(); }
+        return res;
+    }
+
+    /* ---------------- PCD（ascii / binary） ---------------- */
+    async function parsePCD(file, opts, onProgress)
+    {
+        var o = opts || {};
+        var headLen = Math.min(file.size, 1 << 20);
+        var headBuf = await readSlice(file, 0, headLen);
+        var headText = new global.TextDecoder('utf-8').decode(new Uint8Array(headBuf));
+
+        var mData = /(?:^|\r?\n)\s*DATA\s+(\S+)/i.exec(headText);
+        if (!mData) { throw new Error('不是有效的 PCD 文件：缺少 DATA 行'); }
+
+        var dataType = (mData[1] || 'ascii').toLowerCase();
+        var dataStart = mData.index + mData[0].length + 1;   /* 换行之后 */
+        var header = headText.slice(0, mData.index);
+
+        function hval(key)
+        {
+            var mm = new RegExp('^\\s*' + key + '\\s+(.*)$', 'im').exec(header);
+            return mm ? mm[1].trim() : '';
+        }
+
+        var fields = hval('FIELDS').split(/\s+/).filter(Boolean);
+        var sizes = hval('SIZE').split(/\s+/).map(Number);
+        var types = hval('TYPE').split(/\s+/);
+        var counts = hval('COUNT').split(/\s+/).filter(Boolean).map(Number);
+        if (!counts.length) { counts = fields.map(function () { return 1; }); }
+
+        var nPts = parseInt(hval('POINTS'), 10) || 0;
+        if (!nPts)
+        {
+            nPts = (parseInt(hval('WIDTH'), 10) || 0) * (parseInt(hval('HEIGHT'), 10) || 1);
+        }
+
+        var ix = fields.indexOf('x'), iy = fields.indexOf('y'), iz = fields.indexOf('z');
+        if (ix < 0 || iy < 0 || iz < 0) { throw new Error('PCD 缺少 x / y / z 字段'); }
+        if (!nPts) { throw new Error('PCD 头里没有点数'); }
+
+        if (onProgress) { await onProgress(0.2, 'PCD ' + nPts + ' 点'); }
+
+        var pos = new Float32Array(nPts * 3);
+        var col = null;
+        var irgb = fields.indexOf('rgb') >= 0 ? fields.indexOf('rgb') : fields.indexOf('rgba');
+
+        if (dataType === 'ascii')
+        {
+            var tail = await readText(file.slice(dataStart));
+            var nums = tail.split(/[\s,]+/);
+
+            var tokOff = [];
+            var per = 0;
+            for (var ti = 0; ti < counts.length; ti++)
+            {
+                tokOff.push(per);
+                per += counts[ti];
+            }
+
+            for (var pi = 0; pi < nPts; pi++)
+            {
+                var base = pi * per;
+                pos[pi * 3] = +nums[base + tokOff[ix]];
+                pos[pi * 3 + 1] = +nums[base + tokOff[iy]];
+                pos[pi * 3 + 2] = +nums[base + tokOff[iz]];
+            }
+
+            if (irgb >= 0)
+            {
+                /* rgb 字段存的是「32 位颜色的浮点表示」，要按位还原：
+                 * 先把十进制转成 float32，再读同一块内存的 uint32 */
+                var scratchF = new Float32Array(1);
+                var scratchU = new Uint32Array(scratchF.buffer);
+                col = new Float32Array(nPts * 3);
+
+                for (var pj = 0; pj < nPts; pj++)
+                {
+                    scratchF[0] = +nums[pj * per + tokOff[irgb]];
+                    var packed = scratchU[0];
+                    col[pj * 3] = ((packed >> 16) & 255) / 255;
+                    col[pj * 3 + 1] = ((packed >> 8) & 255) / 255;
+                    col[pj * 3 + 2] = (packed & 255) / 255;
+                }
+            }
+        }
+        else if (dataType === 'binary')
+        {
+            var offs = [];
+            var stride = 0;
+            for (var fi = 0; fi < fields.length; fi++)
+            {
+                offs.push(stride);
+                stride += sizes[fi] * counts[fi];
+            }
+
+            var buf = await readSlice(file, dataStart, dataStart + nPts * stride);
+            var dv = new DataView(buf);
+
+            for (var pk = 0; pk < nPts; pk++)
+            {
+                var b0 = pk * stride;
+                pos[pk * 3] = dv.getFloat32(b0 + offs[ix], true);
+                pos[pk * 3 + 1] = dv.getFloat32(b0 + offs[iy], true);
+                pos[pk * 3 + 2] = dv.getFloat32(b0 + offs[iz], true);
+            }
+
+            if (irgb >= 0)
+            {
+                /* 二进制里无论 TYPE 写 F 还是 U，都是同一块 4 字节位模式，
+                 * 直接按 uint32 读即可 */
+                col = new Float32Array(nPts * 3);
+                for (var pm = 0; pm < nPts; pm++)
+                {
+                    var packed = dv.getUint32(pm * stride + offs[irgb], true);
+                    col[pm * 3] = ((packed >> 16) & 255) / 255;
+                    col[pm * 3 + 1] = ((packed >> 8) & 255) / 255;
+                    col[pm * 3 + 2] = (packed & 255) / 255;
+                }
+            }
+        }
+        else
+        {
+            throw new Error('PCD 的 ' + dataType + ' 压缩格式暂不支持，请另存为 ascii 或 binary');
+        }
+
+        var res = {
+            kind: 'points',
+            positions: pos,
+            count: nPts,
+            bbox: bboxAccum(pos, nPts),
+            format: 'PCD(' + dataType + ')',
+            truncated: false,
+            totalSource: nPts,
+            note: ''
+        };
+        if (col) { res.colors = col; }
+        return res;
+    }
+
+    /* ---------------- glTF 2.0（.glb / .gltf） ---------------- */
+    var GLTF_COMP = {
+        5120: ['Int8', 1], 5121: ['Uint8', 1], 5122: ['Int16', 2],
+        5123: ['Uint16', 2], 5125: ['Uint32', 4], 5126: ['Float32', 4]
+    };
+    var GLTF_NUM = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
+
+    function base64ToBytes(b64)
+    {
+        var bin = global.atob(b64);
+        var out = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }
+        return out;
+    }
+
+    function readAccessor(gltf, buffers, index)
+    {
+        var acc = gltf.accessors[index];
+        if (!acc || acc.bufferView === undefined) { return null; }
+
+        var bv = gltf.bufferViews[acc.bufferView];
+        var buf = buffers[bv.buffer];
+        if (!buf) { return null; }
+
+        var comp = GLTF_COMP[acc.componentType];
+        var num = GLTF_NUM[acc.type] || 1;
+        var elem = comp[1] * num;
+        var stride = bv.byteStride || elem;
+        var base = (bv.byteOffset || 0) + (acc.byteOffset || 0);
+        var getter = 'get' + comp[0];
+
+        var out = new Float32Array(acc.count * num);
+        var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+
+        for (var i = 0; i < acc.count; i++)
+        {
+            for (var k = 0; k < num; k++)
+            {
+                var val = dv[getter](base + i * stride + k * comp[1], true);
+                /* 归一化整数颜色（Uint8/Uint16 + normalized） */
+                if (acc.normalized && (acc.componentType === 5121 || acc.componentType === 5123))
+                {
+                    val = val / (acc.componentType === 5121 ? 255 : 65535);
+                }
+                out[i * num + k] = val;
+            }
+        }
+        return out;
+    }
+
+    function quatToMat4(q)
+    {
+        var x = q[0], y = q[1], z = q[2], w = q[3];
+        var x2 = x + x, y2 = y + y, z2 = z + z;
+        var xx = x * x2, xy = x * y2, xz = x * z2;
+        var yy = y * y2, yz = y * z2, zz = z * z2;
+        var wx = w * x2, wy = w * y2, wz = w * z2;
+
+        return [
+            1 - (yy + zz), xy + wz, xz - wy, 0,
+            xy - wz, 1 - (xx + zz), yz + wx, 0,
+            xz + wy, yz - wx, 1 - (xx + yy), 0,
+            0, 0, 0, 1
+        ];
+    }
+
+    function mulMat4(a, b)
+    {
+        var o = new Array(16);
+        for (var c = 0; c < 4; c++)
+        {
+            for (var r = 0; r < 4; r++)
+            {
+                o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
+                    a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+            }
+        }
+        return o;
+    }
+
+    function localMat4(node)
+    {
+        if (node.matrix) { return node.matrix.slice(); }
+
+        var t = node.translation || [0, 0, 0];
+        var q = node.rotation || [0, 0, 0, 1];
+        var sc = node.scale || [1, 1, 1];
+
+        var m = quatToMat4(q);
+        for (var i = 0; i < 3; i++)
+        {
+            m[i] *= sc[0];
+            m[4 + i] *= sc[1];
+            m[8 + i] *= sc[2];
+        }
+        m[12] = t[0]; m[13] = t[1]; m[14] = t[2];
+        return m;
+    }
+
+    async function parseGLTF(file, opts, onProgress, isGLB)
+    {
+        var o = opts || {};
+        var json = null;
+        var bin = null;
+
+        if (isGLB)
+        {
+            var headBuf = await readSlice(file, 0, Math.min(file.size, 12));
+            if (headBuf.byteLength < 12) { throw new Error('不是有效的 GLB 文件'); }
+            var hdv = new DataView(headBuf);
+            if (hdv.getUint32(0, true) !== 0x46546C67) { throw new Error('不是有效的 GLB 文件'); }
+
+            var total = Math.min(hdv.getUint32(8, true), file.size);
+            var all = await readSlice(file, 0, total);
+            var ad = new DataView(all);
+
+            var off = 12;
+            while (off + 8 <= all.byteLength)
+            {
+                var len = ad.getUint32(off, true);
+                var type = ad.getUint32(off + 4, true);
+                var body = new Uint8Array(all, off + 8, Math.min(len, all.byteLength - off - 8));
+
+                if (type === 0x4E4F534A)
+                {
+                    json = JSON.parse(new global.TextDecoder('utf-8').decode(body));
+                }
+                else if (type === 0x004E4942)
+                {
+                    bin = body;
+                }
+                off += 8 + len + ((4 - (len % 4)) % 4);
+            }
+            if (!json) { throw new Error('GLB 里没有 JSON 块'); }
+        }
+        else
+        {
+            json = JSON.parse(await readText(file));
+        }
+
+        var req = json.extensionsRequired || [];
+        if (req.indexOf('KHR_draco_mesh_compression') >= 0)
+        {
+            throw new Error('该 glTF 使用了 Draco 压缩，暂不支持；请导出未压缩的 .glb');
+        }
+
+        /* 取 buffer：GLB 的 BIN 块，或 .gltf 里的 data: base64 */
+        var buffers = [];
+        var blist = json.buffers || [];
+        for (var bi = 0; bi < blist.length; bi++)
+        {
+            var uri = blist[bi].uri;
+            if (!uri)
+            {
+                if (bi === 0 && bin) { buffers[0] = bin; }
+                continue;
+            }
+            var mm = /^data:[^,]*;base64,(.*)$/i.exec(uri);
+            if (!mm)
+            {
+                throw new Error('.gltf 引用了外部文件「' + uri + '」，请改用自包含的 .glb');
+            }
+            buffers[bi] = base64ToBytes(mm[1]);
+        }
+
+        if (onProgress) { await onProgress(0.25, 'glTF 解析'); }
+
+        var maxTri = o.maxTriangles || DEFAULT_MAX_TRIANGLES;
+        var posAcc = new F32Accum(4096);
+        var colAcc = null;
+        var tri = 0;
+        var full = false;
+        var hasColor = false;
+
+        function pushPrimitive(prim, world)
+        {
+            if (full) { return; }
+
+            var attrs = prim.attributes || {};
+            if (attrs.POSITION === undefined) { return; }
+
+            var P = readAccessor(json, buffers, attrs.POSITION);
+            if (!P) { return; }
+
+            var C = (attrs.COLOR_0 !== undefined) ? readAccessor(json, buffers, attrs.COLOR_0) : null;
+            var idx = (prim.indices !== undefined) ? readAccessor(json, buffers, prim.indices) : null;
+
+            var vertCount = P.length / 3;
+            var iCount = idx ? idx.length : vertCount;
+
+            if (C && !colAcc) { colAcc = new F32Accum(4096); hasColor = true; }
+
+            for (var i = 0; i + 2 < iCount; i += 3)
+            {
+                if (tri >= maxTri) { full = true; return; }
+
+                for (var k = 0; k < 3; k++)
+                {
+                    var vi = idx ? (idx[i + k] | 0) : (i + k);
+                    if (vi < 0 || vi >= vertCount) { vi = 0; }
+
+                    var x = P[vi * 3], y = P[vi * 3 + 1], z = P[vi * 3 + 2];
+
+                    /* 列主序矩阵变换 */
+                    var wx = world[0] * x + world[4] * y + world[8] * z + world[12];
+                    var wy = world[1] * x + world[5] * y + world[9] * z + world[13];
+                    var wz = world[2] * x + world[6] * y + world[10] * z + world[14];
+
+                    /* glTF 是 Y 轴向上，本工具按 Z 轴向上显示 */
+                    posAcc.push3(wx, -wz, wy);
+
+                    if (colAcc)
+                    {
+                        if (C) { colAcc.push3(C[vi * 3] || 0, C[vi * 3 + 1] || 0, C[vi * 3 + 2] || 0); }
+                        else { colAcc.push3(1, 1, 1); }
+                    }
+                }
+                tri++;
+            }
+        }
+
+        var IDENT = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        var nodes = json.nodes || [];
+        var scenes = json.scenes || [];
+
+        function walk(nodeIndex, parent, depth)
+        {
+            if (full || depth > 64) { return; }
+            var node = nodes[nodeIndex];
+            if (!node) { return; }
+
+            var world = mulMat4(parent, localMat4(node));
+
+            if (node.mesh !== undefined && json.meshes)
+            {
+                var mesh = json.meshes[node.mesh];
+                var prims = (mesh && mesh.primitives) || [];
+                for (var pi = 0; pi < prims.length; pi++) { pushPrimitive(prims[pi], world); }
+            }
+
+            var kids = node.children || [];
+            for (var ki = 0; ki < kids.length; ki++) { walk(kids[ki], world, depth + 1); }
+        }
+
+        if (scenes.length)
+        {
+            var roots = scenes[json.scene || 0] ? scenes[json.scene || 0].nodes || [] : [];
+            for (var ri = 0; ri < roots.length; ri++) { walk(roots[ri], IDENT, 0); }
+        }
+        else if (nodes.length)
+        {
+            for (var ni = 0; ni < nodes.length; ni++) { walk(ni, IDENT, 0); }
+        }
+        else if (json.meshes)
+        {
+            for (var mi = 0; mi < json.meshes.length; mi++)
+            {
+                var ps = json.meshes[mi].primitives || [];
+                for (var pj = 0; pj < ps.length; pj++) { pushPrimitive(ps[pj], IDENT); }
+            }
+        }
+
+        if (!tri) { throw new Error('glTF 里没有可显示的三角面'); }
+
+        var pos = posAcc.result();
+        var res = {
+            kind: 'mesh',
+            positions: pos,
+            count: tri,
+            bbox: bboxAccum(pos, pos.length / 3),
+            format: isGLB ? 'GLB' : 'glTF',
+            truncated: full,
+            totalSource: tri,
+            note: full ? ('仅载入前 ' + tri + ' 个三角形') : ''
+        };
+        if (colAcc && hasColor) { res.colors = colAcc.result(); }
+        return res;
+    }
+
     /* ---------------- 入口 ---------------- */
+
+    /* 扩展名 → 解析器。用表而不是 if 链，新增格式只加一行 */
+    var KIND_BY_EXT = {
+        stl: 'stl', obj: 'obj', ply: 'ply', off: 'off',
+        pcd: 'pcd', glb: 'glb', gltf: 'gltf',
+        txt: 'points', xyz: 'points', csv: 'points', asc: 'points',
+        pts: 'points', dat: 'points', ptx: 'points'
+    };
+
+    /* 认得但做不了的格式：直接给下一步动作，而不是让用户自己猜 */
+    var UNSUPPORTED_HINT = {
+        step: 'STEP 是 B-rep 格式，需要几何内核，请先导出为 STL 或 GLB',
+        stp: 'STEP 是 B-rep 格式，请先导出为 STL 或 GLB',
+        iges: 'IGES 是 B-rep 格式，请先导出为 STL 或 GLB',
+        igs: 'IGES 是 B-rep 格式，请先导出为 STL 或 GLB',
+        fbx: 'FBX 暂不支持，请导出为 GLB 或 OBJ',
+        dae: 'Collada 暂不支持，请导出为 GLB 或 OBJ',
+        '3mf': '3MF 暂不支持，请导出为 STL 或 GLB',
+        '3ds': '3DS 暂不支持，请导出为 GLB 或 OBJ',
+        usdz: 'USDZ 暂不支持，请导出为 GLB',
+        las: 'LAS 暂不支持，请先转换为 PCD 或 XYZ',
+        laz: 'LAZ 是压缩 LAS，请先解压并转换为 PCD 或 XYZ',
+        e57: 'E57 暂不支持，请先转换为 PCD 或 XYZ',
+        wrl: 'VRML 暂不支持，请导出为 OBJ'
+    };
+
+    function isLikelyText(str)
+    {
+        if (!str) { return false; }
+        var ok = 0;
+        for (var i = 0; i < str.length; i++)
+        {
+            var c = str.charCodeAt(i);
+            if (c === 9 || c === 10 || c === 13 || (c >= 32 && c < 127)) { ok++; }
+        }
+        return ok / str.length > 0.9;
+    }
+
+    function unsupportedMessage(file)
+    {
+        var ext = extOf(file.name);
+        var head = ext ? ('不支持的格式 .' + ext) : '无法识别的文件格式';
+        var hint = UNSUPPORTED_HINT[ext];
+        return head + '（当前支持 STL / OBJ / PLY / OFF / GLB / glTF / PCD / 点云文本）' +
+            (hint ? '：' + hint : '');
+    }
 
     async function detectKind(file)
     {
         var ext = extOf(file.name);
-        if (ext === 'stl') { return 'stl'; }
-        if (ext === 'obj') { return 'obj'; }
-        if (ext === 'ply') { return 'ply'; }
-        if (ext === 'txt' || ext === 'xyz' || ext === 'csv' || ext === 'asc' ||
-            ext === 'pts' || ext === 'dat' || ext === 'ptx')
-        {
-            return 'points';
-        }
+        if (KIND_BY_EXT[ext]) { return KIND_BY_EXT[ext]; }
+
+        /* 认得但做不了的格式（STEP / FBX / LAS …）必须在嗅探之前拦下，
+         * 否则它们内容像文本，会被当成点云去解析，最后报“没有可显示的数据” */
+        if (UNSUPPORTED_HINT[ext]) { return ''; }
 
         // 无扩展名：读取头部嗅探
         var buf = await readSlice(file, 0, Math.min(file.size, 64));
@@ -1348,10 +1943,20 @@
                 return 'stl';
             }
         }
-        var txt = new TextDecoder('utf-8').decode(buf).trim().toLowerCase();
+        if (file.size >= 12 && dv.getUint32(0, true) === 0x46546C67) { return 'glb'; }
+
+        var raw = new TextDecoder('utf-8').decode(buf).trim();
+        var txt = raw.toLowerCase();
         if (txt.indexOf('ply') === 0) { return 'ply'; }
         if (txt.indexOf('solid') === 0) { return 'stl'; }
-        return 'obj';
+        if (txt.indexOf('off') === 0 || txt.indexOf('coff') === 0) { return 'off'; }
+        if (txt.indexOf('#') === 0 && txt.indexOf('pcd') > 0) { return 'pcd'; }
+        if (txt.charAt(0) === '{') { return 'gltf'; }
+
+        /* 无扩展名但内容像文本：仍按点云尝试（兼容手工改名的 CSV / XYZ） */
+        if (ext === '' || isLikelyText(raw)) { return 'points'; }
+
+        return '';
     }
 
     async function loadFile(file, opts, onProgress, confirmColumns)
@@ -1363,7 +1968,11 @@
         if (kind === 'stl') { res = await parseSTL(file, o, onProgress); }
         else if (kind === 'obj') { res = await parseOBJ(file, o, onProgress); }
         else if (kind === 'ply') { res = await parsePLY(file, o, onProgress); }
-        else
+        else if (kind === 'off') { res = await parseOFF(file, o, onProgress); }
+        else if (kind === 'pcd') { res = await parsePCD(file, o, onProgress); }
+        else if (kind === 'glb') { res = await parseGLTF(file, o, onProgress, true); }
+        else if (kind === 'gltf') { res = await parseGLTF(file, o, onProgress, false); }
+        else if (kind === 'points')
         {
             var plan = null;
             var probe = await probeTextColumns(file);
@@ -1378,6 +1987,10 @@
                 }
             }
             res = await parsePointText(file, o, onProgress, plan);
+        }
+        else
+        {
+            throw new Error(unsupportedMessage(file));
         }
 
         if (!res || !res.positions || res.positions.length === 0)
@@ -1483,6 +2096,21 @@
         {
             kind = 'mesh';                 // 保守按 mesh 估（字节/面更大）
             count = Math.floor(size / 60);
+        }
+        else if (ext === 'off')
+        {
+            kind = 'mesh';
+            count = Math.floor(size / 60);
+        }
+        else if (ext === 'glb' || ext === 'gltf')
+        {
+            kind = 'mesh';
+            count = Math.floor(size / 48);
+        }
+        else if (ext === 'pcd')
+        {
+            kind = 'points';
+            count = Math.floor(size / 16);
         }
         else
         {

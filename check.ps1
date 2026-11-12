@@ -217,6 +217,26 @@ if ((Test-Path $pngOn) -and (Test-Path $pngOff))
 }
 $results += New-Object psobject -Property @{ Case = 'cull-parity'; Result = $parityStatus }
 
+# ---------- 5.9 copy lint: title attributes in index.html ----------
+# Rules (see docs/GUIDE.md section 8): no nested fullwidth parens, titles <= 32 chars.
+$lintStatus = 'SKIP'
+$htmlPath = Join-Path $root 'index.html'
+if (Test-Path $htmlPath) {
+    $html = Get-Content -Raw -Encoding UTF8 $htmlPath
+    $titles = [regex]::Matches($html, 'title="([^"]*)"')
+    $over = 0
+    $nested = $false
+    foreach ($m in $titles) {
+        $t = $m.Groups[1].Value
+        # U+FF08 = fullwidth left paren; more than one means the title nests parens
+        if (([regex]::Matches($t, '\uFF08')).Count -gt 1) { $nested = $true }
+        if ($t.Length -gt 32) { $over++ }
+    }
+    if ($nested) { $lintStatus = 'FAIL(nested parens)' } else { $lintStatus = 'PASS' }
+    Write-Host ("  copy-lint: titles=" + $titles.Count + " over32=" + $over)
+}
+$results += New-Object psobject -Property @{ Case = 'copy-lint'; Result = $lintStatus }
+
 # ---------- 6. report ----------
 Write-Host ''
 $results | Format-Table -AutoSize | Out-String -Width 80 | Write-Host

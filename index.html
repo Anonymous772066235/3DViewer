@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.2.9" />
+<link rel="stylesheet" href="css/style.css?v=1.0.3.0" />
 </head>
 <body>
 <div id="app">
@@ -20,7 +20,7 @@
         </div>
         <div class="toolbar">
             <div id="load-menu-wrap" class="menu-wrap">
-                <button id="btn-load" class="menu-btn" title="载入数据到指定视口">载入</button>
+                <button id="btn-load" class="menu-btn" title="载入数据到指定视口（快捷键 O）">载入</button>
                 <div id="load-menu" class="menu hidden">
                     <button id="btn-load-before" title="载入到 左侧 (A)">左侧 (A)</button>
                     <button id="btn-load-after" title="载入到 右侧 (B)">右侧 (B)</button>
@@ -32,30 +32,30 @@
                     <button id="btn-recent-clear" class="menu-quiet" title="清空载入历史">清空历史</button>
                 </div>
             </div>
-            <button id="btn-single" title="合并为单视口（A/B/S 全部图层一起渲染）">单窗</button>
-            <button id="btn-shot" title="导出当前画面为 PNG">截图</button>
+            <button id="btn-single" title="合并为单视口（快捷键 1 / 2）">单窗</button>
+            <button id="btn-shot" title="导出当前画面为 PNG（快捷键 S）">截图</button>
                 <button id="btn-fit" title="按当前数据铺满视口（快捷键 F）">适应</button>
-            <button id="btn-clear" title="清空所有图层">清空</button>
+            <button id="btn-clear" title="清空所有图层（快捷键 Shift+Delete）">清空</button>
             <div id="plugin-menu-wrap" class="menu-wrap">
                 <button id="btn-plugins" class="menu-btn" title="插件">插件</button>
                 <div id="plugins-menu" class="menu hidden">
-                    <button id="btn-optimize" title="调用 HoleOptimize_cli 优化当前网格，结果自动载入右侧（需先运行 serve.bat）">孔位优化</button>
+                    <button id="btn-optimize" title="优化当前网格，结果载入右侧（需本地服务）">孔位优化</button>
                 </div>
             </div>
             <!-- ===== 工具菜单 BEGIN（拾取 / 裁剪 为同级功能；注释掉整块即关闭） ===== -->
             <div id="tool-menu-wrap" class="menu-wrap">
                 <button id="btn-tools" class="menu-btn" title="工具：拾取 / 裁剪">工具</button>
                 <div id="tools-menu" class="menu hidden">
-                    <button id="btn-pick" title="拾取模式（P）：在数据上取点，显示坐标 / 法向 / 标签 / 标量，并计算距离与角度">拾取<span class="kbd">P</span></button>
-                    <button id="btn-xform" title="数据对齐：手动编辑 4×4 变换矩阵并应用到选中图层，可用逆矩阵回退">变换</button>
+                    <button id="btn-pick" title="在数据上取点并测量距离 / 角度（快捷键 P）">拾取<span class="kbd">P</span></button>
+                    <button id="btn-xform" title="手动编辑 4×4 矩阵并应用，可用逆矩阵回退">变换</button>
                     <!-- ===== 三维编辑 BEGIN（注释掉这一行即关闭裁剪入口） ===== -->
-                    <button id="btn-seg" title="裁剪：进入后右上角出现编辑栏（矩形/多边形选择、预览、追加、应用、撤销、退出）">裁剪</button>
+                    <button id="btn-seg" title="矩形 / 多边形选面并拆分图层（快捷键 C）">裁剪</button>
                     <!-- ===== 三维编辑 END ===== -->
                 </div>
             </div>
             <!-- ===== 工具菜单 END ===== -->
         </div>
-        <input type="file" id="file-input" multiple accept=".stl,.obj,.ply,.txt,.xyz,.csv,.asc,.pts,.dat" hidden />
+        <input type="file" id="file-input" multiple accept=".stl,.obj,.ply,.off,.pcd,.glb,.gltf,.txt,.xyz,.csv,.asc,.pts,.dat,.ptx" hidden />
     </header>
 
     <main id="main">
@@ -110,7 +110,7 @@
                         <div class="group-title">外观</div>
                         <div class="prop-row" data-prop="base">
                             <label>配色</label>
-                            <button id="btn-colors" class="color-btn" title="打开配色面板（面片 / 背面 / 线框 / 顶点 / 边界）">
+                            <button id="btn-colors" class="color-btn" title="打开配色面板">
                                 <span id="btn-colors-dot" class="color-dot"></span>
                                 <span>配色…</span>
                             </button>
@@ -259,7 +259,7 @@
                     <div class="prop-group">
                         <div class="prop-row" data-prop="base">
                             <label></label>
-                            <button id="btn-remove-layer" class="danger" title="从场景中移除该图层（Delete）">移除该图层</button>
+                            <button id="btn-remove-layer" class="danger" title="从场景中移除该图层（快捷键 Delete）">移除该图层</button>
                         </div>
                     </div>
                 </div>
@@ -289,7 +289,7 @@
                             <span class="k">旋转中心</span>
                             <div class="btn-group">
                                 <button id="btn-pick-center" class="mini" title="点击后在模型表面单击设为旋转中心（等价 Ctrl+左键）">重设</button>
-                                <button id="btn-reset-view" class="mini" title="恢复初始 45° 俯视">默认</button>
+                                <button id="btn-reset-view" class="mini" title="恢复初始 45° 俯视（快捷键 0）">默认</button>
                             </div>
                         </div>
                     </div>
@@ -298,7 +298,7 @@
                         <div class="group-title">显示</div>
                         <div class="row">
                             <span class="k">主题切换</span>
-                            <button id="btn-theme" title="切换深色 / 浅色主题">浅色</button>
+                            <button id="btn-theme" title="切换深色 / 浅色主题（快捷键 T）">浅色</button>
                         </div>
                         <div class="row chk2">
                             <label><span>地面网格</span><input type="checkbox" id="opt-grid" /></label>
@@ -381,7 +381,7 @@
                 <span>目标</span><select id="icp-dst" title="将被移动的图层"></select>
             </div>
             <div class="xform-icp-checks">
-                <label class="xform-check" title="先用 4 点全等搜索求一个初值，再交给 ICP 精配准。姿态差异大时能显著提高成功率，代价是启动慢一些">
+                <label class="xform-check" title="4 点全等搜索求初值，再交给 ICP；姿态差大时更稳">
                     4PCS
                     <input type="checkbox" id="icp-coarse" checked>
                 </label>
@@ -420,7 +420,7 @@
             <div class="view-tag left" id="tag-left">左侧 (A)</div>
             <div class="view-tag right" id="tag-right">右侧 (B)</div>
             <div id="split-line"></div>
-            <div id="drop-hint">拖拽 STL / OBJ / PLY / 点云文件到左半屏（左侧 A）或右半屏（右侧 B）</div>
+            <div id="drop-hint">拖拽 STL / OBJ / PLY / 点云文件到左屏（A）或右屏（B）</div>
 
             <!-- ===== 裁剪编辑栏（进入裁剪模式后显示） ===== -->
             <div id="seg-bar" class="seg-bar hidden">
@@ -459,19 +459,19 @@
                         <line x1="12" y1="13.8" x2="18.4" y2="13.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     </svg>
                 </button>
-                <button id="seg-btn-apply" class="seg-ico" title="应用裁剪：拆成 _segmented / _remaining 两个图层" disabled>
+                <button id="seg-btn-apply" class="seg-ico" title="应用裁剪：拆成「已裁剪 / 剩余」两个图层" disabled>
                     <svg viewBox="0 0 20 20" aria-hidden="true">
                         <polyline points="3.6,10.6 8,15 16.4,4.6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
                 </button>
-                <button id="seg-btn-undo" class="seg-ico" title="撤销上一步追加 (Ctrl+Z)" disabled>
+                <button id="seg-btn-undo" class="seg-ico" title="撤销上一步追加（快捷键 Ctrl+Z）" disabled>
                     <svg viewBox="0 0 20 20" aria-hidden="true">
                         <path d="M6.6 5.4 L2.8 9 L6.6 12.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
                         <path d="M2.8 9 H11.4 A4.4 4.4 0 0 1 11.4 17.8 H8.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
                     </svg>
                 </button>
                 <span class="seg-sep"></span>
-                <button id="seg-btn-exit" class="seg-ico" title="退出裁剪 (Esc)">
+                <button id="seg-btn-exit" class="seg-ico" title="退出裁剪（快捷键 Esc）">
                     <svg viewBox="0 0 20 20" aria-hidden="true">
                         <line x1="5.2" y1="5.2" x2="14.8" y2="14.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
                         <line x1="14.8" y1="5.2" x2="5.2" y2="14.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
@@ -511,9 +511,6 @@
                     <tr><td>左键拖拽</td><td>旋转</td></tr>
                     <tr><td>中键 / 右键拖拽</td><td>平移</td></tr>
                     <tr><td>滚轮</td><td>缩放</td></tr>
-                    <tr><td>F</td><td>自适应视图</td></tr>
-                    <tr><td>W</td><td>选中层切换线框</td></tr>
-                    <tr><td>N</td><td>选中层切换法向</td></tr>
                     <tr><td>Ctrl + 左键 / 「重设」按钮</td><td>把点击处设为旋转中心</td></tr>
                     <tr><td>「回正」按钮</td><td>自由旋转后把模型摆正（清滚转）</td></tr>
                     <tr><td>双击模型表面</td><td>在该处重设旋转中心（双击空白处仍为视图自适应）</td></tr>
@@ -522,6 +519,8 @@
                     <tr><td>截图</td><td>下载 PNG 到浏览器下载目录，并尝试复制到剪贴板</td></tr>
                     <tr><td>清空</td><td>二次确认后清空全部图层</td></tr>
                 </table>
+                <h3 class="help-sub">快捷键</h3>
+                <div id="keyhelp"></div>
                 <button id="btn-help-close">关闭</button>
             </div>
         </div>
@@ -617,15 +616,16 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.2.9"></script>
-    <script src="js/io.js?v=1.0.2.9"></script>
-    <script src="js/algo.js?v=1.0.2.9"></script>
-    <script src="js/render.js?v=1.0.2.9"></script>
+    <script src="js/core.js?v=1.0.3.0"></script>
+    <script src="js/io.js?v=1.0.3.0"></script>
+    <script src="js/algo.js?v=1.0.3.0"></script>
+    <script src="js/render.js?v=1.0.3.0"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.2.9"></script>
-    <script src="js/plugins/optimize.js?v=1.0.2.9"></script>
-    <script src="js/ui.js?v=1.0.2.9"></script>
-    <script src="js/app.js?v=1.0.2.9"></script>
+    <script src="js/plugins/registry.js?v=1.0.3.0"></script>
+    <script src="js/plugins/optimize.js?v=1.0.3.0"></script>
+    <script src="js/ui.js?v=1.0.3.0"></script>
+    <script src="js/keys.js?v=1.0.3.0"></script>
+    <script src="js/app.js?v=1.0.3.0"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

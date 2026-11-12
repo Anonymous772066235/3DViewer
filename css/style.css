@@ -590,7 +590,31 @@ button.mini {
     margin-left: -1px;          /* 宽度变了，重新居中 */
     background: var(--split);
     box-shadow: 0 0 6px var(--split-glow);
-    pointer-events: none;
+    pointer-events: auto;       /* 可拖动 */
+    cursor: col-resize;
+    touch-action: none;
+    transition: background .12s ease, box-shadow .12s ease;
+}
+
+/* 更宽的命中区：线只有 2px，直接抓太费劲 */
+#split-line::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    right: -6px;
+    top: 0;
+    bottom: 0;
+}
+
+#split-line:hover,
+body.split-dragging #split-line {
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--split-glow);
+}
+
+body.split-dragging {
+    cursor: col-resize;
+    user-select: none;
 }
 
 .view-tag {
@@ -2939,4 +2963,47 @@ button.primary:disabled {
 .menu-quiet:hover {
     background: var(--bg-hover);
     color: var(--text);
+}
+
+/* ================== 帮助面板：快捷键列表 ================== */
+#help .help-sub {
+    margin: 14px 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dim);
+}
+
+.keyhelp-g {
+    margin: 10px 0 2px;
+    font-size: 11px;
+    color: var(--dim);
+}
+
+.keyhelp-t {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.keyhelp-t td {
+    padding: 2px 0;
+    font-size: 12px;
+    vertical-align: top;
+}
+
+.keyhelp-t td:first-child {
+    width: 108px;
+    padding-right: 10px;
+}
+
+#keyhelp kbd {
+    display: inline-block;
+    min-width: 16px;
+    padding: 1px 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(127, 127, 127, .12);
+    font: inherit;
+    font-size: 11px;
+    color: var(--text);
+    text-align: center;
 }

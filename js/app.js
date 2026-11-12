@@ -58,6 +58,7 @@
             ghost: true,
             ghostMode: 0,
             singleView: false,
+        splitRatio: 0.5,          /* 双窗分隔比例（0 左、1 右，0.5 各半） */
             syncCam: true,
             lightFollow: true,
             lightAz: Math.PI * 0.25,
@@ -480,13 +481,16 @@
         }
 
         var gap = 2;
-        var half = Math.max(1, (this.cssW - gap) * 0.5);
+        var ratio = this.settings.splitRatio;
+        if (!(ratio > 0 && ratio < 1)) { ratio = 0.5; }
 
-        this.views[0].rect = { x: 0, y: 0, w: Math.round(half * dpr), h: fullH };
+        var left = Math.max(1, (this.cssW - gap) * ratio);
+
+        this.views[0].rect = { x: 0, y: 0, w: Math.round(left * dpr), h: fullH };
         this.views[1].rect = {
-            x: Math.round((half + gap) * dpr),
+            x: Math.round((left + gap) * dpr),
             y: 0,
-            w: Math.round(half * dpr),
+            w: Math.max(1, Math.round((this.cssW - gap - left) * dpr)),
             h: fullH
         };
     };
@@ -1085,6 +1089,73 @@
     };
 
     /* 单窗口 / 双窗口切换：单窗口时 A/B/S 全部图层在同一个视口渲染 */
+    /* 双窗分隔比例：0.5 各半，0 全给右视图，1 全给左视图。
+     * 拖动分隔线时连续调用；同时把 DOM 上的分隔线挪到对应位置。 */
+    App.prototype.setSplitRatio = function (ratio)
+    {
+        ratio = Math.max(0.02, Math.min(0.98, Number(ratio) || 0.5));
+        this.settings.splitRatio = ratio;
+
+        var line = document.getElementById('split-line');
+        var area = document.getElementById('view-area');
+        if (line && area)
+        {
+            var px = Math.round((area.clientWidth || 0) * ratio);
+            if (this._splitPx !== px)
+            {
+                this._splitPx = px;
+                line.style.left = px + 'px';
+                line.style.marginLeft = '-1px';
+
+                /* 右侧角标的 CSS 是固定的 left: calc(50% + 12px)，
+                 * 分隔线一动它就跟不上了，这里同步成相对分隔线的位置 */
+                var tagR = document.getElementById('tag-right');
+                if (tagR) { tagR.style.left = (px + 12) + 'px'; }
+            }
+        }
+
+        /* 矩形要立刻跟着变：updateRects 平时只在 resize / 切模式时调用，
+         * 拖动过程中不重算的话，画面会停在旧切分上 */
+        this.updateRects();
+        this.markDirty();
+    };
+
+    /* 把比例缓动到目标值：拖到极限 / 退出单窗时用它产生「丝滑」的过渡。
+     * 用定时器推进而不是 rAF —— 页面切到后台或被遮挡时 rAF 会被节流甚至停发，
+     * 那样动画会卡在中间、回调永不触发（单窗就切不过去）。 */
+    App.prototype.animateSplitRatio = function (target, ms, done)
+    {
+        var self = this;
+        var from = this.settings.splitRatio;
+        var now = function ()
+        {
+            return (global.performance && global.performance.now)
+                ? global.performance.now() : Date.now();
+        };
+        var t0 = now();
+        ms = ms || 180;
+
+        if (this._splitTimer)
+        {
+            global.clearInterval(this._splitTimer);
+            this._splitTimer = null;
+        }
+
+        this._splitTimer = global.setInterval(function ()
+        {
+            var k = Math.min(1, (now() - t0) / ms);
+            var e = 1 - Math.pow(1 - k, 3);               // ease-out
+            self.setSplitRatio(from + (target - from) * e);
+
+            if (k >= 1)
+            {
+                global.clearInterval(self._splitTimer);
+                self._splitTimer = null;
+                if (done) { done(); }
+            }
+        }, 16);
+    };
+
     App.prototype.setSingleView = function (on)
     {
         on = !!on;
@@ -1118,6 +1189,14 @@
                 this.views[1].camera = this.views[0].camera;
                 this.settings.syncCam = true;
             }
+        }
+
+        if (!on)
+        {
+            /* 从单窗回到双窗：分隔线一律回到正中（50%），
+             * 从贴边缓动展开，避免「啪」地跳出来 */
+            this.setSplitRatio(0.04);
+            this.animateSplitRatio(0.5, 200);
         }
 
         this.lastActiveView = 0;
@@ -2071,81 +2150,12 @@
 
     App.prototype.bindKeys = function ()
     {
-        var self = this;
-        window.addEventListener('keydown', function (e)
-        {
-            var tag = (e.target && e.target.tagName) || '';
-            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA')
-            {
-                return;
-            }
-
-            if (e.key === 'f' || e.key === 'F')
-            {
-                self.fitAll();
-            }
-            else if (e.key === 'w' || e.key === 'W')
-            {
-                var l = self.getSelected();
-                if (l && l.data.kind === 'mesh')
-                {
-                    l.showWire = !l.showWire;
-                    global.MV.ui.renderProps();
-                    self.markDirty();
-                }
-            }
-            else if (e.key === 'n' || e.key === 'N')
-            {
-                var l2 = self.getSelected();
-                if (l2 && l2.data.kind === 'mesh')
-                {
-                    l2.showNormals = !l2.showNormals;
-                    global.MV.ui.renderProps();
-                    self.markDirty();
-                }
-            }
-            else if (e.key === 'p' || e.key === 'P')
-            {
-                self.togglePickInfo();
-            }
-            else if (e.key === 'Delete')
-            {
-                // 移除当前选中图层
-                if (self.selectedId !== null)
-                {
-                    self.removeLayer(self.selectedId);
-                }
-            }
-            else if (e.key === 'Escape')
-            {
-                // 载入中按 Esc = 取消载入（优先于其它 Escape 语义）
-                if (self.loading)
-                {
-                    self.cancelLoad();
-                    return;
-                }
-
-                if (self.pickMode)
-                {
-                    self.cancelPickCenter();
-                }
-                if (self.pickInfo)
-                {
-                    self.setPickInfo(false);
-                }
-
-                // 裁剪进行中：Esc 只退出裁剪，不清图层选中（否则要重新点树才能再进）
-                if (global.MV.algo && global.MV.algo.currentMode && global.MV.algo.currentMode())
-                {
-                    global.MV.algo.setMode(null);
-                    return;
-                }
-
-                self.selectedId = null;
-                global.MV.ui.refreshUI();
-            }
-        });
+        /* 键位表与守卫统一在 js/keys.js：这里只负责触发初始化。
+         * 这里曾挂着一个 window keydown 处理 F/W/N/P/Delete/Esc，
+         * 现已全部搬走，避免同一个键两处响应。 */
+        if (global.MV.keys && global.MV.keys.init) { global.MV.keys.init(); }
     };
+
 
     /* ---------------- 启动 ---------------- */
     global.MV.App = App;
