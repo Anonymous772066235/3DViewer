@@ -94,6 +94,8 @@
         { k: 'o', g: '文件', label: '载入菜单', run: function () { click('btn-load'); } },
         { k: 's', g: '文件', label: '截图', run: function () { click('btn-shot'); } },
         { k: 'Shift+s', g: '文件', label: '导出菜单', run: function () { click('btn-export'); } },
+        { k: 'F2', g: '图层', label: '重命名选中图层',
+            run: function () { global.MV.ui.beginRenameSelected(); } },
         { k: 'Delete', g: '文件', label: '删除选中图层', run: function (a)
             { if (a.selectedId !== null) { a.removeLayer(a.selectedId); } } },
         { k: 'Shift+Delete', g: '文件', label: '清空全部图层', run: function () { click('btn-clear'); } },
@@ -129,6 +131,13 @@
         }
 
         if (visible('help')) { click('btn-help-close'); return true; }
+
+        /* 配准中：Esc 先终止配准（比退出模式更紧急） */
+        if (MV.ui && MV.ui.isIcpRunning && MV.ui.isIcpRunning())
+        {
+            MV.ui.cancelICP();
+            return true;
+        }
 
         if (a && a.loading) { a.cancelLoad(); return true; }
 

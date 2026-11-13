@@ -466,9 +466,26 @@
             this.cssW = cw;
             this.cssH = ch;
             this.dpr = dpr;
+
+            /* 重新分配 drawing buffer 会立刻清空画面。
+             *
+             * 上下文是 alpha:false，所以「清空」= 不透明黑。
+             * ResizeObserver 的回调发生在 rAF 之后、合成之前 —— 若只把 dirty
+             * 置位等下一帧再画，这一帧合成出去的就是那块还没绘制的黑缓冲。
+             * 拖日志栏时回调连续触发，于是画面反复闪黑；
+             * 深色主题本身就是黑的，所以这个 bug 一直只在浅色下显形。
+             *
+             * 这里改完尺寸立刻补画一帧，保证任何时刻被合成的都是已绘制的画面。 */
             this.canvas.width = Math.max(1, Math.round(cw * dpr));
             this.canvas.height = Math.max(1, Math.round(ch * dpr));
             this.dirty = true;
+
+            this.updateRects();
+            if (this.renderer && this.renderer.ready)
+            {
+                this.renderFrame();
+                this.dirty = false;
+            }
         }
     };
 
@@ -708,7 +725,9 @@
         var hex = this.pickColor(slot);
         var layer = {
             id: this.nextId++,
-            name: name,
+            /* 会话内唯一（树里显示为 #12）；uid 跨会话也唯一，供日志/导出引用 */
+            uid: 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            name: this.uniqueLayerName(name),
             slot: slot,
             kind: data.kind,
             data: data,
@@ -896,6 +915,55 @@
         return 1;
     };
 
+
+    /* 同名时自动加序号：导入两个同名文件，第二个叫「m (2)」，
+     * 避免场景树里两行一模一样、只能靠颜色区分 */
+    App.prototype.uniqueLayerName = function (name)
+    {
+        var base = String(name == null ? '' : name).trim() || 'layer';
+        var used = {};
+        for (var i = 0; i < this.layers.length; i++)
+        {
+            used[this.layers[i].name] = 1;
+        }
+        if (!used[base]) { return base; }
+
+        var k = 2;
+        while (used[base + ' (' + k + ')']) { k++; }
+        return base + ' (' + k + ')';
+    };
+
+    /* 重命名：树里双击、右键菜单、F2 都走这里 */
+    App.prototype.renameLayer = function (id, name)
+    {
+        var l = this.layerById(id);
+        if (!l) { return false; }
+
+        var v = String(name == null ? '' : name)
+            .replace(/[\r\n\t]+/g, ' ')
+            .trim()
+            .slice(0, 60);
+
+        if (!v || v === l.name) { return false; }
+
+        var old = l.name;
+        l.name = v;
+
+        if (global.MV.ui)
+        {
+            global.MV.ui.refreshUI();
+            /* 重名不拦，但提示一下：树里有 #id，仍然能区分 */
+            var dup = false;
+            for (var i = 0; i < this.layers.length; i++)
+            {
+                if (this.layers[i] !== l && this.layers[i].name === v) { dup = true; }
+            }
+            global.MV.ui.setInfo('已重命名：' + old + ' → ' + v +
+                (dup ? '（存在同名图层，可用 #' + l.id + ' 区分）' : ''));
+        }
+        this.markDirty();
+        return true;
+    };
 
     App.prototype.layerById = function (id)
     {
@@ -2024,6 +2092,16 @@
     };
 
     App.prototype.renderFrame = function ()
+    {
+        /* resize() 会同步调用这里补画，而 tick 里也会调 —— 加一层重入保护，
+         * 避免极端时序下同一帧被绘制两次（也顺带防止将来互相调用成环）。 */
+        if (this._inFrame) { return; }
+        this._inFrame = true;
+        try { this.renderFrameInner(); }
+        finally { this._inFrame = false; }
+    };
+
+    App.prototype.renderFrameInner = function ()
     {
         // 入口处再兜一次：无论谁调用 renderFrame，缺 bbox 都不会崩
         this.healBBoxes();

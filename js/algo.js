@@ -2147,7 +2147,9 @@ function pickCandidates(layer, eye, dir, tri)
             sampleRatio = Math.max(0.001, Math.min(1, 1 / opts.stride));
         }
 
-        var kd = global.MV.kdtree.build(dstPos);
+        /* 允许复用外部建好的 KD 树：固定点集不变时（候选验证、多级 ICP、收尾轮）
+         * 每建一次就是一次 O(n log n)，36 万点约几十毫秒 —— 叠起来很可观。 */
+        var kd = opts.kd || global.MV.kdtree.build(dstPos);
         if (!kd) { return null; }
 
         var nSrc = Math.floor(srcPos.length / 3);
@@ -2156,6 +2158,29 @@ function pickCandidates(layer, eye, dir, tri)
 
         var hasSrcN = !!srcNrm && srcNrm.length >= nSrc * 3;
         var hasDstN = !!dstNrm && dstNrm.length >= nDst * 3;
+
+        /* 目标点集的包围盒。
+         *
+         * 用途：查询点离点云很远时直接跳过 KD 查询。
+         *
+         * 为什么必须跳过：KD 最近邻在「查询点位于点云之外」时**没有任何剪枝机会** ——
+         * 树里所有平面距离都远小于当前的 bestD2，于是两棵子树都要访问，退化成全量扫描。
+         * 实测 36 万点：查询点在点云内 ≈ 0ms，偏离 3 米时约 4~6ms/次。
+         * ICP 初值不准时正是这种情况：十几万个点全在远处，一次迭代就是几百秒的量级，
+         * 浏览器表现为「卡死 / 无响应」。
+         * 而 maxDist 之外的点本来就不该参与匹配，跳过它不改变任何结果。 */
+        var bminX = Infinity, bminY = Infinity, bminZ = Infinity;
+        var bmaxX = -Infinity, bmaxY = -Infinity, bmaxZ = -Infinity;
+        for (var bi2 = 0; bi2 < nDst; bi2++)
+        {
+            var bx = dstPos[bi2 * 3], by = dstPos[bi2 * 3 + 1], bz = dstPos[bi2 * 3 + 2];
+            if (bx < bminX) { bminX = bx; }
+            if (bx > bmaxX) { bmaxX = bx; }
+            if (by < bminY) { bminY = by; }
+            if (by > bmaxY) { bmaxY = by; }
+            if (bz < bminZ) { bminZ = bz; }
+            if (bz > bmaxZ) { bmaxZ = bz; }
+        }
 
         var R = [1, 0, 0, 0, 1, 0, 0, 0, 1];
         var t = [0, 0, 0];
@@ -2241,6 +2266,15 @@ function pickCandidates(layer, eye, dir, tri)
                 var py = R[3] * sx + R[4] * sy + R[5] * sz + t[1];
                 var pz = R[6] * sx + R[7] * sy + R[8] * sz + t[2];
 
+                /* 先做 O(1) 的包围盒剔除：超出 maxDist 的点不可能有合法对应点 */
+                if (curMaxDist > 0 &&
+                    (px < bminX - curMaxDist || px > bmaxX + curMaxDist ||
+                     py < bminY - curMaxDist || py > bmaxY + curMaxDist ||
+                     pz < bminZ - curMaxDist || pz > bmaxZ + curMaxDist))
+                {
+                    continue;
+                }
+
                 var qi = kd.nearestIndex(px, py, pz);
                 if (qi < 0) { continue; }
 
@@ -2255,8 +2289,19 @@ function pickCandidates(layer, eye, dir, tri)
                 var nx = 0, ny = 0, nz = 0;
                 if (hasDstN) { nx = dstNrm[q0]; ny = dstNrm[q0 + 1]; nz = dstNrm[q0 + 2]; }
 
+                /* 源法向必须跟着当前旋转走 —— 这是配准里最容易错的一处：
+                 * 点已经按 R 转过来了，法向却还用原始方向。
+                 * 旋转小时看不出来，一旦初值带 90°/180°（正是粗配准该给的东西），
+                 * 法向点积全部不过阈值，对应点被整批丢弃，
+                 * 于是「正确的粗位姿」在验证里反而显得很差，被丢弃回退到质心对齐。 */
                 var mx = 0, my = 0, mz = 0;
-                if (hasSrcN) { mx = srcNrm[p0]; my = srcNrm[p0 + 1]; mz = srcNrm[p0 + 2]; }
+                if (hasSrcN)
+                {
+                    var snx = srcNrm[p0], sny = srcNrm[p0 + 1], snz = srcNrm[p0 + 2];
+                    mx = R[0] * snx + R[1] * sny + R[2] * snz;
+                    my = R[3] * snx + R[4] * sny + R[5] * snz;
+                    mz = R[6] * snx + R[7] * sny + R[8] * snz;
+                }
 
                 if (hasDstN && hasSrcN && (nx * mx + ny * my + nz * mz) < normalThresh)
                 {
@@ -2503,9 +2548,91 @@ function pickCandidates(layer, eye, dir, tri)
     /* 4×4 对称矩阵的最大特征向量（Jacobi 旋转），用于 Horn 四元数求解 */
 
 
+    /* 候选验证：在**子集**上跑固定轮数的 ICP，用收敛后的残差排序。
+     *
+     * 为什么不能只看初始残差（更不能只看 4PCS 的 LCP）：
+     *   实测 844mm 的数据集里，对称错解的**初始**残差 10.8mm 反而低于正确的
+     *   质心对齐 19.5mm（错解在局部确实更贴合），但迭代 50 轮后是
+     *   15.9mm vs 3.35mm。排序信号只在「收敛后」出现，必须迭代。
+     *
+     * 为什么可以只在子集上跑：
+     *   验证只需要**相对可比**。实测 8000/20000 的子集给出 19.62 / 3.44，
+     *   与全量 20.06 / 3.39 完全同序；计算量从近千万次最近邻降到约 20 万次。
+     */
+    function createVerifier(srcPos, srcNrm, dstPos, dstNrm, opts)
+    {
+        opts = opts || {};
+
+        var maxSrc = opts.maxSrc || 8000;
+        var maxDst = opts.maxDst || 20000;
+        var iters = opts.iters || 12;
+
+        function take(pos, nrm, maxN)
+        {
+            var n = Math.floor(pos.length / 3);
+            if (!n) { return null; }
+
+            /* 用 round 而不是 floor：floor(38466/20000)=1 等于没抽稀，
+             * 而 38466 个点的 KD 建树成本正是要省的那部分。 */
+            var stride = Math.max(1, Math.round(n / Math.min(n, maxN)));
+
+            var outPos = [], outNrm = nrm ? [] : null;
+            var cnt = 0;
+
+            for (var i = 0; i < n; i += stride)
+            {
+                outPos.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+                if (outNrm) { outNrm.push(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]); }
+                cnt++;
+            }
+
+            return {
+                pos: new Float32Array(outPos),
+                nrm: outNrm ? new Float32Array(outNrm) : null,
+                count: cnt
+            };
+        }
+
+        var S = take(srcPos, srcNrm, maxSrc);
+        var D = take(dstPos, dstNrm, maxDst);
+        if (!S || !D) { return null; }
+
+        var kd = global.MV.kdtree.build(D.pos);
+        if (!kd) { return null; }
+
+        return {
+            kd: kd,
+            srcCount: S.count,
+            dstCount: D.count,
+
+            score: function (mat)
+            {
+                var s = createSolver(S.pos, S.nrm, D.pos, D.nrm,
+                    {
+                        maxIter: iters,
+                        sampleRatio: 1,
+                        normalThresh: opts.normalThresh,
+                        tol: opts.tol || 1e-7,
+                        maxDist: opts.maxDist || 0,
+                        initMat: mat,
+                        kd: kd
+                    });
+
+                if (!s) { return { rms: Infinity, used: 0, iters: 0 }; }
+
+                var k = 0, r = null;
+                do { r = s.step(); k++; } while (!r.done && k < iters + 2);
+
+                var res = s.result();
+                return { rms: res.rms, used: res.used, iters: res.iters };
+            }
+        };
+    }
+
     global.MV.icp = {
         symmetric: symmetric,
         createSolver: createSolver,
+        createVerifier: createVerifier,
         computeVertexNormals: computeVertexNormals,
         pcaOf: pcaOf,
         jacobi3: jacobi3,
@@ -3949,7 +4076,14 @@ function pickCandidates(layer, eye, dir, tri)
                     trial: reg.currentTrial,
                     trials: reg.numberOfTrials,
                     lcp: reg.bestLCP,
-                    matrix: (options && options.preview) ? reg.toGlobal(reg.bestTransform) : null
+                    /* 还没搜到优于基准的候选时，bestTransform 是 null，
+                     * toGlobal(null) 也返回 null —— 于是整个搜索阶段一帧都不预览，
+                     * 用户只看到百分比在走、模型钉在原地。
+                     * 这里退回「质心对齐」（单位阵经 toGlobal 补齐质心差），
+                     * 它正是 result() 在 usedBaseline 时返回的那个解，
+                     * 预览与最终结果因此始终一致。 */
+                    matrix: (options && options.preview)
+                        ? reg.toGlobal(reg.bestTransform || IDENT4) : null
                 };
             },
 
@@ -3975,6 +4109,9 @@ function pickCandidates(layer, eye, dir, tri)
 
                 return {
                     matrix: reg.toGlobal(Mres),
+                    /* 「质心对齐」的解：搜索失败时它是唯一可用初值，
+                     * 也是判断候选优劣的对照组，所以一并返回 */
+                    baselineMatrix: reg.toGlobal(IDENT4),
                     lcp: reg.bestLCP,
                     baselineLcp: reg.baselineLCP,
                     usedBaseline: usedBaseline,
