@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.3.2" />
+<link rel="stylesheet" href="css/style.css?v=1.0.3.3" />
 </head>
 <body>
 <div id="app">
@@ -115,6 +115,24 @@
                         <div class="prop-row col" data-prop="base">
                             <label>统计</label>
                             <span class="stat" id="p-stat">-</span>
+                        </div>
+                        <div class="prop-row col" data-prop="base">
+                            <label>变换</label>
+                            <div class="prop-xform">
+                                <div id="p-xform-main" class="prop-xform-main">
+                                    <span id="p-xform-val" class="stat">—</span>
+                                    <span id="p-xform-count" class="prop-xform-count"></span>
+                                    <span id="p-xform-caret" class="prop-xform-caret">▾</span>
+                                </div>
+                                <div id="p-xform-body" class="prop-xform-body hidden">
+                                    <ol id="p-xform-steps" class="prop-xform-steps"></ol>
+                                    <div class="prop-xform-ops">
+                                        <button id="p-xform-copy" class="mini" title="复制累计变换矩阵（16 个数）">复制</button>
+                                        <button id="p-xform-undo" class="mini" title="撤销最后一次应用">撤销</button>
+                                        <button id="p-xform-inv" class="mini danger" title="应用逆矩阵，回到载入时的位姿">逆变换</button>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         <div class="prop-row col" data-prop="base">
                             <label>路径</label>
@@ -632,16 +650,16 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.3.2"></script>
-    <script src="js/io.js?v=1.0.3.2"></script>
-    <script src="js/algo.js?v=1.0.3.2"></script>
-    <script src="js/render.js?v=1.0.3.2"></script>
+    <script src="js/core.js?v=1.0.3.3"></script>
+    <script src="js/io.js?v=1.0.3.3"></script>
+    <script src="js/algo.js?v=1.0.3.3"></script>
+    <script src="js/render.js?v=1.0.3.3"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.3.2"></script>
-    <script src="js/plugins/optimize.js?v=1.0.3.2"></script>
-    <script src="js/ui.js?v=1.0.3.2"></script>
-    <script src="js/keys.js?v=1.0.3.2"></script>
-    <script src="js/app.js?v=1.0.3.2"></script>
+    <script src="js/plugins/registry.js?v=1.0.3.3"></script>
+    <script src="js/plugins/optimize.js?v=1.0.3.3"></script>
+    <script src="js/ui.js?v=1.0.3.3"></script>
+    <script src="js/keys.js?v=1.0.3.3"></script>
+    <script src="js/app.js?v=1.0.3.3"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

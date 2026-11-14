@@ -1761,7 +1761,7 @@ function pickCandidates(layer, eye, dir, tri)
         else
         {
             /* 退出即清空。原来只切光标、保留 pickPoints，于是：
-             *   - 三维视图里的十字标记一直挂着
+             *   - 视图里的序号标签一直挂着
              *   - renderPickBar 的判断是「未激活且无点才隐藏」，
              *     点还在就照样显示，信息栏也留在那儿
              * 下次进入拾取模式还会看到上次的残留。 */
@@ -1773,13 +1773,6 @@ function pickCandidates(layer, eye, dir, tri)
         // pickPoints 已清空，这里传进去的就是空数组，信息栏随之隐藏
         hooks.renderPickBar(this.pickPoints || [], this.pickInfo);
 
-        /* 直接同步给渲染器，不等下一帧 ——
-         * 渲染循环虽然也会同步，但它依赖帧调度；退出时用户期望
-         * 标记立刻消失，不该有一帧的延迟。 */
-        if (this.renderer)
-        {
-            this.renderer.pickMarks = this.pickPoints;
-        }
 
         this.markDirty();
     };
@@ -1811,7 +1804,6 @@ function pickCandidates(layer, eye, dir, tri)
     App.prototype.clearPicks = function ()
     {
         this.pickPoints = [];
-        if (this.renderer) { this.renderer.pickMarks = this.pickPoints; }
         hooks.renderPickBar([], this.pickInfo);
         this.markDirty();
     };
@@ -2136,6 +2128,15 @@ function pickCandidates(layer, eye, dir, tri)
         var normalThresh = (opts.normalThresh === undefined) ? 0.5 : opts.normalThresh;
         var onIter = opts.onIter || null;
 
+        /* 前段"放宽容差快速拉近"的放大倍数（trim-ICP 的常见技巧）。
+         *
+         * 默认 2 → 首轮容差 = 3×maxDist。这是为"初值差几十毫米"准备的；
+         * 但初值本来就只有 0.3mm 残差时，63mm 的容差会把薄板另一侧、
+         * 孔壁、装夹面全部当对应点，反而把好位姿拉偏：实测首轮后
+         * RMS 0.35 → 9.6，第二轮 → 24.2，第三轮才回到 0.47，
+         * 白烧两轮（每轮 1~4 秒）。调用方知道初值好坏，可以传更小的值。 */
+        var trimBoost = (opts.trimBoost === undefined) ? 2 : Math.max(0, opts.trimBoost);
+
         // 采样比例 0~1：1 表示不采样。兼容旧的整数 stride（1 表示全量）。
         var sampleRatio = 1;
         if (opts.sampleRatio !== undefined)
@@ -2229,6 +2230,7 @@ function pickCandidates(layer, eye, dir, tri)
         var lastRms = Infinity;
         var used = 0;
         var done = false;
+        var rmsHist = [];              // 最近 5 轮的 RMS（停滞早停用）
 
         /* 跑一轮，返回 { done, iters, rms, step, used } */
         function step()
@@ -2248,7 +2250,7 @@ function pickCandidates(layer, eye, dir, tri)
             if (maxDist > 0 && maxIter > 1)
             {
                 var decay = 1 - Math.min(1, iters / (maxIter * 0.66));
-                curMaxDist = maxDist * (1 + 2 * decay);
+                curMaxDist = maxDist * (1 + trimBoost * decay);
             }
 
             var A = new Float64Array(36);
@@ -2275,7 +2277,9 @@ function pickCandidates(layer, eye, dir, tri)
                     continue;
                 }
 
-                var qi = kd.nearestIndex(px, py, pz);
+                /* 把 maxDist 交给 KD：超出阈值的点本来就会被下面丢掉，
+                 * 提前当上界能把它当剪枝半径用（位姿还没收敛时尤其明显）。 */
+                var qi = kd.nearestIndex(px, py, pz, curMaxDist);
                 if (qi < 0) { continue; }
 
                 var q0 = qi * 3;
@@ -2377,6 +2381,27 @@ function pickCandidates(layer, eye, dir, tri)
             // 相对判据：不同尺度的模型用同一个 tol 才有一致的收敛行为。
             // 绝对阈值会导致大模型永远达不到、每次都跑满 maxIter。
             var converged = (Math.abs(lastRms - rms) < tol * (1 + rms)) || (stepLen < 1e-9);
+
+            /* 停滞早停：法向对称项下 RMS 常常进入"每轮只降万分之几"的长尾，
+             * tol=1e-7 的步长判据永远等不到，白跑二三十轮（每轮 0.5 秒）。
+             *
+             * 用「最近 5 轮窗口的相对极差 < 0.5%」而不是"连续 N 轮每轮降幅 < x%"：
+             * 逐轮判据在临界点会抖 —— 降幅 0.09% / 0.11% 交替出现时，计数器反复清零，
+             * 同一份数据有时 11 轮停、有时 28 轮停（实测耗时 4.1s ~ 11.6s）。
+             * 窗口判据看的是累计效果，正常收敛期 5 轮降幅合计在 3% 以上，不会误判。 */
+            rmsHist.push(rms);
+            if (rmsHist.length > 5) { rmsHist.shift(); }
+            if (rmsHist.length === 5)
+            {
+                var mx = rmsHist[0], mn = rmsHist[0];
+                for (var h = 1; h < 5; h++)
+                {
+                    if (rmsHist[h] > mx) { mx = rmsHist[h]; }
+                    if (rmsHist[h] < mn) { mn = rmsHist[h]; }
+                }
+                if (mx > 0 && (mx - mn) / mx < 0.005) { converged = true; }
+            }
+
             lastRms = rms;
 
             if (onIter && onIter(iters, rms, stepLen) === false) { done = true; }
@@ -2531,23 +2556,6 @@ function pickCandidates(layer, eye, dir, tri)
     }
 
 
-    /* ---------------- 自动粗配准（Super4PCS 的简化实现） ----------------
-     *
-     * 论文做法：从源点集取共面 4 点，用 LCP（最大公共点集）索引在目标中
-     * 快速找出与此 4 点全等的所有 4 点组，再按最优子集枚举 + RANSAC 打分。
-     *
-     * 这里做了三处简化，换来实现量与内存可控：
-     *   1. 不做 LCP 索引，改在抽样后的目标点集上按"逐级半径查询"扩张；
-     *   2. 不做最优子集枚举，每级只保留少量候选（宽基线本身已给出较强约束）；
-     *   3. 打分用固定抽样点的内点率，而不是全量 LCP。
-     *
-     * 对"两个姿态差异很大、PCA 主轴又区分不开"的工件，这一步能把 ICP
-     * 拉进收敛域，剩下的精度交给后面的对称 ICP。
-     */
-
-    /* 4×4 对称矩阵的最大特征向量（Jacobi 旋转），用于 Horn 四元数求解 */
-
-
     /* 候选验证：在**子集**上跑固定轮数的 ICP，用收敛后的残差排序。
      *
      * 为什么不能只看初始残差（更不能只看 4PCS 的 LCP）：
@@ -2557,7 +2565,11 @@ function pickCandidates(layer, eye, dir, tri)
      *
      * 为什么可以只在子集上跑：
      *   验证只需要**相对可比**。实测 8000/20000 的子集给出 19.62 / 3.44，
-     *   与全量 20.06 / 3.39 完全同序；计算量从近千万次最近邻降到约 20 万次。
+     *   与全量 20.06 / 3.39 完全同序。
+     *
+     * 候选数量：搜索解 + 质心对齐 + 主轴 24 假设 = 26 个。全跑 12 轮 ICP 要好几秒
+     * （每个 12 轮 × 8000 点 ≈ 0.35s），所以先按 screen() 的命中率粗筛取前 5，
+     * 计算量约 48 万次最近邻；排序结论与全量验证一致（实测多次复用同一顺序）。
      */
     function createVerifier(srcPos, srcNrm, dstPos, dstNrm, opts)
     {
@@ -2600,10 +2612,43 @@ function pickCandidates(layer, eye, dir, tri)
         var kd = global.MV.kdtree.build(D.pos);
         if (!kd) { return null; }
 
+        /* 粗筛用的更小源子集：候选有几十个时（PCA 24 假设 + 搜索解），
+         * 每个都跑 12 轮 ICP 代价太高（实测 26 个候选 ≈ 9 s）。
+         * 先按"delta 内的命中率"排一次序，只让排在前面的几个进完整验证。 */
+        var SS = take(srcPos, srcNrm, opts.maxScreenSrc || 1500);
+        var screenTol = opts.screenTol || 0;
+        var screenTol2 = screenTol * screenTol;
+
         return {
             kd: kd,
             srcCount: S.count,
             dstCount: D.count,
+
+            /* 廉价打分：变换后落在目标 delta 内的比例（不迭代） */
+            screen: function (mat)
+            {
+                if (!(screenTol > 0) || !SS) { return { hit: 0, med: Infinity }; }
+
+                var n = SS.count;
+                var good = 0;
+                var ds = new Float64Array(n);
+
+                for (var i = 0; i < n; i++)
+                {
+                    var px = SS.pos[i * 3], py = SS.pos[i * 3 + 1], pz = SS.pos[i * 3 + 2];
+                    var tx = mat[0] * px + mat[1] * py + mat[2] * pz + mat[3];
+                    var ty = mat[4] * px + mat[5] * py + mat[6] * pz + mat[7];
+                    var tz = mat[8] * px + mat[9] * py + mat[10] * pz + mat[11];
+
+                    var nb = kd.nearest(tx, ty, tz);
+                    var d2 = nb ? nb.dist2 : Infinity;
+                    ds[i] = d2;
+                    if (d2 <= screenTol2) { good++; }
+                }
+
+                var tmp = Array.prototype.slice.call(ds).sort(function (a, b) { return a - b; });
+                return { hit: good / n, med: Math.sqrt(tmp[Math.floor(n / 2)]) };
+            },
 
             score: function (mat)
             {
@@ -2629,17 +2674,112 @@ function pickCandidates(layer, eye, dir, tri)
         };
     }
 
+    /* ---------------- 主轴（PCA）多假设种子 ----------------
+     *
+     * 4PCS 终究是"随机采样共面 4 点 + 离散匹配"的搜索，姿态差越大越吃粒度：
+     * 候选四边形的位姿精度受采样点间距和判据容差限制（修好方向判据后仍有
+     * 2~4° 的残差），而且姿态差大时要靠运气才能采到正确的基。
+     *
+     * 而同一工件的两次测量、或 CAD 与实测，主轴是稳定可用的：把两侧主轴
+     * 对齐只需枚举 6 种轴置换 × 8 种符号（取行列式 +1 的 24 个真旋转），
+     * 计算量是一次 PCA，与点数线性相关。其中一个就落在真值附近，
+     * 交给廉价粗筛 + ICP 验证挑选即可。
+     *
+     * 返回 { mats: [24 个 4×4], confidence: 0~1 }。
+     * 矩阵语义与 super4pcs 一致（把 src 变换到 dst、row-major、末行 0,0,0,1）。
+     * confidence 是两侧特征值谱的吻合度：薄板 / 细长件 / 旋转体的主轴退化，
+     * 这时种子彼此重叠、粗筛挑不出好解，上层可以据此降低对它的依赖。
+     */
+    function det3of(R)
+    {
+        return R[0] * (R[4] * R[8] - R[5] * R[7])
+             - R[1] * (R[3] * R[8] - R[5] * R[6])
+             + R[2] * (R[3] * R[7] - R[4] * R[6]);
+    }
+
+    function pcaCandidates(srcPos, srcCount, dstPos, dstCount, opts)
+    {
+        opts = opts || {};
+        var a = pcaOf(srcPos, srcCount, opts.stride || Math.max(1, Math.round((srcCount || (srcPos.length / 3)) / 20000)));
+        var b = pcaOf(dstPos, dstCount, opts.strideDst || Math.max(1, Math.round((dstCount || (dstPos.length / 3)) / 20000)));
+        if (!a || !b) { return { mats: [], confidence: 0 }; }
+
+        var out = [];
+        var perm = [0, 1, 2];
+        var i, r, c, n;
+
+        function emit()
+        {
+            for (var mask = 0; mask < 8; mask++)
+            {
+                var R = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+                for (i = 0; i < 3; i++)
+                {
+                    var qa = b.axes[perm[i]];
+                    var pa = a.axes[i];
+                    var s = (mask & (1 << i)) ? -1 : 1;
+                    for (r = 0; r < 3; r++)
+                    {
+                        for (c = 0; c < 3; c++) { R[r * 3 + c] += s * qa[r] * pa[c]; }
+                    }
+                }
+
+                /* 只保留真旋转：反射解（det<0）刚体变换做不到 */
+                if (det3of(R) < 0) { continue; }
+
+                var M = new Float64Array(16);
+                M[0] = R[0]; M[1] = R[1]; M[2] = R[2];
+                M[4] = R[3]; M[5] = R[4]; M[6] = R[5];
+                M[8] = R[6]; M[9] = R[7]; M[10] = R[8];
+                M[3] = b.center[0] - (R[0] * a.center[0] + R[1] * a.center[1] + R[2] * a.center[2]);
+                M[7] = b.center[1] - (R[3] * a.center[0] + R[4] * a.center[1] + R[5] * a.center[2]);
+                M[11] = b.center[2] - (R[6] * a.center[0] + R[7] * a.center[1] + R[8] * a.center[2]);
+                M[15] = 1;
+
+                out.push(M);
+            }
+        }
+
+        /* 6 种轴置换 */
+        var idx = [0, 1, 2];
+        (function rec(k)
+        {
+            if (k === 3) { perm = [idx[0], idx[1], idx[2]]; emit(); return; }
+            for (var m = k; m < 3; m++)
+            {
+                var t = idx[k]; idx[k] = idx[m]; idx[m] = t;
+                rec(k + 1);
+                t = idx[k]; idx[k] = idx[m]; idx[m] = t;
+            }
+        })(0);
+
+        /* 特征值退化（薄板 / 细长件 / 旋转体）时主轴不可靠，按特征值谱的
+         * 差异给一个可靠度，供上层参考；退化严重时种子会互相重叠，
+         * 粗筛自然挑不出好解，不影响正确性。 */
+        var evA = a.values, evB = b.values;
+        var sumA = Math.max(1e-9, Math.abs(evA[0]) + Math.abs(evA[1]) + Math.abs(evA[2]));
+        var sumB = Math.max(1e-9, Math.abs(evB[0]) + Math.abs(evB[1]) + Math.abs(evB[2]));
+        var conf = 0;
+        for (n = 0; n < 3; n++) { conf += Math.abs(Math.abs(evA[n]) / sumA - Math.abs(evB[n]) / sumB); }
+        conf = Math.max(0, 1 - conf * 2);
+
+        return { mats: out, confidence: conf };
+    }
+
     global.MV.icp = {
         symmetric: symmetric,
         createSolver: createSolver,
         createVerifier: createVerifier,
         computeVertexNormals: computeVertexNormals,
         pcaOf: pcaOf,
+        pcaCandidates: pcaCandidates,
         jacobi3: jacobi3,
         solve6: solve6,
         expSO3: expSO3,
     };
 })(window);
+
 
 
 /* ==================== Super4PCS 全局粗配准（原 js/super4pcs.js） ==================== */
@@ -2658,16 +2798,22 @@ function pickCandidates(layer, eye, dir, tri)
  *   src/super4pcs/algorithms/super4pcs.cc        ExtractPairs /
  *                                                FindCongruentQuadrilaterals
  *   src/super4pcs/accelerators/normalset.h/.hpp  IndexedNormalSet3D
+ *                                                （已简化为 PositionHash3D，见下）
  *   src/super4pcs/shared4pcs.h                   Match4PCSOptions 默认值
  *
- * 与原版的已知差异（均为运行环境所迫，已在各处注明）：
+ * 与原版的已知差异（均为运行环境所迫或实测必要，已在各处注明）：
  *   1. ComputeRigidTransformation 用 Horn 四元数代替官方 SVD，
  *      二者都是最小二乘刚体解，数学等价；
  *   2. 单线程（官方有 OpenMP 并行验证候选）；
  *   3. 主循环提供按帧让出的分步接口，避免长时间阻塞浏览器主线程；
- *   4. 坐标统一归一化到 [0,1)，因为 IndexedNormalSet3D 的网格索引
- *      以 _egSize = 2^floor(-log2(eps)) 构建，直接用物理坐标会让
- *      _grid 规模爆炸（eps 很小时 _egSize^3 可达上亿）。
+ *   4. 点对提取不用官方的八叉树分层求交，改用 KD 环形查询（ExtractPairs 注释里有
+ *      完整理由：官方那套的第一遍剪枝以节点自身中心为球心，语义上不成立）；
+ *      因此"坐标必须平移到 [0,1)³"这条约束也不再需要，只有位置哈希还用到偏移；
+ *   5. 法向分箱那一维去掉，改成格内精确点积判角（原因见 PositionHash3D）；
+ *   6. 点对朝向显式枚举、ε 向下对齐、基四边形合法性校验、抽样用固定种子
+ *      （见各函数注释）；
+ *   7. Verify 的早停阈值默认提到 0.98（0.85 会被 180° 翻转解骗停）；
+ *      候选验证按 4 点残差升序取前 N，而不是按收集顺序。
  *
  * 对外接口：
  *   MV.super4pcs.register(P, Q, options) -> Float64Array(16) | null
@@ -2697,13 +2843,14 @@ function pickCandidates(layer, eye, dir, tri)
         terminate_threshold: 1.0,
 
         /* —— 以下是本实现追加的运行控制项，官方没有 —— */
-        maxCongruent: 300,      // 每次尝试最多验证多少个候选四边形
-        maxTrials: 0            // 0 表示用官方公式算出的迭代数
+        maxCongruent: 300,      // 每次尝试最多收集多少个候选四边形
+        maxVerify: 40,          // 每个候选四边形集最多做几次 LCP 验证（按 rms 升序取前 N）
+        maxTrials: 0,           // 0 表示用官方公式算出的迭代数
+        seed: 0                 // 0 = 用内置固定种子；置非 0 可换一组可复现的随机序列
     };
 
-    /* normalset.h：IndexedNormalSet3D = IndexedNormalSet<Point3D, 3, NG_SIZE, Scalar> */
-    var NG_SIZE = 7;                        // 法向每维分箱数，共 7^3 = 343
-    var ANGULAR_BINS = NG_SIZE * NG_SIZE * NG_SIZE;
+    /* 原 normalset.h 的 IndexedNormalSet3D 只保留了位置那一维（见 PositionHash3D），
+     * 法向分箱已去掉 —— 原因写在 PositionHash3D 的注释里。 */
 
     /* super4pcs.cc：distance_factor = 2.0 */
     var DISTANCE_FACTOR = 2.0;
@@ -2746,18 +2893,24 @@ function pickCandidates(layer, eye, dir, tri)
         return bx + by * base + bz * base * base;
     }
 
-    /* ================= IndexedNormalSet3D ================= */
+    /* ================= 位置哈希（原 IndexedNormalSet3D 的简化） ================= */
     /*
-     * normalset.h / .hpp 的直译。
-     *   _grid : AngularGrid[_egSize^dim]，_egSize 为每维位置格子数
-     *   AngularGrid = vector<unsigned>[343]，每个位置格子挂一张角度网格
-     * 位置与法向都必须先归一化；空体素惰性分配（官方注释即"内存高效"）。
+     * 官方 normalset.h 是「位置格子 × 法向 7³ 分箱」的双维度索引，查询时沿
+     * 圆锥母线圆周采样若干方向、只取被采样到的角度格。保留位置那一维，
+     * 去掉法向那一维：
+     *
+     *   1. 法向分箱每维 7 档，一个格子约 15°，比我们需要的角度判据（~4°）
+     *      粗了 4 倍，正确构型常常被就近分到隔壁格子里直接漏掉；
+     *   2. 官方靠"沿圆周采样被占用的角度格"控制查询代价，采样数最少只有 4，
+     *      覆盖率 4/343 —— 真解基本没机会被采样到；
+     *   3. 去掉这一维后，查询时对位置格内条目做精确点积判角，判据不再有
+     *      量化误差，而且格内条目本来就少（位置格边长 ~2δ），代价可控。
+     *
+     * 结果：候选四边形的 4 点拟合残差从 0.17（≈15° 方向误差）降到 0.02
+     * （≈2°），真解第一次被真正找到。
      */
-    function IndexedNormalSet3D(epsilon)
+    function PositionHash3D(epsilon)
     {
-        this.ngSize = NG_SIZE;
-        this.nepsilon = 1 / NG_SIZE + 0.00001;      // 略大于 1/NG_SIZE，使 floor 不越界
-
         /* 官方把 epsilon 向下对齐到 2 的幂：gridDepth = -log2(eps) */
         var gridDepth = Math.floor(-Math.log2(epsilon));
         if (!isFinite(gridDepth)) { gridDepth = 0; }
@@ -2766,63 +2919,29 @@ function pickCandidates(layer, eye, dir, tri)
 
         this.egSize = Math.pow(2, gridDepth);
         this.epsilon = 1 / this.egSize;
-
         this.grid = new Array(Math.pow(this.egSize, 3));   // 惰性分配，初值全 undefined
     }
 
-    IndexedNormalSet3D.prototype.coordinatesPos = function (x, y, z)
+    PositionHash3D.prototype.indexPos = function (x, y, z)
     {
         var inv = 1 / this.epsilon;
-        return [x * inv, y * inv, z * inv];
+        return unrollIndexLoop(x * inv, y * inv, z * inv, this.egSize);
     };
 
-    IndexedNormalSet3D.prototype.coordinatesNormal = function (nx, ny, nz)
-    {
-        var inv = 1 / this.nepsilon;
-        return [(nx / 2 + 0.5) * inv, (ny / 2 + 0.5) * inv, (nz / 2 + 0.5) * inv];
-    };
-
-    IndexedNormalSet3D.prototype.indexPos = function (x, y, z)
-    {
-        var c = this.coordinatesPos(x, y, z);
-        return unrollIndexLoop(c[0], c[1], c[2], this.egSize);
-    };
-
-    IndexedNormalSet3D.prototype.indexNormal = function (nx, ny, nz)
-    {
-        var c = this.coordinatesNormal(nx, ny, nz);
-        return unrollIndexLoop(c[0], c[1], c[2], this.ngSize);
-    };
-
-    IndexedNormalSet3D.prototype.addElement = function (px, py, pz, nx, ny, nz, id)
+    PositionHash3D.prototype.add = function (px, py, pz, id)
     {
         var pId = this.indexPos(px, py, pz);
         if (pId === -1) { return false; }
 
-        var nId = this.indexNormal(nx, ny, nz);
-        if (nId === -1) { return false; }
-
         var cell = this.grid[pId];
-        if (!cell)
-        {
-            cell = new Array(ANGULAR_BINS);
-            this.grid[pId] = cell;
-        }
-
-        var bucket = cell[nId];
-        if (!bucket) { bucket = []; cell[nId] = bucket; }
-        bucket.push(id);
+        if (!cell) { cell = this.grid[pId] = []; }
+        cell.push(id);
 
         return true;
     };
 
-    /* 重载 3：位置格子 + 沿"以 n 为极轴、半角 alpha 的圆锥母线圆周"采样
-     * 官方用这套圆环光栅化代替"枚举锥内所有角度格"，查询代价与点云规模无关。
-     *
-     * 官方源码写的是 std::atan(alpha)，按单位球几何应为 sin(alpha)
-     * （圆周半径 = sinα）。这里保留官方的 atan 写法并在采样数上取
-     * max(4, ...) 保证不因 alpha 很小而漏采。 */
-    IndexedNormalSet3D.prototype.getNeighbors = function (px, py, pz, nx, ny, nz, cosAlpha, tryReverse, out)
+    /* 位置格内所有条目（方向判据由调用方用精确点积完成） */
+    PositionHash3D.prototype.allInCell = function (px, py, pz, out)
     {
         var pId = this.indexPos(px, py, pz);
         if (pId === -1) { return; }
@@ -2830,81 +2949,32 @@ function pickCandidates(layer, eye, dir, tri)
         var cell = this.grid[pId];
         if (!cell) { return; }
 
-        var alpha = Math.acos(Math.max(-1, Math.min(1, cosAlpha)));
-        var perimeter = 2 * Math.PI * Math.atan(alpha);
-        var nbSample = 2 * Math.ceil(perimeter * NG_SIZE / 2);
-        if (!(nbSample >= 4)) { nbSample = 4; }
-
-        var angleStep = 2 * Math.PI / nbSample;
-        var sinAlpha = Math.sin(alpha);
-        var cosA = Math.cos(alpha);
-
-        /* 构造把 +Z 旋到 n 的四元数（官方 setFromTwoVectors）
-         * 这里直接用它旋转局部坐标，避免引入完整四元数类型。 */
-        var axis = rotateZTo(nx, ny, nz);
-
-        var colored = Object.create(null);
-        var a, theta, dx, dy, dz, id;
-
-        for (a = 0; a < nbSample; a++)
-        {
-            theta = a * angleStep;
-
-            var lx = sinAlpha * Math.cos(theta);
-            var ly = sinAlpha * Math.sin(theta);
-            var lz = cosA;
-
-            dx = axis[0] * lx + axis[3] * ly + axis[6] * lz;
-            dy = axis[1] * lx + axis[4] * ly + axis[7] * lz;
-            dz = axis[2] * lx + axis[5] * ly + axis[8] * lz;
-
-            var il = 1 / (Math.sqrt(dx * dx + dy * dy + dz * dz) || 1);
-            dx *= il; dy *= il; dz *= il;
-
-            id = this.indexNormal(dx, dy, dz);
-            if (id >= 0 && cell[id] && cell[id].length) { colored[id] = 1; }
-
-            if (tryReverse)
-            {
-                id = this.indexNormal(-dx, -dy, -dz);
-                if (id >= 0 && cell[id] && cell[id].length) { colored[id] = 1; }
-            }
-        }
-
-        for (var k in colored)
-        {
-            var bucket = cell[k];
-            for (var i = 0; i < bucket.length; i++) { out.push(bucket[i]); }
-        }
+        for (var i = 0; i < cell.length; i++) { out.push(cell[i]); }
     };
 
-    /* 旋转矩阵：把 +Z 轴转到单位向量 n（setFromTwoVectors 的矩阵形式） */
-    function rotateZTo(nx, ny, nz)
+    /* ================= 均匀采样（sampling.h 的 UniformDistSampler） ================= */
+
+    /* 确定性伪随机源（mulberry32）。
+     *
+     * 4PCS 的抽样、取基、直径估计全依赖随机数。用 Math.random 的后果是
+     * 同一份数据两次运行给出不同结果 —— 实测同一对点云一次 LCP 0.54、
+     * 下一次 0.23（差到"能用/不能用"），用户看到的就是「粗配准时好时坏」。
+     * 换成按固定种子重播的 PRNG：每次 init 重置种子，同一输入必得同一输出，
+     * 便于复现问题，也让 ICP 的最终结果可重复。 */
+    var rngState = 0x9E3779B9;
+
+    function setRngSeed(s)
     {
-        var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-        if (!(len > 1e-12)) { return IDENT4.slice(0, 9); }
-        nx /= len; ny /= len; nz /= len;
-
-        var dot = nz;                 // (0,0,1)·n
-        if (dot > 0.9999999) { return [1, 0, 0, 0, 1, 0, 0, 0, 1]; }
-        if (dot < -0.9999999) { return [-1, 0, 0, 0, -1, 0, 0, 0, 1]; }   // 绕 X 转 180°
-
-        // axis = z × n = (-ny, nx, 0)
-        var ax = -ny, ay = nx, az = 0;
-        var s = Math.sqrt(ax * ax + ay * ay + az * az);
-        ax /= s; ay /= s; az /= s;
-
-        var c = dot;
-        var t = 1 - c;
-
-        return [
-            t * ax * ax + c,      t * ax * ay - s * az, t * ax * az + s * ay,
-            t * ax * ay + s * az, t * ay * ay + c,      t * ay * az - s * ax,
-            t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c
-        ];
+        rngState = (s | 0) || 0x9E3779B9;
     }
 
-    /* ================= 均匀采样（sampling.h 的 UniformDistSampler） ================= */
+    function rnd()
+    {
+        rngState = (rngState + 0x6D2B79F5) | 0;
+        var t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
 
     /* 随机抽取 count 个互不相同的索引（部分 Fisher-Yates）。 */
     function pickIdx(total, count)
@@ -2923,7 +2993,7 @@ function pickCandidates(layer, eye, dir, tri)
 
         for (i = 0; i < count; i++)
         {
-            var j = i + Math.floor(Math.random() * (total - i));
+            var j = i + Math.floor(rnd() * (total - i));
             var t = pool[i]; pool[i] = pool[j]; pool[j] = t;
         }
 
@@ -2946,7 +3016,7 @@ function pickCandidates(layer, eye, dir, tri)
         // 部分 Fisher-Yates：只取前 sampleSize 个
         for (i = 0; i < sampleSize; i++)
         {
-            var j = i + Math.floor(Math.random() * (count - i));
+            var j = i + Math.floor(rnd() * (count - i));
             var t = pool[i]; pool[i] = pool[j]; pool[j] = t;
         }
 
@@ -3159,15 +3229,14 @@ function pickCandidates(layer, eye, dir, tri)
         this.scale = 1;
         this.centroidP = [0, 0, 0];
         this.centroidQ = [0, 0, 0];
-        this.kdTree = null;        // 建在 sampledQ 上
+        this.kdTreeQ = null;       // 建在 sampledQ 上（点对提取）
+        this.kdEval = null;        // 建在密集评分云上（LCP 打分）
+        this.evalDense = 0;
 
         this.base = [null, null, null, null];
         this.baseIds = [0, 0, 0, 0];
         this.bestLCP = 0;
         this.baselineLCP = 0;
-        this.kdEval = null;
-        this.evalPos = null;
-        this.evalDense = 0;
         this.bestTransform = null;
         this.bestPairs = null;
 
@@ -3187,7 +3256,10 @@ function pickCandidates(layer, eye, dir, tri)
             verifyRun: 0,       // 实际执行 verify 的次数
             lcpBest: 0,         // 本次尝试拿到的最好 LCP
             baseFail: 0,        // 基选取失败次数
-            pairFail: 0         // 点对提取为空的次数
+            pairFail: 0,        // 点对提取为空的次数
+            rmsMin: 9,          // 候选四边形的最小 rms（归一化）
+            rmsN: 0,            // 实际算过 rms 的候选数
+            nullM: 0            // solveRigid 返回空的次数
         };
     }
 
@@ -3195,6 +3267,9 @@ function pickCandidates(layer, eye, dir, tri)
     Registration.prototype.init = function ()
     {
         var o = this.options;
+
+        /* 每次求解都从同一个种子重播：抽样 / 取基 / 直径估计全部可复现 */
+        setRngSeed(o.seed);
 
         var sp = uniformSample(this.P.positions, this.P.count, o.sample_size);
         var sq = uniformSample(this.Q.positions, this.Q.count, o.sample_size);
@@ -3225,15 +3300,11 @@ function pickCandidates(layer, eye, dir, tri)
          * 若改用 bbox 最小点，旋转后同一块几何会落到不同坐标，
          * 不变量 r1/r2 就失去意义了。
          *
-         * 但 IndexedNormalSet3D 的 indexPos 要求坐标 ∈ [0,1)（内部 floor(p/_epsilon)），
+         * 但位置哈希（PositionHash3D）要求坐标 ∈ [0,1)（内部 floor(p/_epsilon)），
          * 质心系下坐标是 [-0.5, 0.5]。两者用一个常数偏移衔接：
          *     索引坐标 = 变换坐标 + (centroid − bboxMin) / scale
-         * 偏移是常数，不影响任何距离与比值，只用于满足索引的非负要求。 */
-        this.indexShiftP = [
-            (cP[0] - bp.min[0]) / scale,
-            (cP[1] - bp.min[1]) / scale,
-            (cP[2] - bp.min[2]) / scale
-        ];
+         * 偏移是常数，不影响任何距离与比值，只用于满足索引的非负要求。
+         * （点对提取走 KD 环形查询，不需要这个偏移；只有点对交点索引要用。） */
         this.indexShiftQ = [
             (cQ[0] - bq.min[0]) / scale,
             (cQ[1] - bq.min[1]) / scale,
@@ -3258,46 +3329,43 @@ function pickCandidates(layer, eye, dir, tri)
         }
 
         /* 两棵 KD 树，用途不同：
-         *   kdTreeQ —— ExtractPairs 在目标点云里找"与基线等长的点对"
-         *   kdTreeP —— Verify 把变换后的 Q 点拿去 P 里查，统计命中率
+         *   kdTreeQ —— ExtractPairs 在目标采样云里找"与基线等长的点对"
+         *   kdEval  —— Verify（LCP 打分）把 P 侧点变换后拿去查，统计命中率
          *
-         * 之前只建了一棵（都在 Q 上），Verify 于是变成"Q 自己查自己"：
+         * 两者都必须建在【Q 侧】。曾经只建了一棵且用来"Q 查 Q"：
          * 单位阵下每个查询点就是它本身，距离恒为 0，LCP 永远 1.0 ——
          * 算法一开始就认为"已经配准好了"，一次搜索都不做。 */
         this.kdTreeQ = MV.kdtree.build(this.sampledQ);
         if (!this.kdTreeQ) { return false; }
 
-        this.kdTreeP = MV.kdtree.build(this.sampledP);
-        if (!this.kdTreeP) { return false; }
-
         /* 评分专用密集点云（建在 Q 上，与 sampledQ 同坐标系）。
          *
-         * 为什么必须分开：verify 的命中容差是 delta，而 sample_size 只有
-         * 2000 点，间距约 scale/sqrt(2000)。若 delta 小于这个间距，
+         * 为什么必须比 sample_size 密：verify 的命中容差是 delta，而 sample_size
+         * 只有 2500 点，间距约 scale/sqrt(2500)。若 delta 小于这个间距，
          * 即使【完全对齐】也只有一半点能命中 —— bestLCP 的天花板被锁在 50%
          * 附近，而初始基准（原始位姿）随手就能达到这个量级，
          * 于是任何候选都超不过基准，搜索等于空转。
          *
          * 用 evalDense 点建树后，间距 = scale/sqrt(evalDense)，
-         * delta 才有意义。 */
-        /* 必须从【原始点云】抽样，不能从 sq 抽 ——
-         * sq 已经是 sample_size（例如 2000）抽稀后的结果，
-         * 从它再抽只能得到更稀疏的子集，间距一点没变。
-         * 这正是"密集评分树"名不副实、delta 失去区分力的原因。 */
+         * delta 才有意义。
+         *
+         * 另外必须从【原始点云】抽样，不能从 sq 抽 ——
+         * sq 已经是 sample_size 抽稀后的结果，从它再抽只能得到更稀疏的子集，
+         * 间距一点没变。这正是"密集评分树"名不副实、delta 失去区分力的原因。 */
         var evalDense = Math.min(o.evalDense || 20000, this.Q.count);
         this.evalDense = evalDense;
 
         var evalIdx = pickIdx(this.Q.count, evalDense);
-        this.evalPos = new Float64Array(evalDense * 3);
+        var evalPos = new Float64Array(evalDense * 3);
 
         for (i = 0; i < evalDense; i++)
         {
-            this.evalPos[i * 3] = (this.Q.positions[evalIdx[i] * 3] - cQ[0]) / scale;
-            this.evalPos[i * 3 + 1] = (this.Q.positions[evalIdx[i] * 3 + 1] - cQ[1]) / scale;
-            this.evalPos[i * 3 + 2] = (this.Q.positions[evalIdx[i] * 3 + 2] - cQ[2]) / scale;
+            evalPos[i * 3] = (this.Q.positions[evalIdx[i] * 3] - cQ[0]) / scale;
+            evalPos[i * 3 + 1] = (this.Q.positions[evalIdx[i] * 3 + 1] - cQ[1]) / scale;
+            evalPos[i * 3 + 2] = (this.Q.positions[evalIdx[i] * 3 + 2] - cQ[2]) / scale;
         }
 
-        this.kdEval = MV.kdtree.build(this.evalPos);
+        this.kdEval = MV.kdtree.build(evalPos);
         if (!this.kdEval) { return false; }
 
         /* 归一化后的各项距离 */
@@ -3308,8 +3376,8 @@ function pickCandidates(layer, eye, dir, tri)
         var diameter = 0;
         for (i = 0; i < K_NUMBER_OF_DIAMETER_TRIALS; i++)
         {
-            var at = (Math.random() * this.countQ) | 0;
-            var bt = (Math.random() * this.countQ) | 0;
+            var at = (rnd() * this.countQ) | 0;
+            var bt = (rnd() * this.countQ) | 0;
             var dx = this.sampledQ[at * 3] - this.sampledQ[bt * 3];
             var dy = this.sampledQ[at * 3 + 1] - this.sampledQ[bt * 3 + 1];
             var dz = this.sampledQ[at * 3 + 2] - this.sampledQ[bt * 3 + 2];
@@ -3419,14 +3487,14 @@ function pickCandidates(layer, eye, dir, tri)
         var maxD = this.maxBaseDiameter;
         var maxD2 = maxD * maxD;
 
-        var i1 = (Math.random() * n) | 0;
+        var i1 = (rnd() * n) | 0;
         var bestWide = -1;
         var b1 = -1, b2 = -1;
 
         for (var k = 0; k < K_NUMBER_OF_DIAMETER_TRIALS; k++)
         {
-            var i2 = (Math.random() * n) | 0;
-            var i3 = (Math.random() * n) | 0;
+            var i2 = (rnd() * n) | 0;
+            var i3 = (rnd() * n) | 0;
             if (i2 === i1 || i3 === i1 || i2 === i3) { continue; }
 
             var ux = S[i2 * 3] - S[i1 * 3];
@@ -3548,6 +3616,11 @@ function pickCandidates(layer, eye, dir, tri)
         this.baseIds = [ids[best.a], ids[best.b], ids[best.c], ids[best.d]];
         this.invariant1 = best.r1;
         this.invariant2 = best.r2;
+        /* 两条基线的最近距离：真正的 4PCS 基要求它们【真的相交】。
+         * 落在端点（r=0 或 1）说明两条线段不相交、只是在端点附近擦过，
+         * 此时不变量退化成一个端点坐标，等长匹配的约束整体失效，
+         * 后续候选四边形全是噪声（实测这类基占多数，rms 永远进不了门限）。 */
+        this.baseMinDist = minDist;
 
         /* 两条基线的夹角余弦 —— FindCongruentQuadrilaterals 的方向约束 */
         var abx = this.base[1][0] - this.base[0][0];
@@ -3565,202 +3638,39 @@ function pickCandidates(layer, eye, dir, tri)
         return true;
     };
 
-    /* ================================================================
-     * IntersectionFunctor —— 官方 accelerators/pairExtraction/ 的分层求交
-     *
-     * 官方 ExtractPairs 不是逐点做半径查询，而是：
-     *   1. 把 eps 吸附成 2 的负幂，据此确定八叉树深度 lvlMax = -log2(eps)；
-     *   2. 从覆盖 [0,1]^3 的根节点逐层细分，
-     *      每层【只保留与某个球壳相交的节点】，其余整枝丢弃；
-     *   3. 节点内点数 <= minNodeSize 时停止分裂，存为 earlyNode；
-     *   4. 第二遍按 primitive 遍历存活叶子，粗筛(2eps) + 精筛(eps) 输出点对。
-     *
-     * 复杂度对点数近似线性、对输出规模敏感 —— 这是 Super4PCS 能在一分钟内
-     * 处理几十万点的根本原因。逐点 KD 半径查询写起来简单，但每个点都要
-     * 走一趟树，实测在两片 2000 点上要跑出近 5000 万次查询。
-     *
-     * 本实现保留官方结构；差异只有：
-     *   - 用索引数组 + 计数排序做节点切分（等价于 Node::split）；
-     *   - 加了输出上限 limit。
-     * ================================================================ */
-
-    /* 官方 GetRoundedEpsilonValue：吸附到 2 的负幂 */
-    function roundEpsilon(eps)
-    {
-        var lvlMax = Math.floor(-Math.log2(eps));
-        if (!isFinite(lvlMax) || lvlMax < 1) { lvlMax = 1; }
-        if (lvlMax > 9) { lvlMax = 9; }
-        return { eps: 1 / Math.pow(2, lvlMax), lvlMax: lvlMax };
-    }
-
-    function shellHitsNode(pts, pi, node, r, tol)
-    {
-        var o = pi * 3;
-        var dx = node.cx - pts[o];
-        var dy = node.cy - pts[o + 1];
-        var dz = node.cz - pts[o + 2];
-        var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        return Math.abs(d - r) <= tol;
-    }
-
-    function shellHitsPoint(pts, pi, qi, r, eps)
-    {
-        var a = pi * 3, b = qi * 3;
-        var dx = pts[a] - pts[b];
-        var dy = pts[a + 1] - pts[b + 1];
-        var dz = pts[a + 2] - pts[b + 2];
-        var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        return Math.abs(d - r) <= eps;
-    }
-
-    /* 节点切分：按 8 卦限重排 ids[i0..i1) */
-    function splitNode(pts, ids, node, out, halfEdge)
-    {
-        var i0 = node.i0, i1 = node.i1;
-        var cnt = [0, 0, 0, 0, 0, 0, 0, 0];
-        var i, o, b;
-
-        for (i = i0; i < i1; i++)
-        {
-            o = ids[i] * 3;
-            b = (pts[o] >= node.cx ? 1 : 0)
-              | (pts[o + 1] >= node.cy ? 2 : 0)
-              | (pts[o + 2] >= node.cz ? 4 : 0);
-            cnt[b]++;
-        }
-
-        var start = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-        for (i = 0; i < 8; i++) { start[i + 1] = start[i] + cnt[i]; }
-
-        var buf = new Int32Array(i1 - i0);
-        var pos = start.slice(0, 8);
-
-        for (i = i0; i < i1; i++)
-        {
-            o = ids[i] * 3;
-            b = (pts[o] >= node.cx ? 1 : 0)
-              | (pts[o + 1] >= node.cy ? 2 : 0)
-              | (pts[o + 2] >= node.cz ? 4 : 0);
-            buf[pos[b]++] = ids[i];
-        }
-        for (i = 0; i < buf.length; i++) { ids[i0 + i] = buf[i]; }
-
-        for (i = 0; i < 8; i++)
-        {
-            if (!cnt[i]) { continue; }
-            out.push({
-                cx: node.cx + ((i & 1) ? halfEdge : -halfEdge),
-                cy: node.cy + ((i & 2) ? halfEdge : -halfEdge),
-                cz: node.cz + ((i & 4) ? halfEdge : -halfEdge),
-                i0: i0 + start[i],
-                i1: i0 + start[i] + cnt[i]
-            });
-        }
-    }
-
-    /* 官方 IntersectionFunctor::process 的直译 */
-    function processIntersection(pts, n, radius, epsIn, minNodeSize, limit, out)
-    {
-        var re = roundEpsilon(epsIn);
-        var eps = re.eps;
-        var lvlMax = re.lvlMax;
-
-        var ids = new Int32Array(n);
-        for (var i = 0; i < n; i++) { ids[i] = i; }
-
-        var nodes = [];
-        var children = [{ cx: 0.5, cy: 0.5, cz: 0.5, i0: 0, i1: n }];
-        var early = [];
-        var clvl = 0;
-
-        /* 第一遍：自顶向下，只保留与球壳相交的格子 */
-        while (clvl !== lvlMax - 1)
-        {
-            if (!children.length) { break; }
-
-            var halfEdge = (1 / Math.pow(2, clvl)) / 2;
-
-            nodes = children;
-            children = [];
-
-            for (var ni = 0; ni < nodes.length; ni++)
-            {
-                var nd = nodes[ni];
-                var hit = false;
-
-                for (var pi = 0; pi < n; pi++)
-                {
-                    if (shellHitsNode(pts, pi, nd, radius, halfEdge + eps)) { hit = true; break; }
-                }
-                if (!hit) { continue; }
-
-                if (nd.i1 - nd.i0 > minNodeSize) { splitNode(pts, ids, nd, children, halfEdge); }
-                else { early.push({ node: nd, tol: halfEdge + eps }); }
-            }
-
-            clvl++;
-        }
-
-        /* 调试计数（供诊断用，不影响算法） */
-        processIntersection.dbg = {
-            eps: eps,
-            lvlMax: lvlMax,
-            radius: radius,
-            leaves: children.length,
-            earlyLeaves: early.length,
-            leafPoints: children.reduce(function (a, c) { return a + (c.i1 - c.i0); }, 0)
-        };
-
-        /* 第二遍：按 primitive 遍历存活叶子，粗筛 + 精筛 */
-        for (var p = 0; p < n; p++)
-        {
-            var k, leaf, j, q;
-
-            for (k = 0; k < children.length; k++)
-            {
-                leaf = children[k];
-                if (!shellHitsNode(pts, p, leaf, radius, eps * 2)) { continue; }
-
-                for (j = leaf.i0; j < leaf.i1; j++)
-                {
-                    q = ids[j];
-                    if (!(p > q)) { continue; }
-                    if (!shellHitsPoint(pts, p, q, radius, eps)) { continue; }
-
-                    out.push([p, q]);
-                    if (out.length >= limit) { return out; }
-                }
-            }
-
-            for (k = 0; k < early.length; k++)
-            {
-                var e = early[k];
-                if (!shellHitsNode(pts, p, e.node, radius, e.tol)) { continue; }
-
-                for (j = e.node.i0; j < e.node.i1; j++)
-                {
-                    q = ids[j];
-                    if (!(p > q)) { continue; }
-                    if (!shellHitsPoint(pts, p, q, radius, eps)) { continue; }
-
-                    out.push([p, q]);
-                    if (out.length >= limit) { return out; }
-                }
-            }
-        }
-
-        return out;
-    }
-
     /* super4pcs.cc : ExtractPairs
      * 找出"两点距离落在 [dist−eps, dist+eps] 内"的点对。
-     * 官方用 PairCreationFunctor + IntersectionFunctor 的网格加速；
-     * 这里用 KD 半径查询，语义等价。 */
+     *
+     * 用 KD 树的【环形查询】（下界 dist−eps、上界 dist+eps）。之前走的是
+     * 官方的八叉树分层求交，但那套实现的第一遍"只保留与球壳相交的格子"
+     * 是以节点自身中心为球心的，语义上并不成立：扫全云时几乎每个节点都留、
+     * 起不到剪枝作用（实测量级的一半时间花在这）；只扫本节点的点又会把
+     * 真解全剪掉（实测 pairs 直接归零）。
+     * 这里改成逐点的环形查询 —— 语义直白（正是"等距点对"的定义），
+     * 采样规模只有 sample_size（2500），一次环查只回壳上的几个点。 */
     Registration.prototype.extractPairs = function (dist, eps, limit)
     {
-        /* 走官方的分层求交（IntersectionFunctor），不再逐点做 KD 半径查询。 */
-        var out = processIntersection(this.sampledQ, this.countQ, dist, eps, 50, limit, []);
-        this.diag.is = processIntersection.dbg || null;
+        var out = [];
+        var kd = this.kdTreeQ;
+        var Q = this.sampledQ;
+        var n = this.countQ;
+        var rMax = dist + eps;
+        var rMin = Math.max(0, dist - eps);
+
+        for (var p = 0; p < n; p++)
+        {
+            var cand = kd.radius(Q[p * 3], Q[p * 3 + 1], Q[p * 3 + 2], rMax, rMin);
+            for (var k = 0; k < cand.length; k++)
+            {
+                var q = cand[k];
+                /* 每对只出现一次（按点号定序，与遍历顺序无关） */
+                if (q >= p) { continue; }
+
+                out.push([p, q]);
+                if (out.length >= limit) { return out; }
+            }
+        }
+
         this.diag.isOut = out.length;
         return out;
     };
@@ -3780,10 +3690,28 @@ function pickCandidates(layer, eye, dir, tri)
         var distThreshold = this.distFactorN;
         var eps = Math.max(1e-6, distThreshold);       // getNormalizedEpsilon
 
-        var nset = new IndexedNormalSet3D(eps);
-        var i;
+        var nset = new PositionHash3D(eps);
+        var i, o;
+        var sh = this.indexShiftQ;
+        var r1 = this.invariant1;
+        var r2 = this.invariant2;
+        var alphaCos = this.alpha;
 
-        /* P 侧建索引：按 invariant1 插值得到"交点位置"，点对方向作为法向 */
+        /* 方向判据的容差。基与候选都是"采样点上的线段"，方向只差噪声，
+         * 用余弦差 0.06（约 4°）足够；比 7³ 分箱的 ~15° 量化严到可用。 */
+        var angTol = this.options.angTol || 0.06;
+
+        /* 每条索引条目对应的线段方向（供精确判角） */
+        var dirs = new Float64Array(pairs1.length * 3);
+
+        /* 建索引。注意：ExtractPairs 输出的点对下标顺序是【索引大小序】
+         * （extractPairs 里按点号 q < p 定序），与几何朝向无关；而不变量 r
+         * 是"从点对第一个端点量起的比例"，天然有向。
+         * 只按一种朝向建索引，等于假设目标侧线段的端点顺序恰好与基一致 ——
+         * 实际只有约一半命中，其余全部算到镜像位置上（误差 = |1−2r|·L），
+         * 表现为「候选四边形 rms 永远进不了门限」。
+         * 因此每个点对按【两种朝向】各插一条索引，查询侧同样两种朝向都试，
+         * 命中时按朝向把端点顺序还原，得到真正对应的四边形。 */
         for (i = 0; i < pairs1.length; i++)
         {
             var a = pairs1[i][0] * 3, b = pairs1[i][1] * 3;
@@ -3795,18 +3723,24 @@ function pickCandidates(layer, eye, dir, tri)
             if (!(dl > 1e-12)) { continue; }
             dx /= dl; dy /= dl; dz /= dl;
 
-            var sh = this.indexShiftQ;
-            var ix = p1x + this.invariant1 * (p2x - p1x) + sh[0];
-            var iy = p1y + this.invariant1 * (p2y - p1y) + sh[1];
-            var iz = p1z + this.invariant1 * (p2z - p1z) + sh[2];
+            dirs[i * 3] = dx; dirs[i * 3 + 1] = dy; dirs[i * 3 + 2] = dz;
 
-            nset.addElement(ix, iy, iz, dx, dy, dz, i);
+            /* 朝向 0：p1 → p2，取 r1 处的点 */
+            nset.add(p1x + r1 * (p2x - p1x) + sh[0],
+                     p1y + r1 * (p2y - p1y) + sh[1],
+                     p1z + r1 * (p2z - p1z) + sh[2],
+                     2 * i);
+
+            /* 朝向 1：p2 → p1，同一点但方向取反 */
+            nset.add(p1x + (1 - r1) * (p2x - p1x) + sh[0],
+                     p1y + (1 - r1) * (p2y - p1y) + sh[1],
+                     p1z + (1 - r1) * (p2z - p1z) + sh[2],
+                     2 * i + 1);
         }
 
-        /* Q 侧查询：按 invariant2 插值 */
+        /* 查询侧：两种朝向都查 */
         var nei = [];
         var seen = Object.create(null);
-        var alphaCos = this.alpha;
 
         for (i = 0; i < pairs2.length; i++)
         {
@@ -3814,40 +3748,59 @@ function pickCandidates(layer, eye, dir, tri)
             var q1x = Q[c], q1y = Q[c + 1], q1z = Q[c + 2];
             var q2x = Q[d], q2y = Q[d + 1], q2z = Q[d + 2];
 
-            var ex = q1x + this.invariant2 * (q2x - q1x);
-            var ey = q1y + this.invariant2 * (q2y - q1y);
-            var ez = q1z + this.invariant2 * (q2z - q1z);
-
             var ndx = q2x - q1x, ndy = q2y - q1y, ndz = q2z - q1z;
             var ndl = Math.sqrt(ndx * ndx + ndy * ndy + ndz * ndz);
             if (!(ndl > 1e-12)) { continue; }
             ndx /= ndl; ndy /= ndl; ndz /= ndl;
 
-            nei.length = 0;
-            var shq = this.indexShiftQ;
-            nset.getNeighbors(ex + shq[0], ey + shq[1], ez + shq[2],
-                              ndx, ndy, ndz, alphaCos, false, nei);
-
-            for (var t = 0; t < nei.length; t++)
+            for (o = 0; o < 2; o++)
             {
-                var id = nei[t];
+                var ex = q1x + (o ? (1 - r2) : r2) * (q2x - q1x);
+                var ey = q1y + (o ? (1 - r2) : r2) * (q2y - q1y);
+                var ez = q1z + (o ? (1 - r2) : r2) * (q2z - q1z);
+                var sgn = o ? -1 : 1;
 
-                /* 二次校验：用 P 侧该点对按 invariant1 重算插值点，与查询点比距离 */
-                var pa = pairs1[id][0] * 3, pb = pairs1[id][1] * 3;
-                var vx = Q[pa] + this.invariant1 * (Q[pb] - Q[pa]);
-                var vy = Q[pa + 1] + this.invariant1 * (Q[pb + 1] - Q[pa + 1]);
-                var vz = Q[pa + 2] + this.invariant1 * (Q[pb + 2] - Q[pa + 2]);
+                nei.length = 0;
+                nset.allInCell(ex + sh[0], ey + sh[1], ez + sh[2], nei);
 
-                var gx = ex - vx, gy = ey - vy, gz = ez - vz;
-                if (gx * gx + gy * gy + gz * gz > distThreshold * distThreshold) { continue; }
+                for (var t = 0; t < nei.length; t++)
+                {
+                    var enc = nei[t];
+                    var id = enc >> 1;
+                    var o1 = enc & 1;
 
-                var key = id + ':' + i;
-                if (seen[key]) { continue; }
-                seen[key] = 1;
+                    /* 精确方向判据：两条基线的夹角必须与基一致。
+                     * 候选线段方向 = 朝向修正后的 dirs[id]，查询方向见上。 */
+                    var ux = dirs[id * 3], uy = dirs[id * 3 + 1], uz = dirs[id * 3 + 2];
+                    var cw = sgn * ndx * (o1 ? -ux : ux)
+                           + sgn * ndy * (o1 ? -uy : uy)
+                           + sgn * ndz * (o1 ? -uz : uz);
+                    if (Math.abs(cw - alphaCos) > angTol) { continue; }
 
-                quadrilaterals.push([pairs1[id][0], pairs1[id][1], pairs2[i][0], pairs2[i][1]]);
+                    /* 位置校验：按该条索引的朝向重算插值点，与查询点比距离 */
+                    var pa = pairs1[id][0] * 3, pb = pairs1[id][1] * 3;
+                    var rr = o1 ? (1 - r1) : r1;
+                    var vx = Q[pa] + rr * (Q[pb] - Q[pa]);
+                    var vy = Q[pa + 1] + rr * (Q[pb + 1] - Q[pa + 1]);
+                    var vz = Q[pa + 2] + rr * (Q[pb + 2] - Q[pa + 2]);
 
-                if (quadrilaterals.length >= maxCongruent) { return true; }
+                    var gx = ex - vx, gy = ey - vy, gz = ez - vz;
+                    if (gx * gx + gy * gy + gz * gz > distThreshold * distThreshold) { continue; }
+
+                    var key = enc + ':' + i + ':' + o;
+                    if (seen[key]) { continue; }
+                    seen[key] = 1;
+
+                    /* 按朝向还原端点顺序：第一段是 P 侧基线的像，第二段是第二条 */
+                    quadrilaterals.push([
+                        o1 ? pairs1[id][1] : pairs1[id][0],
+                        o1 ? pairs1[id][0] : pairs1[id][1],
+                        o ? pairs2[i][1] : pairs2[i][0],
+                        o ? pairs2[i][0] : pairs2[i][1]
+                    ]);
+
+                    if (quadrilaterals.length >= maxCongruent) { return true; }
+                }
             }
         }
 
@@ -3868,8 +3821,8 @@ function pickCandidates(layer, eye, dir, tri)
          */
         var S = this.sampledP;
         var kd = this.kdEval;          // Q 侧密集树
-        var n = this.countP;
         var delta = this.deltaN;
+        var n = this.countP;
 
         var terminate = this.bestLCP * n;
         var good = 0;
@@ -3882,8 +3835,13 @@ function pickCandidates(layer, eye, dir, tri)
             var ty = M[4] * px + M[5] * py + M[6] * pz + M[7];
             var tz = M[8] * px + M[9] * py + M[10] * pz + M[11];
 
-            var cand = kd.radius(tx, ty, tz, delta, 0);
-            if (cand && cand.length) { good++; }
+            /* 用 nearestIndex 而不是 radius：这里只关心"有没有点落在 delta 内"，
+             * 半径查询会把球内所有点都收集进数组（一次分配 + 若干 push），
+             * 而 LCP 打分是这个搜索最热的路径（每轮 40 次 × 2500 点）。
+             * 最近邻只走一条下降路径，且不分配内存。
+             * 直接把 delta 当上界传下去：超出就是"没命中"，连距离都不用算，
+             * 顺带让剪枝从一开始就是紧的。 */
+            if (kd.nearestIndex(tx, ty, tz, delta) >= 0) { good++; }
 
             /* 剩余点全中也追不上当前最优 → 放弃（官方 Verify 的增量早停） */
             if (n - i + good < terminate) { break; }
@@ -3898,11 +3856,24 @@ function pickCandidates(layer, eye, dir, tri)
     {
         var Q = this.sampledQ;
         var b = this.base;
-        var rmsLimit = this.distFactorN;
+        /* 门限按「两条基线各自都可能差满一个 eps」放宽到 4δ：
+         * 点对提取的容差是 2δ，两条基线共 4 个端点的误差累积到 4 点拟合的
+         * rms 上，用 2δ 当门限等于要求每条基线零误差 —— 实测通过率恒为 0。
+         * 放宽后真正的筛选交给后面的 LCP 打分。 */
+        var rmsLimit = (this.options.rmsGate || 2) * this.distFactorN;
 
-        var maxVerify = this.options.maxCongruent || 300;
+        /* 先给全部候选算出「4 点刚体拟合残差」，按残差升序只验证最好的几十个。
+         *
+         * 为什么不能按遍历顺序验证前 N 个：候选是按点对遍历顺序插入的，
+         * 前 300 个几乎全部出自同一小片区域、彼此高度相关，而真正的正确
+         * 构型可能排在很后面。实测同一轮里 300 个候选的 rms 跨越 0.05~0.6，
+         * 按序验证等于把预算全花在垃圾上（单次 verify 是 2500 次最近邻，
+         * 300 个/trial × 120 trial ≈ 9 千万次查询，正是十几秒的来源）。 */
+        var maxVerify = this.options.maxVerify || 40;
+        var pool = [];
+        var i, r;
 
-        for (var i = 0; i < quads.length && i < maxVerify; i++)
+        for (i = 0; i < quads.length; i++)
         {
             if (this.cancelled) { return false; }
 
@@ -3921,7 +3892,7 @@ function pickCandidates(layer, eye, dir, tri)
                 [b[3][0], b[3][1], b[3][2], qx[3][0], qx[3][1], qx[3][2]]
             ]);
 
-            if (!M) { continue; }
+            if (!M) { this.diag.nullM++; continue; }
 
             /* rms 门限（官方 rms < distance_factor * delta） */
             var rms = 0, r;
@@ -3935,20 +3906,33 @@ function pickCandidates(layer, eye, dir, tri)
                 rms += dx * dx + dy * dy + dz * dz;
             }
             rms = Math.sqrt(rms / 4);
+            this.diag.rmsN++;
+            if (rms < this.diag.rmsMin) { this.diag.rmsMin = rms; }
             if (!(rms < rmsLimit)) { continue; }
 
             this.lastStats.congruent++;
             this.diag.rmsPass++;
+            pool.push({ rms: rms, M: M, q: q });
+        }
 
-            var lcp = this.verify(M);
+        if (!pool.length) { return this.bestLCP >= this.options.terminate_threshold; }
+
+        pool.sort(function (a, b) { return a.rms - b.rms; });
+
+        var nVerify = Math.min(pool.length, maxVerify);
+        for (i = 0; i < nVerify; i++)
+        {
+            if (this.cancelled) { return false; }
+
+            var lcp = this.verify(pool[i].M);
             this.lastStats.verify++;
             this.diag.verifyRun++;
             if (lcp > this.diag.lcpBest) { this.diag.lcpBest = lcp; }
 
             if (lcp > this.bestLCP)
             {
-                this.bestTransform = M;
-                this.bestPairs = q.slice();
+                this.bestTransform = pool[i].M;
+                this.bestPairs = pool[i].q.slice();
                 this.bestLCP = lcp;
 
                 if (this.bestLCP >= this.options.terminate_threshold) { return true; }
@@ -3961,7 +3945,27 @@ function pickCandidates(layer, eye, dir, tri)
     /* match4pcsBase.hpp : TryOneBase —— 一次完整 RANSAC 迭代 */
     Registration.prototype.tryOneBase = function ()
     {
-        if (!this.selectQuadrilateral()) { this.diag.baseFail++; return false; }
+        /* 基的合法性：只有「两条基线真的相交、交点严格落在两条线段内部」
+         * 时，r1/r2 才是个有约束力的 4PCS 不变量。
+         * 端点解（r=0 或 1）等于拿一个端点坐标当不变量，等长匹配退化成
+         * "找一条经过该点的等长线段"，噪声全放过；实测这类基让 3 万多个
+         * 候选四边形的 rms 最小值卡在 0.13（门限 0.085），通过数为 0。
+         * 这里重抽最多 6 次，仍不合法就放弃本次迭代（RANSAC 里丢一次迭代
+         * 没有代价，比拿退化基污染候选集划算）。 */
+        var okBase = false;
+        for (var bt = 0; bt < 6; bt++)
+        {
+            if (!this.selectQuadrilateral()) { break; }
+
+            var iv1 = this.invariant1, iv2 = this.invariant2;
+            if (!(iv1 > 0.06 && iv1 < 0.94 && iv2 > 0.06 && iv2 < 0.94)) { continue; }
+            if (!(this.baseMinDist < 0.02 * this.maxBaseDiameter)) { continue; }
+
+            okBase = true;
+            break;
+        }
+
+        if (!okBase) { this.diag.baseFail++; return false; }
 
         var b = this.base;
         var dab = Math.sqrt(

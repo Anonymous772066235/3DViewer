@@ -621,8 +621,8 @@
         this.previewBuffer = null;
         this.previewCount = 0;
 
-        // 拾取十字标记：恒定世界尺寸，单臂 1（数据单位，本工程为 mm）
-        this.pickMarkLen = 1;
+        /* 拾取点标记已改由 DOM 标签绘制（ui.js drawToolMarks），
+         * 渲染器不再持有任何拾取标记状态。 */
         this.gridCache = { key: '', buffer: null, count: 0 };
         this.axisBuffer = null;
         this.error = '';
@@ -840,6 +840,12 @@
                     gl.disableVertexAttribArray(R.pointA.col);
                 }
 
+                if (lodBuf)
+                {
+                    /* 元素缓冲是 VAO 状态，每个 VAO 都要绑一次 */
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lodBuf);
+                }
+
                 if (sfBuf)
                 {
                     gl.bindBuffer(gl.ARRAY_BUFFER, sfBuf);
@@ -854,6 +860,24 @@
                 gl.bindVertexArray(null);
                 return v;
             };
+
+            /* 显示端抽稀：count 超过上限时按固定步长取点，
+             * 用 ELEMENT_ARRAY_BUFFER 画 drawElements。
+             * 步长采样对「沿轮廓排序的边点」等价于均匀降采样，不会聚成团。 */
+            var lodCap = (global.MV.config && global.MV.config.pointCap) || 0;
+            var lodBuf = null;
+            var lodCount = 0;
+            if (lodCap > 0 && d.count > lodCap)
+            {
+                var lodStride = Math.ceil(d.count / lodCap);
+                lodCount = Math.floor(d.count / lodStride);
+                var lodIdx = new Uint32Array(lodCount);
+                for (var lq = 0; lq < lodCount; lq++) { lodIdx[lq] = lq * lodStride; }
+
+                lodBuf = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lodBuf);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, lodIdx, gl.STATIC_DRAW);
+            }
 
             var vao2 = buildPointVao(null);
             var sfVao = null;
@@ -881,6 +905,8 @@
                 colBuffer: colBuf,
                 sfVao: sfVao,
                 sfBuffer: sfBufs,
+                lodBuffer: lodBuf,
+                lodCount: lodCount,
                 count: d.count
             };
         }
@@ -952,6 +978,7 @@
         if (g.auxBuffer) { gl.deleteBuffer(g.auxBuffer); }
         if (g.tagBuffer) { gl.deleteBuffer(g.tagBuffer); }
         if (g.colBuffer) { gl.deleteBuffer(g.colBuffer); }
+        if (g.lodBuffer) { gl.deleteBuffer(g.lodBuffer); }
         if (g.normalVao) { gl.deleteVertexArray(g.normalVao); }
         if (g.normalBuffer) { gl.deleteBuffer(g.normalBuffer); }
         if (g.wireVao) { gl.deleteVertexArray(g.wireVao); }
@@ -1179,9 +1206,39 @@
 
     /* ---------------- 绘制 ---------------- */
     /* 图层的预览变换：配准面板在应用前用它实时预览，不改动顶点数据 */
+    /* 图层模型矩阵（配准预览用）。
+     *
+     * ⚠ 必须转置：项目内部的 4×4 都是【行主序】（平移在 m[3]、m[7]、m[11]，
+     * 见 xformPoints 的 x' = m0*x + m1*y + m2*z + m3），
+     * 而 GLSL 的 mat4 是【列主序】。直接传过去，平移会被当成「最后一行」，
+     * 齐次坐标的 w 被破坏 → 顶点全部塌到屏幕外一点，
+     * 整层点云一个像素都画不出来。
+     *
+     * 表现极具迷惑性：单位阵（对称）正常，**任何带平移的预览都让图层消失**；
+     * 而配准正是靠平移把目标搬到参考上 —— 于是「一点运行，目标就没了」。
+     * 端到端实测：平移 X+300 时像素数 769 → 0，转置后恢复正常。
+     *
+     * 结果按引用缓存：setGpuPreview 每次都新建数组，缓存自然失效，
+     * 不会每帧重复转置。 */
     Renderer.prototype.modelOf = function (layer)
     {
-        return (layer && layer.previewMat) ? layer.previewMat : IDENT4;
+        var m = (layer && layer.previewMat) ? layer.previewMat : null;
+        if (!m) { return IDENT4; }
+
+        if (this._pmSrc !== m)
+        {
+            var t = new Float32Array(16);
+            for (var r = 0; r < 4; r++)
+            {
+                for (var c = 0; c < 4; c++)
+                {
+                    t[c * 4 + r] = m[r * 4 + c];
+                }
+            }
+            this._pmSrc = m;
+            this._pmT = t;
+        }
+        return this._pmT;
     };
 
     Renderer.prototype.drawMesh = function (layer, mvp, view, color, shade, pushBack, noStat, backCol, backShade)
@@ -1743,97 +1800,6 @@
         this.stats.draws++;
     };
 
-    /* 拾取点标记：3D 十字，关闭深度测试，任何视角可见 */
-    Renderer.prototype.drawPickMarks = function (mvp, marks, eye, fov, vh, baseLen, minPx)
-    {
-        if (!marks || !marks.length)
-        {
-            return;
-        }
-        var gl = this.gl;
-        var n = marks.length;
-        var data = new Float32Array(n * 18);
-
-        // 屏幕空间尺寸：每个标记按「自身到相机的距离」算 per-pixel 世界尺寸，
-        // 这样不同深度的标记投影到屏幕上大小一致，不会近大远小。
-        var k = 2 * Math.tan(fov * 0.5) / Math.max(vh, 1);
-
-        for (var i = 0; i < n; i++)
-        {
-            var p = marks[i].pos;
-            var dx = eye[0] - p[0], dy = eye[1] - p[1], dz = eye[2] - p[2];
-            var dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-            var len = Math.max(baseLen, k * dist * minPx);
-
-            var o = i * 18;
-            data[o] = p[0] - len; data[o + 1] = p[1]; data[o + 2] = p[2];
-            data[o + 3] = p[0] + len; data[o + 4] = p[1]; data[o + 5] = p[2];
-            data[o + 6] = p[0]; data[o + 7] = p[1] - len; data[o + 8] = p[2];
-            data[o + 9] = p[0]; data[o + 10] = p[1] + len; data[o + 11] = p[2];
-            data[o + 12] = p[0]; data[o + 13] = p[1]; data[o + 14] = p[2] - len;
-            data[o + 15] = p[0]; data[o + 16] = p[1]; data[o + 17] = p[2] + len;
-        }
-
-        if (!this.markVao)
-        {
-            this.markVao = gl.createVertexArray();
-            this.markBuffer = gl.createBuffer();
-        }
-
-        gl.bindVertexArray(this.markVao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.markBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
-        gl.enableVertexAttribArray(this.lineA.pos);
-        gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
-        gl.bindVertexArray(null);
-
-        /* 所有标记统一一个颜色。
-         *
-         * 原来按索引在黄 / 绿 / 蓝之间轮换，本意是帮用户区分前三个点，
-         * 但放开个数之后颜色会循环出现，"第 4 个点是哪个颜色"就没有意义了。
-         * 区分点靠信息栏的 P1 / P2 / P3 编号即可。 */
-        /* 两档配色：
-         *   最近 3 个点（参与距离 / 角度计算）→ 亮橙，带黑描边
-         *   更早的点（仅作参照）          → 暗灰，不描边
-         * 这样一眼能看出"哪三个在算"。 */
-        var ACTIVE = [1.0, 0.58, 0.08];
-        var IDLE = [0.58, 0.58, 0.58];
-
-        var activeStart = Math.max(0, n - 3);
-
-        gl.useProgram(this.lineP);
-        gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
-        gl.uniformMatrix4fv(this.lineU.uModel, false, IDENT4);
-        gl.uniform1f(this.lineU.uDepthBias, 0.0);
-        gl.disable(gl.DEPTH_TEST);
-        gl.bindVertexArray(this.markVao);
-
-        // 历史点：暗灰，单层
-        if (activeStart > 0)
-        {
-            gl.uniform4f(this.lineU.uColor, IDLE[0], IDLE[1], IDLE[2], 1.0);
-            gl.drawArrays(gl.LINES, 0, activeStart * 6);
-        }
-
-        /* 参与计算的点：画两遍形成描边。
-         * WebGL 的 gl.lineWidth 大多被驱动钳到 1，所以用「同位置画两遍、
-         * 靠颜色差拉开对比」代替真正的粗线。 */
-        var activeCount = n - activeStart;
-        if (activeCount > 0)
-        {
-            gl.uniform4f(this.lineU.uColor, 0.0, 0.0, 0.0, 1.0);
-            gl.drawArrays(gl.LINES, activeStart * 6, activeCount * 6);
-
-            gl.uniform4f(this.lineU.uColor, ACTIVE[0], ACTIVE[1], ACTIVE[2], 1.0);
-            gl.drawArrays(gl.LINES, activeStart * 6, activeCount * 6);
-        }
-
-        gl.bindVertexArray(null);
-        gl.enable(gl.DEPTH_TEST);
-
-        this.stats.draws++;
-    };
-
     /* 顶点：把网格的三角形顶点作为点绘制（超过上限时按步长抽稀） */
     Renderer.prototype.ensureVerts = function (layer)
     {
@@ -1887,7 +1853,13 @@
         gl.uniformMatrix4fv(this.pointU.uModel, false, this.modelOf(layer));
         var vc = layer.vertColorRgb || [0.95, 0.95, 0.98];
         gl.uniform1f(this.pointU.uPointSize, (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale);
-        gl.uniform1f(this.pointU.uDepthBias, 0.0);
+        /* 预览态（配准过程中 layer.previewMat 存在）必须往前顶一点点。
+         *
+         * 两片点云对齐后几乎完全重合，深度值相同；参考先画并写了深度，
+         * 目标后画时由于多乘了一个 uModel，浮点上略「远」，LEQUAL 判定失败 ——
+         * 实测：预览期间目标只剩 8~10 个像素，肉眼就是「目标没了」。
+         * 0.0006 与线框用的 0.0008 同量级，视觉上看不出位移。 */
+        gl.uniform1f(this.pointU.uDepthBias, layer.previewMat ? 0.0006 : 0.0);
         gl.uniform1i(this.pointU.uColorMode, 0);
         gl.uniform3f(this.pointU.uColor, vc[0], vc[1], vc[2]);
         gl.uniform1f(this.pointU.uZMin, layer.data.bbox.min[2]);
@@ -1955,7 +1927,7 @@
         gl.uniform1f(this.pointU.uPointSize, pointSize);
         // 顶点云与网格表面完全共面：点必须比面更靠近相机，否则被网格整片挡掉
         var pBiasV = (layer.data && layer.data.format === 'vertices') ? 0.00035 : 0.0;
-        gl.uniform1f(this.pointU.uDepthBias, pBiasV);
+        gl.uniform1f(this.pointU.uDepthBias, pBiasV + (layer.previewMat ? 0.0006 : 0));
         gl.uniform1i(this.pointU.uColorMode, mode);
         gl.uniform3fv(this.pointU.uColor, layer.colorRgb);
         gl.uniform1f(this.pointU.uZMin, layer.data.bbox.min[2]);
@@ -1992,10 +1964,17 @@
             gl.vertexAttrib1f(this.pointA.sf, 0);
         }
 
-        gl.drawArrays(gl.POINTS, 0, g.count);
+        if (g.lodCount)
+        {
+            gl.drawElements(gl.POINTS, g.lodCount, gl.UNSIGNED_INT, 0);
+        }
+        else
+        {
+            gl.drawArrays(gl.POINTS, 0, g.count);
+        }
         gl.bindVertexArray(null);
 
-        this.stats.points += g.count;
+        this.stats.points += (g.lodCount || g.count);
         this.stats.draws++;
     };
 
@@ -2182,17 +2161,10 @@
                 }
             }
 
-            // 拾取点标记
-            if (this.pickMarks && this.pickMarks.length)
-            {
-                // 恒定世界尺寸（默认单臂 1 mm）；远距离时不足 1 px 会画不出来，
-                // 因此加“最少 6 px”保护：放大到足够近时才真正按 1 mm 显示
-                var baseLen = this.pickMarkLen || 1;
-                var eyeP = cam.getPosition();
-                /* 最后一项是「最小屏幕像素」：1mm 世界尺寸在小模型或远视角下
-         * 只有几个像素，几乎看不见。14px 保证任何距离都能看清。 */
-        this.drawPickMarks(mvp, this.pickMarks, eyeP, cam.fov, v.h, baseLen, 14);
-            }
+            /* 拾取点不再画 3D 十字：改成与 N-N 选点同一套 DOM 标签
+             * （见 ui.js 的 drawToolMarks）。十字的问题是薄板/点云上
+             * 几条 1px 线几乎看不清，而且"最近 3 个点"要靠颜色区分，
+             * 标签能直接给编号，也不需要关深度测试。 */
 
             // 编辑选区预览
             this.drawPreviewSeg(mvp, viewM, ctx);
@@ -2252,7 +2224,10 @@
                         colorRgb: [pgc[0], pgc[1], pgc[2]],
                         pointColorMode: 0,
                         pointSize: lay.pointSize,
-                        opacity: ga
+                        opacity: ga,
+                        /* 带着预览矩阵：否则 ghost 副本会停在原位，
+                         * 和主视图里的位置对不上（双视图下很显眼）。 */
+                        previewMat: lay.previewMat
                     }, mvp, viewM, ps, ga, 1);
                 }
                 else

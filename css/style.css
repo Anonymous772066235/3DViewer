@@ -2639,8 +2639,9 @@ body.theme-light #p-sfhist.sf-ruler {
     pointer-events: none;
 }
 
-/* ---------- N-N 选点的 3D 序号标记 ---------- */
-#pick-marks {
+/* ---------- 屏幕序号标签（N-N 选点 R/A 与工具拾取 P 共用） ---------- */
+#pick-marks,
+#tool-marks {
     position: absolute;
     inset: 0;
     pointer-events: none;
@@ -2648,31 +2649,267 @@ body.theme-light #p-sfhist.sf-ruler {
     overflow: hidden;
 }
 
-#pick-marks .pick-mark {
+/* 视觉口径：
+ *   - 标签不压在点位上，抬高 14px，下方用一个小圆点精确指回点位
+ *     （总高 17px + border-box，圆点圆心正好落回投影点，误差 < 1px）；
+ *   - 底是半透明"玻璃"（dark: rgba(7,20,24,.88) + blur），文字用状态色本身，
+ *     而不是反白的实心块 —— 实心亮块在深色点云上过曝，且容易和模型颜色打架；
+ *   - 描边 + 外阴影给出层级，字号 11px，可读性靠对比不靠体积；
+ *   - 字母与数字同一套字体度量（11px / 700 / 同字距），只靠 .86 的透明度做层次。 */
+.pick-mark {
+    --mark-c: #7ff0ef;
+    --mark-bg: rgba(7, 20, 24, .88);
+    --mark-line: rgba(53, 208, 208, .72);
+    --mark-halo: rgba(53, 208, 208, .22);
+
     position: absolute;
-    transform: translate(-50%, -50%);
-    font: 11px/1.2 ui-monospace, Menlo, Consolas, monospace;
-    font-weight: 600;
-    padding: 2px 5px;
-    border-radius: 3px;
+    transform: translate(-50%, calc(-50% - 14px));
+    display: flex;
+    align-items: center;
+    height: 17px;
+    padding: 0 7px;
+    box-sizing: border-box;      /* 圆点位置按 17px 总高推算，必须把边框算进去 */
+    border-radius: 999px;
     white-space: nowrap;
-    letter-spacing: 0.3px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+    color: var(--mark-c);
+    background: var(--mark-bg);
+    border: 1px solid var(--mark-line);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .52), 0 0 0 1px rgba(255, 255, 255, .05) inset;
+    backdrop-filter: blur(6px) saturate(1.15);
+    -webkit-backdrop-filter: blur(6px) saturate(1.15);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+/* 指向精确点位的小圆点（在标签下沿下方 3px，直径 5px） */
+.pick-mark::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 3px);
+    width: 5px;
+    height: 5px;
+    margin-left: -2.5px;
+    border-radius: 50%;
+    background: var(--mark-c);
+    box-shadow: 0 0 0 2px var(--mark-halo);
+}
+
+/* 字母与数字同一套字体度量（字号/字重/字距都继承 .pick-mark），
+ * 只留一点透明度差异做层次 —— 之前字母小一号，看起来像"没对齐"。 */
+.pick-mark .pm-tag {
+    opacity: .86;
+    margin-right: 1px;
+}
+
+.pick-mark .pm-num {
+    opacity: 1;
 }
 
 /* 目标侧（被移动的图层）：琥珀色，与参考侧区分 */
-#pick-marks .pick-mark.dst {
-    color: #1a1200;
-    background: #f0b429;
-    border: 1px solid #c98f12;
+.pick-mark.dst {
+    --mark-c: #ffc857;
+    --mark-bg: rgba(30, 21, 5, .88);
+    --mark-line: rgba(240, 180, 41, .72);
+    --mark-halo: rgba(240, 180, 41, .22);
 }
 
 /* 参考侧（固定图层）：青色 */
-#pick-marks .pick-mark.ref {
-    color: #001a1a;
-    background: #35d0d0;
-    border: 1px solid #1a9c9c;
+.pick-mark.ref {
+    --mark-c: #7ff0ef;
+    --mark-bg: rgba(7, 20, 24, .88);
+    --mark-line: rgba(53, 208, 208, .72);
+    --mark-halo: rgba(53, 208, 208, .22);
 }
+
+/* 浅色主题：玻璃换成白雾，文字压暗到同色系深档（亮青/亮琥珀在白底上不可读） */
+body.theme-light .pick-mark.dst {
+    --mark-c: #8a5a00;
+    --mark-bg: rgba(255, 252, 245, .92);
+    --mark-line: rgba(201, 143, 18, .60);
+    --mark-halo: rgba(201, 143, 18, .14);
+}
+
+body.theme-light .pick-mark.ref {
+    --mark-c: #0b6e6e;
+    --mark-bg: rgba(248, 253, 253, .92);
+    --mark-line: rgba(26, 156, 156, .60);
+    --mark-halo: rgba(26, 156, 156, .14);
+}
+
+/* 工具拾取（P{i}）：紫色系 —— 与 R（青）/ A（琥珀）都不同色，
+ * 避免"配准选点"与"量距离"两套标签混在一起分不清。 */
+.pick-mark.pick.active {
+    --mark-c: #c9a7ff;
+    --mark-bg: rgba(26, 17, 40, .88);
+    --mark-line: rgba(178, 140, 255, .72);
+    --mark-halo: rgba(178, 140, 255, .22);
+}
+
+/* 更早的拾取点只作参照（不参与最近 3 个的距离 / 角度计算） */
+.pick-mark.pick.idle {
+    --mark-c: #9aa4b2;
+    --mark-bg: rgba(20, 24, 28, .85);
+    --mark-line: rgba(120, 132, 148, .55);
+    --mark-halo: rgba(120, 132, 148, .16);
+}
+
+body.theme-light .pick-mark.pick.active {
+    --mark-c: #6b39c9;
+    --mark-bg: rgba(250, 247, 255, .92);
+    --mark-line: rgba(140, 100, 220, .60);
+    --mark-halo: rgba(140, 100, 220, .14);
+}
+
+body.theme-light .pick-mark.pick.idle {
+    --mark-c: #5b6572;
+    --mark-bg: rgba(248, 250, 252, .92);
+    --mark-line: rgba(140, 150, 162, .55);
+    --mark-halo: rgba(140, 150, 162, .12);
+}
+
+/* ---------- 选点表格：默认浮在视口右上角，标题栏可拖动 ---------- */
+.pick-table {
+    position: fixed;
+    top: 86px;
+    right: 18px;
+    z-index: 40;
+    display: none;              /* flex，由 setRegTableVisible 切 */
+    flex-direction: column;
+    max-width: min(620px, 52vw);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    box-shadow: var(--shadow);
+    font-size: 11px;
+    color: var(--text);
+    user-select: none;
+}
+
+.pick-table-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px 5px 9px;
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--line);
+    border-radius: 5px 5px 0 0;
+    cursor: move;
+}
+
+.pick-table-head.dragging { cursor: grabbing; }
+
+.pick-table-title {
+    font-weight: 600;
+    letter-spacing: .3px;
+    white-space: nowrap;
+}
+
+.pick-table-link {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--dim);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.pick-table-link input { margin: 0; }
+
+.pick-table-x {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    line-height: 1;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--bg-soft);
+    color: var(--dim);
+    cursor: pointer;
+}
+
+.pick-table-x:hover { background: var(--bg-hover); color: var(--text); }
+
+.pick-table-body {
+    max-height: 42vh;
+    overflow: auto;
+}
+
+.pick-table table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.pick-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 4px 6px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+    color: var(--dim);
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.pick-table td {
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--line-soft);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    white-space: nowrap;
+}
+
+.pick-table tr.half td.c-pos { color: var(--dim); }
+.pick-table tr:hover td { background: var(--bg-soft); }
+
+.pick-table td.c-id,
+.pick-table th.c-id { text-align: right; color: var(--dim); }
+.pick-table td.c-err { text-align: right; color: var(--ok); }
+.pick-table tr.half td.c-err { color: var(--dim); }
+
+.pick-table td.c-del,
+.pick-table th.c-del { width: 20px; padding: 0 2px; }
+
+.pick-del {
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    line-height: 1;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+}
+
+.pick-del:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--bg-hover);
+}
+
+.pick-table-empty {
+    padding: 10px 8px;
+    color: var(--dim);
+    text-align: center;
+}
+
+.pick-table-foot {
+    padding: 4px 9px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-soft);
+    border-radius: 0 0 5px 5px;
+    color: var(--dim);
+    white-space: nowrap;
+}
+
+/* 侧栏那行摘要兼作「展开 / 收起表格」的开关 */
+#reg-list.clickable { cursor: pointer; }
+#reg-list.clickable:hover { border-color: var(--accent); color: var(--text); }
 
 /* ===== P2：数据对齐面板的视觉分组 ===== */
 
@@ -2844,6 +3081,124 @@ body.theme-light #p-sfhist.sf-ruler {
 /* 只有一个主操作时不要被 space-between 推到中间 */
 #xform .xform-reg-actions {
     justify-content: flex-end;
+}
+
+/* ---------- 属性面板：变换（累计 + 历史 + 复制 / 逆变换） ----------
+ * 数据对齐面板的矩阵框只承载「待应用的增量」（应用即归零），
+ * 所以"这个图层相对载入时被变过什么"归属性面板管 —— 属性属于对象，
+ * 且在场景树里点任意图层都能看到，不必先进数据对齐面板选目标层。 */
+.prop-xform {
+    width: 100%;
+    min-width: 0;
+}
+
+.prop-xform-main {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.prop-xform-main.expandable { cursor: pointer; }
+.prop-xform-main.expandable:hover .prop-xform-val { color: var(--accent); }
+
+.prop-xform-val {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.prop-xform-val.none { color: var(--dim); }
+
+.prop-xform-count {
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-size: 10px;
+}
+
+.prop-xform-caret {
+    flex: 0 0 10px;
+    color: var(--dim);
+    font-size: 10px;
+    text-align: center;
+}
+
+.prop-xform-body {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--line);
+}
+
+.prop-xform-steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+x
+    padding: 1px 0;
+    color: var(--dim);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10.5px;
+}
+
+.prop-xform-step.last { color: var(--text); }
+
+.prop-xform-step .idx {
+    flex: 0 0 12px;
+    text-align: right;
+    opacity: .7;
+}
+
+.prop-xform-step .lb {
+    flex: 0 0 auto;
+    max-width: 74px;
+    padding-right: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.prop-xform-step .vv {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.prop-xform-ops {
+    display: flex;
+    gap: 4px;
+    margin-top: 5px;
+}
+
+.prop-xform-ops .mini {
+    flex: 1 1 0;
+    padding: 2px 4px;
+    font-size: 10.5px;
+}
+
+.prop-xform-ops .mini.danger:not(:disabled) {
+    border-color: rgba(248, 81, 73, .5);
+    color: var(--danger);
+}
+
+.prop-xform-ops .mini.danger:hover:not(:disabled) {
+    border-color: var(--danger);
+    background: var(--bg-hover);
+}
+
+/* 确认态：实心红，和"可点"明显区分（破坏性操作只差一次点击） */
+.prop-xform-ops .mini.danger.armed {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
 }
 #xform .xform-actions-split .btn-edit {
     display: flex;

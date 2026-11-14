@@ -1566,6 +1566,11 @@
         }
         $('p-stat').textContent = txt;
 
+        /* 「变换」一行：该图层相对载入时的累计变换 + 逐步台账。
+         * 放在属性面板而不是数据对齐面板 —— 属性属于对象，点任意图层都能看；
+         * 数据对齐面板的矩阵框只承载"待应用的增量"，不该再塞状态。 */
+        renderXformProp(layer);
+
         /* 路径栏的优先级：
          *   1. absPath —— /locate 反查到的绝对路径，最准确
          *   2. /file?path= 地址里的 path 参数 —— 这类载入本身就是按路径开的
@@ -1606,6 +1611,164 @@
         $('p-path').title = pathText || '';
 
         if (pathRow) { pathRow.classList.toggle('show', !!pathText); }
+    }
+
+    /* ---------------- 属性面板：变换（累计 + 台账） ---------------- */
+
+    var propXformOpen = false;
+
+    function renderXformProp(layer)
+    {
+        var val = $('p-xform-val');
+        var cnt = $('p-xform-count');
+        var caret = $('p-xform-caret');
+        var main = $('p-xform-main');
+        var body = $('p-xform-body');
+        var list = $('p-xform-steps');
+        var btnCopy = $('p-xform-copy');
+        var btnUndo = $('p-xform-undo');
+        var btnInv = $('p-xform-inv');
+        if (!val) { return; }
+
+        var cum = (layer && layer.xformMat) ? layer.xformMat : null;
+        var has = !!(cum && !isIdentityMat(cum));
+        var steps = (layer && layer.xformSteps) ? layer.xformSteps : [];
+
+        if (has)
+        {
+            val.classList.remove('none');
+            val.textContent = xformBrief(cum, 1, 1);
+            val.title = '累计变换（相对载入时，只读）\n' + fmtMat(cum) +
+                        '\n展开可看每一步，支持复制 / 撤销 / 逆变换';
+        }
+        else
+        {
+            val.classList.add('none');
+            val.textContent = '—（载入时的位姿）';
+            val.title = '';
+        }
+
+        if (cnt) { cnt.textContent = steps.length ? (steps.length + ' 步') : ''; }
+
+        /* 没有台账就没有可展开的东西（例如图层是别的路径改过顶点） */
+        var canExpand = steps.length > 0;
+        if (caret) { caret.style.visibility = canExpand ? 'visible' : 'hidden'; }
+        if (main) { main.classList.toggle('expandable', canExpand); }
+        if (!canExpand) { propXformOpen = false; }
+
+        var open = propXformOpen && canExpand;
+        if (body) { body.classList.toggle('hidden', !open); }
+        if (caret) { caret.textContent = open ? '▴' : '▾'; }
+
+        if (list)
+        {
+            if (!open) { list.innerHTML = ''; }
+            else
+            {
+                var html = [];
+                for (var i = 0; i < steps.length; i++)
+                {
+                    var st = steps[i];
+                    var last = (i === steps.length - 1);
+                    var lb = String(st.label || '变换').replace(/"/g, '&quot;');
+
+                    html.push(
+                        '<li class="prop-xform-step' + (last ? ' last' : '') + '">' +
+                        '<span class="idx">' + (i + 1) + '</span>' +
+                        '<span class="lb" title="' + lb + '">' + lb + '</span>' +
+                        '<span class="vv" title="' + fmtMat(st.mat).replace(/\n/g, '&#10;') + '">' +
+                            xformBrief(st.mat, 1, 0) + '</span>' +
+                        '</li>');
+                }
+                list.innerHTML = html.join('');
+            }
+        }
+
+        if (btnCopy) { btnCopy.disabled = !has; }
+        if (btnUndo) { btnUndo.disabled = !steps.length; }
+
+        if (btnInv)
+        {
+            btnInv.disabled = !has;
+
+            /* 逆变换会把整条配准链抹平且不可撤销，所以要两次点击 */
+            var arming = !!(has && invertConfirmAt && nowMs() - invertConfirmAt < 3000);
+            btnInv.textContent = arming ? '确认？' : '逆变换';
+            if (arming) { btnInv.classList.add('armed'); }
+            else { btnInv.classList.remove('armed'); }
+        }
+    }
+
+    /* 撤销最后一步：应用 inv(最后一步)，再把它自己产生的那条台账抹掉 */
+    function undoLastXformOf(layer)
+    {
+        if (!layer || !layer.xformSteps || !layer.xformSteps.length)
+        {
+            xformInfo('没有可撤销的步骤', true);
+            return;
+        }
+
+        var last = layer.xformSteps[layer.xformSteps.length - 1];
+        var inv = mat4Invert(last.mat);
+        if (!inv) { xformInfo('这一步不可逆，无法撤销', true); return; }
+
+        var backups = layer.xformSteps.slice();
+        layer.xformSteps.pop();
+
+        if (applyXformToLayer(inv, '撤销「' + (last.label || '变换') + '」', layer))
+        {
+            /* applyXformToLayer 会为"撤销"本身再记一条，那条不该留在台账里 */
+            if (layer.xformSteps && layer.xformSteps.length) { layer.xformSteps.pop(); }
+            setInfo('已撤销「' + (last.label || '变换') + '」');
+            renderProps();
+        }
+        else
+        {
+            layer.xformSteps = backups;
+        }
+    }
+
+    /* 逆变换：应用累计变换的逆，回到载入时的位姿（台账随之清空）
+     *
+     * 这是**不可撤销的破坏性操作**：一次点击会把整条配准链（N-N + ICP 的烘焙结果）
+     * 抹平，而且台账清空后连"撤销上一步"都回不去了。所以做两步确认：
+     * 第一次点击只把按钮变成"确认？"，3 秒内再点才执行。 */
+    var invertConfirmAt = 0;
+
+    function invertLayerXform(layer)
+    {
+        if (!layer || !layer.xformMat || isIdentityMat(layer.xformMat))
+        {
+            xformInfo('该图层还没有被变换过', true);
+            return;
+        }
+
+        if (!invertConfirmAt || nowMs() - invertConfirmAt >= 3000)
+        {
+            invertConfirmAt = nowMs();
+            renderXformProp(layer);
+            setTimeout(function () { invertConfirmAt = 0; renderXformProp(layer); }, 3200);
+            return;
+        }
+
+        invertConfirmAt = 0;
+
+        var inv = mat4Invert(layer.xformMat);
+        if (!inv) { xformInfo('累计变换不可逆', true); return; }
+
+        var backups = layer.xformSteps ? layer.xformSteps.slice() : [];
+        layer.xformSteps = [];
+
+        if (applyXformToLayer(inv, '逆变换（回到载入时位姿）', layer))
+        {
+            layer.xformSteps = [];     /* 台账清空：已经回到原始 */
+            setInfo('已把 ' + layer.name + ' 还原到载入时的位姿');
+            renderProps();
+        }
+        else
+        {
+            layer.xformSteps = backups;
+        }
     }
 
     /* ---------------- 进度 / 状态 ---------------- */
@@ -2305,10 +2468,49 @@
     /* 法向只受 3×3 部分影响，变换后归一化 */
 
     /* 把矩阵应用到图层：改 data + 重建 GPU */
-    function applyXformToLayer(m, label)
+    /* ---------------- 图层的变换台账 ----------------
+     *
+     * 矩阵框只承载「待应用的增量」，应用完必须归零 —— 于是"这个图层相对
+     * 载入时一共被变过什么"在数据对齐面板里消失了。`layer.xformMat` 记着总和，
+     * 但只给总和不够用：想退回去时只能"全部还原"，没法只退最后一步。
+     *
+     * 所以按**台账**记：每应用一次存一条 {label, mat}，属性面板展开成时间线。
+     * 撤销走 LIFO（只允许退最后一步）—— 中间某一步在数学上可以移除
+     * （把后面的重算一遍），但语义上说不清"撤掉第二步之后第三步算不算数"。
+     */
+    var XFORM_STEPS_MAX = 20;
+
+    function recordXformStep(layer, label, m)
+    {
+        if (!layer || !m) { return; }
+        if (!layer.xformSteps) { layer.xformSteps = []; }
+
+        layer.xformSteps.push({
+            label: label || '变换',
+            mat: new Float64Array(m)
+        });
+
+        /* 只留最近 20 步：更早的虽然撤不回去，
+         * 但累计值仍由 layer.xformMat 精确记录，不受影响。 */
+        while (layer.xformSteps.length > XFORM_STEPS_MAX) { layer.xformSteps.shift(); }
+    }
+
+    /* 把 4×4 压成"旋转角 + 平移"的短文本（角度由 3×3 的迹反余弦得到） */
+    function xformBrief(m, degDigits, posDigits)
+    {
+        var tr = m[0] + m[5] + m[10];
+        var ang = Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2))) * 180 / Math.PI;
+        return 'R ' + ang.toFixed(degDigits) + '°  T (' +
+            m[3].toFixed(posDigits) + ', ' + m[7].toFixed(posDigits) + ', ' +
+            m[11].toFixed(posDigits) + ')';
+    }
+
+    /* layerOverride：属性面板操作的是「选中图层」，而默认目标是「数据对齐的目标层」，
+     * 两者可能不是同一个 —— 不传的话撤销/逆变换会作用到别的图层上。 */
+    function applyXformToLayer(m, label, layerOverride)
     {
         var tXform = nowMs();
-        var layer = xformTargetLayer();
+        var layer = layerOverride || xformTargetLayer();
         if (!layer || !layer.data || !layer.data.positions)
         {
             xformInfo('请先在上方选择目标图层', true);
@@ -2365,7 +2567,8 @@
             var regStartBtn = $('reg-start');
             if (regStartBtn) { regStartBtn.textContent = '开始选点'; }
             if (app && app.setPickCursor) { app.setPickCursor(false); }
-            regDrawMarks();     // 应用即收尾，顺手把标记抹掉
+            setRegTableVisible(false);   // 应用即收尾，表格一并收掉
+            regDrawMarks();              // 顺手把标记抹掉
         }
 
         app.markDirty();
@@ -2395,6 +2598,17 @@
         appliedMat = new Float64Array(16);
         for (var ai2 = 0; ai2 < 16; ai2++) { appliedMat[ai2] = IDENT4[ai2]; }
         refreshApplyState();
+
+        /* 记一笔台账：哪一步、多大的增量。属性面板的"变换"一行靠它。
+         *
+         * 注意顺序：上面那次 renderProps() 发生在记录之前（那时台账还少一条），
+         * 所以这里必须补刷一次 —— 否则"步数"永远比实际少 1，
+         * 表现为"应用了两次却显示 1 步"。 */
+        recordXformStep(layer, label, m);
+
+        /* 属性面板显示的是「选中图层」：被应用的层恰好被选中时才刷，
+         * 否则会把别的图层的账刷到面板上。 */
+        if (app && app.getSelected() === layer) { renderXformProp(layer); }
 
         var xCount = Math.floor(d.positions.length / (layer.kind === 'mesh' ? 9 : 3));
         logTiming(label, nowMs() - tXform,
@@ -2514,7 +2728,7 @@
     var regMode = false;          // 是否处于选点状态
     /* 参考层与目标层各自独立收集，不强制点击顺序 ——
      * 想先点哪个层就点哪个层。参考层第 i 个点记为 R{i}，
-     * 目标层第 i 个点记为 A{i}，两者按【索引】配对（R0-A0、R1-A1 …）。 */
+     * 目标层第 i 个点记为 A{i}，编号相同的就是一对。 */
     var regRefPts = [];           // 参考层（固定图层）上选的点
     var regDstPts = [];           // 目标层（移动图层）上选的点
 
@@ -2527,7 +2741,68 @@
     function pickMetaOf(lay)
     {
         var base = (lay && lay.xformMat) ? new Float64Array(lay.xformMat) : identityMat();
-        return { lid: lay ? lay.id : -1, base: base };
+        return { lid: lay ? lay.id : -1, base: base, pid: 0 };
+    }
+
+    /* 配对 id：每侧各自递增，R{pid} 与 A{pid} 是一对。
+     *
+     * 以前配对是"按数组下标"隐式成立的，于是**删点必然错位**：
+     * 删掉 R1 之后，原来的 R2 顶到下标 1，就跟 A1（原本配 R1）配到了一起。
+     * 改成显式 pid 后，删点不重排、不改变任何已有配对关系。 */
+    function nextPickPid(metas)
+    {
+        var mx = -1;
+        for (var i = 0; i < metas.length; i++)
+        {
+            if (metas[i] && metas[i].pid > mx) { mx = metas[i].pid; }
+        }
+        return mx + 1;
+    }
+
+    /* 入栈一个选点，返回它的编号（= pid） */
+    function addPick(side, lay, p)
+    {
+        var isRef = (side === 'ref');
+        var pts = isRef ? regRefPts : regDstPts;
+        var metas = isRef ? regRefMeta : regDstMeta;
+
+        var meta = pickMetaOf(lay);
+        meta.pid = nextPickPid(metas);
+
+        pts.push(p);
+        metas.push(meta);
+        return meta.pid;
+    }
+
+    /* 删除选点。alsoOther=true 时连带删除配对侧同 pid 的点。
+     * 返回被删掉的编号，没删到返回 -1。 */
+    function delPick(side, idx, alsoOther)
+    {
+        var isRef = (side === 'ref');
+        var pts = isRef ? regRefPts : regDstPts;
+        var metas = isRef ? regRefMeta : regDstMeta;
+
+        if (idx < 0 || idx >= pts.length) { return -1; }
+
+        var pid = metas[idx] ? metas[idx].pid : idx;
+        pts.splice(idx, 1);
+        metas.splice(idx, 1);
+
+        if (alsoOther)
+        {
+            var oPts = isRef ? regDstPts : regRefPts;
+            var oMetas = isRef ? regDstMeta : regRefMeta;
+            for (var i = oMetas.length - 1; i >= 0; i--)
+            {
+                if (oMetas[i] && oMetas[i].pid === pid)
+                {
+                    oPts.splice(i, 1);
+                    oMetas.splice(i, 1);
+                }
+            }
+        }
+
+        return pid;
     }
 
     function syncPickPts()
@@ -2563,6 +2838,36 @@
         syncOne(regRefPts, regRefMeta);
     }
 
+    /* 数据空间 ↔ 显示空间。
+     *
+     * 除了「已经烘焙进数据的变换」（由 syncPickPts 用 xformMat 的增量补），
+     * 还有一种位姿只存在于渲染层：`layer.previewMat`（矩阵框预览 / ICP 每轮预览）。
+     * 它不改数据、也不改 xformMat，所以标记和拾取都必须各自换算：
+     *
+     *   显示：数据坐标 ──previewMat──▶ 屏幕（否则点云在预览里移开了，标签留在原地）
+     *   拾取：屏幕 ──rayPick 得数据坐标──▶ 但用户点的是预览后的位置，
+     *         所以要乘 inv(previewMat) 换回数据空间再存，两边才对得上。
+     *
+     * 存储与求解一律用数据空间（regSolve、误差、配对都不受预览影响）。 */
+    function pickDisplayPos(p, meta)
+    {
+        var lay = (meta && meta.lid >= 0) ? findLayerById(meta.lid) : null;
+        if (!lay || !lay.previewMat) { return p; }
+
+        var out = new Float64Array(3);
+        xformPoints([p[0], p[1], p[2]], lay.previewMat, out);
+        return out;
+    }
+
+    function pickToData(p, lay)
+    {
+        if (!lay || !lay.previewMat) { return p.slice(); }
+
+        var out = new Float64Array(3);
+        xformPoints([p[0], p[1], p[2]], mat4Invert(lay.previewMat), out);
+        return [out[0], out[1], out[2]];
+    }
+
     /* 该点所属图层是否还在、是否可见 */
     function pickVisible(meta)
     {
@@ -2572,14 +2877,28 @@
         return lay.visible !== false;
     }
 
+    /* 配对：按 pid 相同配对（不再按数组下标），顺序按 pid 升序 */
     function regBuildPairs()
     {
-        var n = Math.min(regRefPts.length, regDstPts.length);
-        var out = [];
-        for (var i = 0; i < n; i++)
+        var byPid = {};
+        var i;
+        for (i = 0; i < regRefPts.length; i++)
         {
-            out.push({ s: regDstPts[i], d: regRefPts[i] });
+            var pidR = regRefMeta[i] ? regRefMeta[i].pid : i;
+            byPid[pidR] = { p: regRefPts[i], i: i };
         }
+
+        var out = [];
+        for (i = 0; i < regDstPts.length; i++)
+        {
+            var pidD = regDstMeta[i] ? regDstMeta[i].pid : i;
+            var hit = byPid[pidD];
+            if (!hit) { continue; }
+            out.push({ s: regDstPts[i], d: hit.p, pid: pidD,
+                       ri: hit.i, ai: i });
+        }
+
+        out.sort(function (a, b) { return a.pid - b.pid; });
         return out;
     }
 
@@ -2807,42 +3126,105 @@
         }
     }
 
-    /* ---------------- N-N 选点的 3D 序号标记 ---------------- */
+    /* ---------------- 屏幕序号标签层（N-N 选点 / 工具拾取共用） ----------------
+     *
+     * 两套标签的差别只有「数据源 + 前缀 + 配色」：
+     *   #pick-marks  R{i} / A{i}   参考层 vs 目标层，成对选点用
+     *   #tool-marks  P{i}          工具 → 拾取，最近的 3 个高亮
+     * 投影、DOM 复用、视口裁剪、跟帧刷新全部共用下面这一份实现。 */
 
-    var pickMarksBox = null;        // overlay 容器
-    var pickMarkEls = [];           // 复用 DOM，避免每帧重建
+    var markLayers = {};            // id -> { box, els }
 
-    function ensurePickMarks()
+    function ensureMarkLayer(id)
     {
-        if (pickMarksBox && pickMarksBox.isConnected) { return pickMarksBox; }
+        var rec = markLayers[id];
+        if (rec && rec.box && rec.box.isConnected) { return rec; }
 
         var host = $('view-area');
         if (!host) { return null; }
 
-        pickMarksBox = document.createElement('div');
-        pickMarksBox.id = 'pick-marks';
-        host.appendChild(pickMarksBox);
+        var box = document.createElement('div');
+        box.id = id;
+        host.appendChild(box);
 
-        return pickMarksBox;
+        rec = { box: box, els: [] };
+        markLayers[id] = rec;
+        return rec;
     }
 
-    /* 把 regRefPts / regDstPts 投影到屏幕并绘制标签。
-     * 每帧调用：点在屏幕上只有几个，DOM 复用后开销可忽略。 */
+    /* raw: [{ p, tag, num, cls }]，p 是世界坐标（已含当前位姿） */
+    function paintMarks(id, raw)
+    {
+        var rec = ensureMarkLayer(id);
+        if (!rec) { return; }
+
+        var els = rec.els;
+        var items = [];
+
+        /* 单视图模式下视图 1 的 rect 会退化，投影结果挤在左上角 (0,1) 附近，
+         * 于是每个点凭空多出一个"幽灵标签"。按实际可见视图数投影。 */
+        var single = !!(app && app.settings && app.settings.singleView);
+        var nViews = single ? 1 : (((app && app.views && app.views.length)) || 1);
+
+        for (var r = 0; r < raw.length; r++)
+        {
+            /* 双视图并排时同一个点可能在两侧都可见，两侧都该标出来；
+             * 只投影视图 0 会导致右视图里一个标签都没有。 */
+            for (var vi = 0; vi < nViews; vi++)
+            {
+                var v = app.views && app.views[vi];
+                if (!single && (!v || !v.rect || v.rect.w < 2 || v.rect.h < 2)) { continue; }
+
+                var s0 = app.worldToScreen(raw[r].p, vi);
+                if (!s0) { continue; }
+                items.push({ x: s0.x, y: s0.y,
+                             tag: raw[r].tag, num: raw[r].num, cls: raw[r].cls });
+            }
+        }
+
+        while (els.length < items.length)
+        {
+            var el = document.createElement('div');
+            el.className = 'pick-mark';
+            el.innerHTML = '<span class="pm-tag"></span><span class="pm-num"></span>';
+            rec.box.appendChild(el);
+            els.push(el);
+        }
+
+        for (var k = 0; k < els.length; k++)
+        {
+            var el2 = els[k];
+
+            if (k >= items.length)
+            {
+                if (el2.style.display !== 'none') { el2.style.display = 'none'; }
+                continue;
+            }
+
+            var it = items[k];
+
+            el2.style.display = '';          /* 交给样式表的 flex，别写死 block */
+            el2.style.left = it.x.toFixed(1) + 'px';
+            el2.style.top = it.y.toFixed(1) + 'px';
+            el2.className = 'pick-mark ' + it.cls;
+
+            /* 前缀与编号分开放（样式里同字号、只差透明度），内容全是内部常量 */
+            var tagEl = el2.firstChild;
+            var numEl = el2.lastChild;
+            if (tagEl && tagEl.className === 'pm-tag') { tagEl.textContent = it.tag; }
+            if (numEl && numEl.className === 'pm-num') { numEl.textContent = String(it.num); }
+        }
+    }
+
+    /* ---------------- N-N 选点的序号标签 ---------------- */
+
     function regDrawMarks()
     {
-        var box = ensurePickMarks();
-        if (!box || !app) { return; }
+        if (!app) { return; }
 
         /* 退出选点模式就不再显示标记 —— 否则选完点、
          * 应用完矩阵之后，那些 A0/R0 会一直挂在画面上。 */
-        if (!regMode)
-        {
-            for (var h = 0; h < pickMarkEls.length; h++)
-            {
-                pickMarkEls[h].style.display = 'none';
-            }
-            return;
-        }
+        if (!regMode) { paintMarks('pick-marks', []); return; }
 
         /* 收集需要显示的点：目标侧 A0..An、参考侧 R0..Rn。
          * 每个点都要在【所有视图】里各投影一次 —— 双视图并排时
@@ -2855,155 +3237,391 @@
         for (var i = 0; i < regDstPts.length; i++)
         {
             if (!pickVisible(regDstMeta[i])) { continue; }
-            raw.push({ p: regDstPts[i], text: 'A' + i, cls: 'dst' });
+            raw.push({ p: pickDisplayPos(regDstPts[i], regDstMeta[i]),
+                       tag: 'A', num: (regDstMeta[i] ? regDstMeta[i].pid : i), cls: 'dst' });
         }
         for (var j = 0; j < regRefPts.length; j++)
         {
             if (!pickVisible(regRefMeta[j])) { continue; }
-            raw.push({ p: regRefPts[j], text: 'R' + j, cls: 'ref' });
+            raw.push({ p: pickDisplayPos(regRefPts[j], regRefMeta[j]),
+                       tag: 'R', num: (regRefMeta[j] ? regRefMeta[j].pid : j), cls: 'ref' });
         }
 
-        var items = [];
-        var nViews = (app.views && app.views.length) || 1;
-        for (var r = 0; r < raw.length; r++)
-        {
-            for (var vi = 0; vi < nViews; vi++)
-            {
-                var s0 = app.worldToScreen(raw[r].p, vi);
-                if (s0) { items.push({ x: s0.x, y: s0.y, text: raw[r].text, cls: raw[r].cls }); }
-            }
-        }
-
-        // 补齐 / 复用 DOM 元素
-        while (pickMarkEls.length < items.length)
-        {
-            var el = document.createElement('div');
-            el.className = 'pick-mark';
-            box.appendChild(el);
-            pickMarkEls.push(el);
-        }
-
-        for (var k = 0; k < pickMarkEls.length; k++)
-        {
-            var el2 = pickMarkEls[k];
-
-            if (k >= items.length)
-            {
-                el2.style.display = 'none';
-                continue;
-            }
-
-            var it = items[k];
-
-            el2.style.display = 'block';
-            el2.style.left = it.x.toFixed(1) + 'px';
-            el2.style.top = it.y.toFixed(1) + 'px';
-            el2.textContent = it.text;
-            el2.className = 'pick-mark ' + it.cls;
-        }
+        paintMarks('pick-marks', raw);
     }
 
-    var pickMarkLoop = 0;
-    /* 标记投影循环。
+    /* ---------------- 工具拾取的序号标签 ----------------
      *
-     * 之前是无条件 requestAnimationFrame 常驻：即使不在选点状态，
-     * 每帧仍要做投影 + DOM 写入，白占主线程（"帧率低"的一部分来源）。
-     * 现在只在选点状态运行，并限到约 20fps —— 标记不需要 60fps。 */
-    var pickMarkTimer = 0;
+     * 与 N-N 同一套标签、同一套跟帧，取代原来的 3D 十字：
+     * 十字在薄板 / 点云上只有几条 1px 线，几乎看不清；标签能直接给编号，
+     * 而且不用关深度测试（DOM 永远在最上层）。
+     * 最近 3 个参与距离 / 角度计算，高亮；更早的做参照，压暗。 */
 
-    /* 用定时器而不是 rAF：
-     *   - 标记只关心「投影坐标变了」，不需要跟屏幕刷新率绑定；
-     *   - rAF 在后台标签页会被节流甚至暂停，切回来时标记是过期的；
-     *   - 50ms 一次比每帧一次省得多（这才是"帧率低"里属于选点的那部分）。 */
-    function startPickMarkLoop()
+    function drawToolMarks()
     {
-        if (pickMarkTimer) { return; }
+        if (!app) { return; }
 
-        pickMarkTimer = global.setInterval(function ()
+        var pts = (app.pickInfo && app.pickPoints) ? app.pickPoints : [];
+        if (!pts.length) { paintMarks('tool-marks', []); return; }
+
+        var n = pts.length;
+        var activeStart = Math.max(0, n - 3);
+        var raw = [];
+
+        for (var i = 0; i < n; i++)
         {
-            if (!regMode) { stopPickMarkLoop(); return; }
-            if (regRefPts.length || regDstPts.length) { regDrawMarks(); }
-        }, 50);
+            if (!pts[i] || !pts[i].pos) { continue; }
+            raw.push({ p: pts[i].pos, tag: 'P', num: i + 1,
+                       cls: 'pick ' + (i >= activeStart ? 'active' : 'idle') });
+        }
+
+        paintMarks('tool-marks', raw);
     }
 
-    function stopPickMarkLoop()
+    /* ---------------- 标签跟帧 ----------------
+     *
+     * 更新必须和画面同帧。演变过程：
+     *   1. 常驻 requestAnimationFrame：不在选点状态也每帧投影 + 写 DOM，白占主线程；
+     *   2. 改成 50ms setInterval：省了开销，但拖视角时标签**明显滞后**
+     *      （相机每帧动、标签 50ms 才挪一次，看上去"黏"在旧位置）；
+     *   3. 现在挂在渲染循环末尾（app.onAfterRender），只用这一帧定稿的相机矩阵 ——
+     *      与画面严格同帧（实测相机变化到标签更新 avg 6.5ms ≈ 一帧）。
+     *
+     * 两套标签共用一个回调：谁有内容谁就画，另一套自动清空。
+     * 常驻注册一次即可 —— 比"进模式注册、退模式注销"少一类状态，
+     * 也不会漏掉 Esc 之类的退出路径。 */
+
+    function uiFrameMarks()
     {
-        if (pickMarkTimer) { global.clearInterval(pickMarkTimer); }
-        pickMarkTimer = 0;
-        pickMarkLoop = 0;
+        regDrawMarks();
+        drawToolMarks();
     }
 
     /* ---------------- 列表与实时误差 ---------------- */
 
+    /* 一次解算，摘要与表格共用：配对、逐对残差、最大残差 */
+    function regEvaluate()
+    {
+        var pairs = regBuildPairs();
+        var nPair = pairs.length;
+        var live = null;
+
+        if (nPair >= 3)
+        {
+            try { live = solveRigid(pairs); } catch (e) { live = null; }
+        }
+
+        var errs = [];
+        var worst = 0;
+
+        if (live && isFinite(live.rms))
+        {
+            var m = live.mat;
+            for (var r = 0; r < nPair; r++)
+            {
+                var s3 = pairs[r].s, d3 = pairs[r].d;
+                var tx = m[0] * s3[0] + m[1] * s3[1] + m[2] * s3[2] + m[3];
+                var ty = m[4] * s3[0] + m[5] * s3[1] + m[6] * s3[2] + m[7];
+                var tz = m[8] * s3[0] + m[9] * s3[1] + m[10] * s3[2] + m[11];
+                var ex = tx - d3[0], ey = ty - d3[1], ez = tz - d3[2];
+                var err = Math.sqrt(ex * ex + ey * ey + ez * ez);
+                errs.push(err);
+                if (err > worst) { worst = err; }
+            }
+        }
+
+        return { pairs: pairs, nPair: nPair, live: live, errs: errs, worst: worst };
+    }
+
     function regRender()
+    {
+        var ev = regEvaluate();
+        regRenderSummary(ev);
+        regTableRender(ev);
+        /* 显式画一次：选点增删时场景未必 dirty（没有新的一帧），
+         * 光靠跟帧回调要等到下次渲染才更新。 */
+        regDrawMarks();
+    }
+
+    /* 侧栏只放一行摘要，明细在右上角的浮动表格里 —— 面板宽度有限，
+     * 逐点坐标 + 残差堆成十几行会把「计算矩阵」挤出可视区。 */
+    function regRenderSummary(ev)
     {
         var el = $('reg-list');
         if (!el) { return; }
 
         var lines = [];
-        var i, j;
+        var nR = regRefPts.length, nD = regDstPts.length;
 
-        for (i = 0; i < regRefPts.length; i++)
+        if (!nR && !nD)
         {
-            lines.push('R' + i + '  参考 (' + fmt3p(regRefPts[i]) + ')');
-        }
-        for (j = 0; j < regDstPts.length; j++)
-        {
-            lines.push('A' + j + '  目标 (' + fmt3p(regDstPts[j]) + ')');
-        }
-
-        var nPair = Math.min(regRefPts.length, regDstPts.length);
-        var pairs = regBuildPairs();
-
-        if (nPair >= 3)
-        {
-            var live = null;
-            try { live = solveRigid(pairs); } catch (e) { live = null; }
-
-            if (live && isFinite(live.rms))
-            {
-                lines.push('');
-                lines.push('当前 RMS = ' + live.rms.toFixed(4) + '   （' + nPair + ' 对）');
-
-                var m = live.mat;
-                var worst = 0;
-                for (var r = 0; r < nPair; r++)
-                {
-                    var s3 = pairs[r].s, d3 = pairs[r].d;
-                    var tx = m[0] * s3[0] + m[1] * s3[1] + m[2] * s3[2] + m[3];
-                    var ty = m[4] * s3[0] + m[5] * s3[1] + m[6] * s3[2] + m[7];
-                    var tz = m[8] * s3[0] + m[9] * s3[1] + m[10] * s3[2] + m[11];
-                    var ex = tx - d3[0], ey = ty - d3[1], ez = tz - d3[2];
-                    var err = Math.sqrt(ex * ex + ey * ey + ez * ez);
-                    if (err > worst) { worst = err; }
-                    lines.push('  A' + r + '-R' + r + ' 误差 ' + err.toFixed(4));
-                }
-                lines.push('  最大误差 ' + worst.toFixed(4));
-            }
+            lines.push('尚未选点');
         }
         else
         {
-            lines.push('');
-            if (nPair === 0)
-            {
-                lines.push('尚未配对（至少需要 3 对）');
-            }
-            else
-            {
-                lines.push('还差 ' + (3 - nPair) + ' 对才能计算');
-            }
+            lines.push('参考 ' + nR + ' 点 / 目标 ' + nD + ' 点 · 已配 ' + ev.nPair + ' 对');
 
-            if (regRefPts.length !== regDstPts.length)
+            if (ev.nPair < 3) { lines.push('还差 ' + (3 - ev.nPair) + ' 对才能计算'); }
+
+            if (ev.live && isFinite(ev.live.rms))
             {
-                lines.push('当前 参考 ' + regRefPts.length + ' 点 / 目标 ' + regDstPts.length +
-                           ' 点，多出的暂不参与配对');
+                lines.push('RMS ' + ev.live.rms.toFixed(3) + ' mm · 最大 ' + ev.worst.toFixed(3) + ' mm');
             }
         }
 
-        el.textContent = lines.length ? lines.join('\n') : '尚未选点';
+        lines.push(regTableVisible ? '（点此收起选点表格）' : '（点此展开选点表格）');
+        el.textContent = lines.join('\n');
+        el.title = '展开 / 收起右上角的选点表格';
+    }
 
-        regDrawMarks();
-        startPickMarkLoop();
+    /* ---------------- 浮动选点表格（默认右上角，可拖动） ---------------- */
+
+    var regTableEl = null;
+    var regTableVisible = false;
+    var regTableDrag = null;
+
+    function ensureRegTable()
+    {
+        if (regTableEl && regTableEl.isConnected) { return regTableEl; }
+
+        var box = document.createElement('div');
+        box.id = 'pick-table';
+        box.className = 'pick-table';
+        box.style.display = 'none';
+
+        var head = document.createElement('div');
+        head.className = 'pick-table-head';
+        /* 静态骨架，无用户数据 */
+        head.innerHTML =
+            '<span class="pick-table-title">选点 / 误差</span>' +
+            '<label class="pick-table-link" title="删除一侧的点时，同时删掉另一侧的配对点">' +
+                '<input type="checkbox" id="pick-del-link" checked> 联动删除</label>' +
+            '<button type="button" class="pick-table-x" id="pick-table-hide" title="收起">×</button>';
+
+        var body = document.createElement('div');
+        body.className = 'pick-table-body';
+        body.innerHTML =
+            '<table><thead><tr>' +
+            '<th class="c-id">#</th><th>参考 R</th><th class="c-del"></th>' +
+            '<th>目标 A</th><th class="c-del"></th><th class="c-err">残差</th>' +
+            '</tr></thead><tbody></tbody></table>';
+
+        var foot = document.createElement('div');
+        foot.className = 'pick-table-foot';
+
+        box.appendChild(head);
+        box.appendChild(body);
+        box.appendChild(foot);
+        document.body.appendChild(box);
+
+        var xBtn = head.querySelector('#pick-table-hide');
+        if (xBtn)
+        {
+            xBtn.addEventListener('click', function (e)
+            {
+                e.preventDefault();
+                e.stopPropagation();
+                setRegTableVisible(false);
+            });
+        }
+
+        /* 拖动：只在标题栏按下（别把复选框/按钮的点击当成拖动） */
+        head.addEventListener('pointerdown', function (e)
+        {
+            var tg = e.target;
+            if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'BUTTON' ||
+                       tg.tagName === 'LABEL' || tg.tagName === 'SPAN')) { return; }
+
+            var rect = box.getBoundingClientRect();
+            regTableDrag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+
+            /* 从 right 定位切到 left 定位，后续按 left/top 移动 */
+            box.style.left = rect.left + 'px';
+            box.style.top = rect.top + 'px';
+            box.style.right = 'auto';
+
+            head.classList.add('dragging');
+            if (head.setPointerCapture) { try { head.setPointerCapture(e.pointerId); } catch (e2) { } }
+            e.preventDefault();
+        });
+
+        head.addEventListener('pointermove', function (e)
+        {
+            if (!regTableDrag) { return; }
+
+            var vw = global.innerWidth || 1280;
+            var vh = global.innerHeight || 800;
+            var x = Math.max(0, Math.min(vw - 140, e.clientX - regTableDrag.dx));
+            var y = Math.max(0, Math.min(vh - 44, e.clientY - regTableDrag.dy));
+
+            box.style.left = x + 'px';
+            box.style.top = y + 'px';
+        });
+
+        function endDrag()
+        {
+            regTableDrag = null;
+            head.classList.remove('dragging');
+        }
+
+        head.addEventListener('pointerup', endDrag);
+        head.addEventListener('pointercancel', endDrag);
+
+        /* 删除按钮：委托到 tbody，表格重绘时无需重新绑定 */
+        var tbody = body.querySelector('tbody');
+        if (tbody)
+        {
+            tbody.addEventListener('click', function (e)
+            {
+                var btn = e.target;
+                while (btn && btn !== tbody && btn.tagName !== 'BUTTON') { btn = btn.parentNode; }
+                if (!btn || btn === tbody || btn.className.indexOf('pick-del') < 0) { return; }
+
+                e.preventDefault();
+                e.stopPropagation();
+
+                var side = btn.getAttribute('data-side');
+                var pid = parseInt(btn.getAttribute('data-pid'), 10);
+                var linkEl = box.querySelector('#pick-del-link');
+                var alsoOther = !!(linkEl && linkEl.checked);
+
+                var metas = (side === 'ref') ? regRefMeta : regDstMeta;
+                var idx = -1;
+                for (var k = 0; k < metas.length; k++)
+                {
+                    if ((metas[k] ? metas[k].pid : k) === pid) { idx = k; break; }
+                }
+                if (idx < 0) { return; }
+
+                delPick(side, idx, alsoOther);
+                regRender();
+                setInfo('已删除 ' + (side === 'ref' ? 'R' : 'A') + pid +
+                        (alsoOther ? '（含配对侧的同一个点）' : '') +
+                        '    参考 ' + regRefPts.length + ' / 目标 ' + regDstPts.length);
+            });
+        }
+
+        regTableEl = box;
+        return box;
+    }
+
+    function setRegTableVisible(on)
+    {
+        var box = ensureRegTable();
+        if (!box) { return; }
+
+        regTableVisible = !!on;
+        box.style.display = regTableVisible ? 'flex' : 'none';
+
+        /* 摘要里的"点此展开/收起"要跟着变 */
+        regRenderSummary(regEvaluate());
+        if (regTableVisible) { regTableRender(regEvaluate()); }
+    }
+
+    /* 所有选点的 pid 并集（含尚未配对的一侧） */
+    function regCollectPids()
+    {
+        var pids = [], seen = {};
+        var i;
+
+        function add(metas, idx)
+        {
+            var pid = (metas[idx] ? metas[idx].pid : idx);
+            if (!seen[pid]) { seen[pid] = 1; pids.push(pid); }
+        }
+
+        for (i = 0; i < regRefPts.length; i++) { add(regRefMeta, i); }
+        for (i = 0; i < regDstPts.length; i++) { add(regDstMeta, i); }
+
+        pids.sort(function (a, b) { return a - b; });
+        return pids;
+    }
+
+    function regTableRender(ev)
+    {
+        if (!regTableEl || !regTableVisible) { return; }
+
+        var tbody = regTableEl.querySelector('tbody');
+        var foot = regTableEl.querySelector('.pick-table-foot');
+        if (!tbody || !foot) { return; }
+
+        var nR = regRefPts.length, nD = regDstPts.length;
+
+        if (!nR && !nD)
+        {
+            tbody.innerHTML = '<tr><td colspan="6" class="pick-table-empty">' +
+                              '在视口里点同名位置即可选点</td></tr>';
+            foot.textContent = '参考 0 / 目标 0';
+            return;
+        }
+
+        var pids = regCollectPids();
+        var refAt = {}, dstAt = {}, errAt = {};
+        var i, pid;
+
+        for (i = 0; i < regRefPts.length; i++)
+        {
+            pid = (regRefMeta[i] ? regRefMeta[i].pid : i);
+            refAt[pid] = i;
+        }
+        for (i = 0; i < regDstPts.length; i++)
+        {
+            pid = (regDstMeta[i] ? regDstMeta[i].pid : i);
+            dstAt[pid] = i;
+        }
+        for (i = 0; i < ev.pairs.length && i < ev.errs.length; i++)
+        {
+            errAt[ev.pairs[i].pid] = ev.errs[i];
+        }
+
+        function delBtn(side, id)
+        {
+            return '<button type="button" class="pick-del" data-side="' + side +
+                   '" data-pid="' + id + '" title="删除' +
+                   (side === 'ref' ? ' R' : ' A') + id + '">×</button>';
+        }
+
+        var html = [];
+        for (i = 0; i < pids.length; i++)
+        {
+            pid = pids[i];
+
+            var hasR = (refAt[pid] !== undefined);
+            var hasA = (dstAt[pid] !== undefined);
+            var err = errAt[pid];
+
+            html.push(
+                '<tr' + ((hasR && hasA) ? '' : ' class="half"') + '>' +
+                '<td class="c-id">' + pid + '</td>' +
+                '<td class="c-pos">' + (hasR ? fmt3p(regRefPts[refAt[pid]]) : '—') + '</td>' +
+                '<td class="c-del">' + (hasR ? delBtn('ref', pid) : '') + '</td>' +
+                '<td class="c-pos">' + (hasA ? fmt3p(regDstPts[dstAt[pid]]) : '—') + '</td>' +
+                '<td class="c-del">' + (hasA ? delBtn('dst', pid) : '') + '</td>' +
+                '<td class="c-err">' + ((err === undefined) ? '—' : err.toFixed(3)) + '</td>' +
+                '</tr>');
+        }
+
+        tbody.innerHTML = html.join('');
+
+        var txt = '参考 ' + nR + ' / 目标 ' + nD + ' · 已配 ' + ev.nPair + ' 对';
+        if (ev.live && isFinite(ev.live.rms))
+        {
+            txt += ' · RMS ' + ev.live.rms.toFixed(3) + ' mm · 最大 ' + ev.worst.toFixed(3) + ' mm';
+        }
+        else if (ev.nPair < 3)
+        {
+            txt += ' · 还差 ' + (3 - ev.nPair) + ' 对';
+        }
+        foot.textContent = txt;
+    }
+
+    function regClearAll()
+    {
+        regRefPts.length = 0;
+        regDstPts.length = 0;
+        regRefMeta.length = 0;
+        regDstMeta.length = 0;
+        regRender();
     }
 
     function regPick(cx, cy)
@@ -3079,18 +3697,18 @@
 
             if (takeRef)
             {
-                regRefPts.push(hitRef2.pos.slice());
-                regRefMeta.push(pickMetaOf(refLay));
-                setInfo('已选 R' + (regRefPts.length - 1) + '  参考层 (' +
-                        fmt3p(hitRef2.pos) + ')    参考 ' + regRefPts.length +
+                var pRef2 = pickToData(hitRef2.pos, refLay);
+                var pidR = addPick('ref', refLay, pRef2);
+                setInfo('已选 R' + pidR + '  参考层 (' +
+                        fmt3p(pRef2) + ')    参考 ' + regRefPts.length +
                         ' / 目标 ' + regDstPts.length);
             }
             else
             {
-                regDstPts.push(hitDst2.pos.slice());
-                regDstMeta.push(pickMetaOf(dstLay));
-                setInfo('已选 A' + (regDstPts.length - 1) + '  目标层 (' +
-                        fmt3p(hitDst2.pos) + ')    参考 ' + regRefPts.length +
+                var pDst2 = pickToData(hitDst2.pos, dstLay);
+                var pidD = addPick('dst', dstLay, pDst2);
+                setInfo('已选 A' + pidD + '  目标层 (' +
+                        fmt3p(pDst2) + ')    参考 ' + regRefPts.length +
                         ' / 目标 ' + regDstPts.length);
             }
 
@@ -3108,20 +3726,20 @@
             return;
         }
 
+        var pData = pickToData(hit.pos, takeRef ? refLay : dstLay);
+
         if (takeRef)
         {
-            regRefPts.push(hit.pos.slice());
-            regRefMeta.push(pickMetaOf(refLay));
-            setInfo('已选 R' + (regRefPts.length - 1) + '  参考层 (' +
-                    fmt3p(hit.pos) + ')    参考 ' + regRefPts.length +
+            var pidR2 = addPick('ref', refLay, pData);
+            setInfo('已选 R' + pidR2 + '  参考层 (' +
+                    fmt3p(pData) + ')    参考 ' + regRefPts.length +
                     ' / 目标 ' + regDstPts.length);
         }
         else
         {
-            regDstPts.push(hit.pos.slice());
-            regDstMeta.push(pickMetaOf(dstLay));
-            setInfo('已选 A' + (regDstPts.length - 1) + '  目标层 (' +
-                    fmt3p(hit.pos) + ')    参考 ' + regRefPts.length +
+            var pidD2 = addPick('dst', dstLay, pData);
+            setInfo('已选 A' + pidD2 + '  目标层 (' +
+                    fmt3p(pData) + ')    参考 ' + regRefPts.length +
                     ' / 目标 ' + regDstPts.length);
         }
 
@@ -3357,7 +3975,8 @@
         var coarsePreviewTick = 0;  // 粗配准预览节流计数
         var coarseSolver = null;
         var cands = [];
-        var verifyIdx = 0;
+        var verifyIdx = 0;             // 验证进度（逐帧推进，见 stepVerify）
+        var verifyPlan = null;         // 粗筛后的验证名单
         var curProbe = null;
         var verifier = null;           // 候选验证器（在子集上跑）
         var fullKd = null;             // 全量固定点集的 KD 树（主 ICP / 收尾轮共用）
@@ -3400,15 +4019,19 @@
                     sample_size: 2500,
                     delta: Math.max(1, Math.min(60, (diag > 0 ? diag * 0.02 : 3.0))),
                     overlap_estimation: 0.2,
-                    /* 原来写 1.0 —— LCP 永远达不到 1.0，等于没有早停，
-                     * 每次都要把 200 次尝试跑满（约 17 s）。0.85 已足够好，
-                     * 实测正常数据在 40~80% 就能找到可用候选。 */
-                    terminate_threshold: 0.85,
-                    max_time_seconds: 30,
-                    maxTrials: 120,        // 上限（另有早停；原 200 次在 46 万点上要十几秒）
-                    pairLimit: 40000,
+                    /* 0.85 在薄板 / 近似对称件上会被"翻 180° 也贴合 85%"骗停，
+                     * 抬到 0.98；真正的裁决交给候选残差验证。 */
+                    terminate_threshold: 0.98,
+                    /* 一轮尝试约 130~200ms（12k 点对 + 40 次 LCP 打分），30 轮 ≈ 4~7s，
+                     * 8s 是硬上限。实测 137°/180° 两个用例 2~8 轮就命中，
+                     * 真实一对扫描件跑满 30 轮也能拿到 LCP 0.77（基准 0.26）。 */
+                    max_time_seconds: 8,
+                    maxTrials: 30,
+                    /* 点对上限：每轮点对同时进索引和查询，翻倍开销；
+                     * 1.2 万对已经足够覆盖 2500 点的采样云（实测 137° 用例 2 轮即命中）。 */
+                    pairLimit: 12000,
                     maxCongruent: 300,
-                    batch: 2,
+                    batch: 1,
                     preview: true
                 });
             phase = 'coarse';
@@ -3438,6 +4061,23 @@
                 effMaxDist = bestRms * 1.5;
             }
 
+            /* 初值残差已知且远小于容差时，容差本身就该跟着缩 —— 上面那句
+             * `max(maxDist, diag*0.025)` 是为"刚粗对齐、残差十几毫米"兜底的，
+             * 对"主轴假设给出 0.27mm"这种好初值就成了 21mm 的宽松门。
+             *
+             * 实测代价：844mm 的件上首轮 trim 再乘 3 得 63mm 容差，
+             * 薄板另一侧 / 孔壁 / 装夹面全被当成对应点，首轮把 RMS 从 0.35
+             * 拉到 9.6、次轮 24.2，第三轮才回到 0.47 —— 白烧两轮
+             * （每轮 1.6~4 秒，因为 KD 在大容差下剪不动枝）。
+             * 收紧后同一份数据 10~15 轮收敛、RMS 0.048，耗时减半。 */
+            var trimBoost = 2;
+            if (bestInit && isFinite(bestRms) && bestRms > 0 && effMaxDist > 0 &&
+                bestRms < effMaxDist * 0.3)
+            {
+                effMaxDist = Math.max(bestRms * 3, diag > 0 ? diag * 0.0015 : bestRms * 3);
+                trimBoost = 0.5;
+            }
+
             /* 全量 KD 只建一次：主 ICP 与两轮收尾用的都是同一份 fixed.pos */
             if (!fullKd && global.MV.kdtree && global.MV.kdtree.build)
             {
@@ -3451,6 +4091,7 @@
                     normalThresh: thresh,
                     tol: tol,
                     maxDist: effMaxDist,
+                    trimBoost: trimBoost,
                     /* 初值兜底链：验证通过的候选 → 粗配准矩阵（含质心对齐）→ 单位阵。
                      *
                      * 曾经在这里加过 peekXformMat()（拿矩阵框当前值当初值），那是错的：
@@ -3518,20 +4159,46 @@
          * 仍留在 icpRun 内部是为了共用闭包状态（solver / cands / phase…），
          * 改成对象字段反而要传一堆参数，更容易出错。 */
 
+        var coarseQuickDone = false;   // 快速通道只判一次
+        var coarseSkipped = false;     // 是否因"原始位姿已对齐"跳过了搜索
+        var coarseBaseLcp = 0;         // 快速通道用到的基准 LCP（step() 不返回它）
+
         function stepCoarse()
         {
+            /* 快速通道：原始位姿（质心对齐）的覆盖率已经很高时，不必再全局搜索。
+             *
+             * 典型场景就是用户自己先做 N-N / 矩阵对齐，然后忘了取消「自动粗配准」：
+             * 搜索要空跑几秒才有结论，而结论注定是"没有候选能超过基准"。
+             * 判据用 0.9：源点九成都落在目标表面 delta 内，已经是"对齐"状态；
+             * 万一这是薄板翻面的伪高 LCP，后面的主轴假设 + 残差验证仍然会跑，
+             * 所以跳过搜索不会把好位姿换成坏位姿（实测 RMS 0.0477 → 0.0478）。 */
+            if (!coarseQuickDone)
+            {
+                coarseQuickDone = true;
+
+                var pre = null;
+                try { pre = coarseSolver.result(); } catch (e0) { pre = null; }
+
+                if (pre && pre.baselineLcp >= 0.9)
+                {
+                    coarseSolver.cancel();
+                    coarseSkipped = true;
+                    coarseBaseLcp = pre.baselineLcp;
+                }
+            }
+
             var cs = coarseSolver.step();
 
-            /* 预览必须降频。
-             * applyPreviewMat 走的是数据级变换：备份全量顶点 → 写入变换后顶点
-             * → 释放并重建 GPU buffer → 上传（本模型约 1.3MB）。
-             * 粗配准每步都做一次，单帧光上传就要 20~30ms，
-             * 叠加每帧的计算量直接掉帧 —— 这是"卡顿"的真正来源。
-             * 改成每 4 步更新一次，视觉上仍是连续变化。 */
+            /* 预览降频到每 4 步一次。
+             *
+             * 预览本身很便宜（`setGpuPreview` 只写一个 uniform，数据不动），
+             * 但它会触发一次整帧重绘 —— 这一帧要画 80 多万个点，才是真正的开销。
+             * 每步都重绘会把渲染线程压满，连拖视角都发涩；每 4 步一次
+             * 视觉上仍是连续变化，且不拖慢计算。 */
             if (target && cs.matrix)
             {
                 /* 每步返回的 matrix 都是新数组，用 !== 比引用恒为真，
-                 * 节流等于没生效（每拍都重传一次全量顶点）。改成按数值比。 */
+                 * 节流等于没生效。改成按数值比。 */
                 var sameAsLast = false;
                 if (previewTagRef)
                 {
@@ -3553,9 +4220,12 @@
 
             if (info)
             {
-                info.textContent = '粗配准 ' + Math.round(cs.progress * 100) + '%' +
-                                   '   尝试 ' + cs.trial + '/' + cs.trials +
-                                   '   LCP ' + (cs.lcp * 100).toFixed(0) + '%';
+                info.textContent = coarseSkipped
+                    ? ('原始位姿已对齐（LCP ' + Math.round(coarseBaseLcp * 100) +
+                       '%），跳过全局搜索，准备验证候选…')
+                    : ('粗配准 ' + Math.round(cs.progress * 100) + '%' +
+                       '   尝试 ' + cs.trial + '/' + cs.trials +
+                       '   LCP ' + (cs.lcp * 100).toFixed(0) + '%');
             }
 
             if (!cs.done) { nextIteration(tick, 0); return; }
@@ -3611,12 +4281,40 @@
                     if (!dup) { cands.push({ mat: cr.baselineMatrix, score: cr.lcp, src: '质心对齐' }); }
                 }
 
+                /* 第三类候选：主轴（PCA）多假设。
+                 *
+                 * 4PCS 终究是"随机采样共面 4 点 + 离散匹配"的搜索，姿态差越大
+                 * 越吃粒度；而同一零件的两次测量、CAD 与实测，主轴是稳定可用的。
+                 * 两侧主轴对齐只有 24 种真旋转，一次 PCA 全给出来，
+                 * 交给廉价粗筛 + 残差验证挑选即可。 */
+                if (global.MV.icp.pcaCandidates)
+                {
+                    var pca = null;
+                    try
+                    {
+                        pca = global.MV.icp.pcaCandidates(moving.pos, moving.count,
+                                                          fixed.pos, fixed.count, {});
+                    }
+                    catch (e1) { pca = null; }
+
+                    if (pca && pca.mats)
+                    {
+                        for (var pi2 = 0; pi2 < pca.mats.length; pi2++)
+                        {
+                            cands.push({ mat: pca.mats[pi2], score: 0, src: '主轴假设', pca: true });
+                        }
+                    }
+                }
+
                 if (cands.length)
                 {
-                    coarseNote = '\n粗配准 ' + pct(cr.lcp) +
-                                 '（基准 ' + pct(cr.baselineLcp) + '，' +
-                                 cr.trial + '/' + cr.trials + ' 次尝试）· ' +
-                                 cands.length + ' 个候选待验证';
+                    coarseNote = coarseSkipped
+                        ? ('\n原始位姿已对齐（LCP ' + pct(cr.baselineLcp) +
+                           '），跳过全局搜索 · ' + cands.length + ' 个候选待验证')
+                        : ('\n粗配准 ' + pct(cr.lcp) +
+                           '（基准 ' + pct(cr.baselineLcp) + '，' +
+                           cr.trial + '/' + cr.trials + ' 次尝试）· ' +
+                           cands.length + ' 个候选待验证');
                 }
                 else
                 {
@@ -3670,30 +4368,97 @@
                         iters: 12,
                         normalThresh: thresh,
                         tol: tol,
-                        maxDist: Math.max(maxDist, diag > 0 ? diag * 0.025 : maxDist)
+                        maxDist: Math.max(maxDist, diag > 0 ? diag * 0.025 : maxDist),
+                        /* 粗筛容差：与 4PCS 的 delta 同量级（对角线 2%）。
+                         * 候选有二十几个（主轴 24 个）时，全跑 12 轮 ICP 要好几秒，
+                         * 先用"落在容差内的比例"排一次序，只让前几个进完整验证。 */
+                        screenTol: diag > 0 ? diag * 0.02 : Math.max(maxDist, 1),
+                        maxScreenSrc: 1500
                     });
             }
 
-            if (verifier)
+            /* 第一拍只负责定名单（粗筛），之后每拍验证一个候选。
+             * 5 个候选挤在一拍里要阻塞主线程 1~2 秒（每候选 12 轮 × 8000 点），
+             * 分帧后进度条真的在动，也不会被浏览器判成无响应。 */
+            if (!verifyPlan)
             {
-                for (var vi2 = 0; vi2 < cands.length; vi2++)
+                verifyPlan = cands || [];
+                verifyIdx = 0;
+
+                if (verifyPlan.length > 6 && verifier && verifier.screen)
                 {
-                    var sc = verifier.score(cands[vi2].mat);
-                    cands[vi2].rms = sc.rms;
+                    for (var si2 = 0; si2 < verifyPlan.length; si2++)
+                    {
+                        var sn = verifier.screen(verifyPlan[si2].mat);
+                        verifyPlan[si2].hit = sn.hit;
+                        verifyPlan[si2].med = sn.med;
+                    }
+
+                    verifyPlan.sort(function (a, b) { return (b.hit || 0) - (a.hit || 0); });
+                    verifyPlan = verifyPlan.slice(0, 5);
+
+                    /* 「质心对齐」永远留在验证名单里：数据本来就大致对齐
+                     * （或用户刚用 N-N 对过）时它才是最稳的初值；
+                     * 二十几个主轴假设里总有几个在"薄板翻面"上命中率虚高，
+                     * 只按命中率截前 5 有可能把基准挤出去，反而把好位姿换掉。 */
+                    var keptBase = false;
+                    for (var ki2 = 0; ki2 < verifyPlan.length; ki2++)
+                    {
+                        if (verifyPlan[ki2].src === '质心对齐') { keptBase = true; break; }
+                    }
+
+                    if (!keptBase)
+                    {
+                        for (var kb2 = 0; kb2 < cands.length; kb2++)
+                        {
+                            if (cands[kb2].src === '质心对齐')
+                            {
+                                verifyPlan[verifyPlan.length - 1] = cands[kb2];
+                                break;
+                            }
+                        }
+                    }
 
                     if (info)
                     {
-                        info.textContent = '验证候选 ' + (vi2 + 1) + '/' + cands.length +
-                            '   ' + (cands[vi2].src || '') +
-                            '   残差 ' + (isFinite(sc.rms) ? sc.rms.toFixed(2) + 'mm' : '无效');
+                        /* 快速通道只在 stepCoarse 里设一次文案，紧接着就被这一句覆盖 ——
+                         * 用户看不到"为什么没搜索"。这里带上那句话。 */
+                        info.textContent = (coarseSkipped
+                                ? ('原始位姿已对齐（LCP ' + Math.round(coarseBaseLcp * 100) +
+                                   '%），跳过全局搜索 · ')
+                                : '') +
+                            '粗筛 ' + cands.length + ' 个候选，取命中率前 ' +
+                            verifyPlan.length + ' 个（含质心对齐）做残差验证…';
                     }
+                }
+            }
 
-                    if (isFinite(sc.rms) && sc.used >= 200 && sc.rms < bestRms)
-                    {
-                        bestRms = sc.rms;
-                        bestInit = cands[vi2].mat;
-                        bestSrc = cands[vi2].src || '';
-                    }
+            if (verifier && verifyPlan && verifyIdx < verifyPlan.length)
+            {
+                var cvi = verifyPlan[verifyIdx];
+                var sc = verifier.score(cvi.mat);
+                cvi.rms = sc.rms;
+
+                if (info)
+                {
+                    info.textContent = '验证候选 ' + (verifyIdx + 1) + '/' + verifyPlan.length +
+                        '   ' + (cvi.src || '') +
+                        '   残差 ' + (isFinite(sc.rms) ? sc.rms.toFixed(2) + 'mm' : '无效');
+                }
+
+                if (isFinite(sc.rms) && sc.used >= 200 && sc.rms < bestRms)
+                {
+                    bestRms = sc.rms;
+                    bestInit = cvi.mat;
+                    bestSrc = cvi.src || '';
+                }
+
+                verifyIdx++;
+
+                if (verifyIdx < verifyPlan.length)
+                {
+                    nextIteration(tick, 0);
+                    return;
                 }
             }
 
@@ -3714,7 +4479,14 @@
             {
                 coarseNote = '\n粗配准 ' + cands.length + ' 个候选，采用「' +
                              (bestSrc || '搜索解') + '」，残差 ' +
-                             bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿';
+                             bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿' +
+                             /* 这里原本会把早前那句"跳过全局搜索"整段覆盖掉，
+                              * 于是已对齐的场景看起来像"搜索跑了但没找到" */
+                             (coarseSkipped ? '（原始位姿已对齐，全局搜索已跳过）' : '');
+            }
+            else if (coarseSkipped)
+            {
+                coarseNote = '\n原始位姿已对齐，全局搜索已跳过；候选残差都不优于原状，保持不动';
             }
 
             if (info)
@@ -3803,6 +4575,8 @@
                         normalThresh: thresh,
                         tol: tol,
                         maxDist: tightDist,
+                        /* 收尾轮就是要"只保留贴合的对应点"，不能再放大容差 */
+                        trimBoost: 0,
                         initMat: res.mat,
                         kd: fullKd
                     });
@@ -3821,7 +4595,13 @@
             }
         }
 
-        writeXformMat(res.mat);
+        /* 收敛后**直接烘焙进数据**，不只挂预览 / 矩阵框。
+         *
+         * 挂预览会留下三个坑：`data.bbox` 还是旧的（fitAll / 剔除 / 统计全不对）；
+         * 任何一次 applyPreview 把框重置成单位阵，预览就没了、目标瞬间弹回几米外；
+         * 用户还得记得再点一次「应用」，忘了就等于白跑。
+         * 会话内还可以用属性面板的「逆变换」退回，所以不算破坏性操作。 */
+        var baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
 
         var txt = '迭代 ' + res.iters + ' 次' + (refineCount ? '（含 ' + refineCount + ' 轮收紧容差）' : '') +
                   '，RMS = ' + res.rms.toFixed(4) +
@@ -3831,7 +4611,8 @@
         if (info) { info.textContent = txt; }
 
         xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
-            '\n点「应用」把矩阵作用到「' + dstLay.name + '」', res.rms > 1);
+            '\n' + (baked ? ('已直接应用到「' + dstLay.name + '」')
+                          : ('未能自动应用，请点「应用」把矩阵作用到「' + dstLay.name + '」')), res.rms > 1);
         setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
         var coarseMs = tCoarseEnd ? (tCoarseEnd - tRun) : 0;
         var iterMs = tCoarseEnd ? (nowMs() - tCoarseEnd) : 0;
@@ -4044,7 +4825,6 @@
             regStart.addEventListener('click', function ()
             {
                 regMode = !regMode;
-            if (regMode) { startPickMarkLoop(); } else { stopPickMarkLoop(); }
                 regStart.textContent = regMode ? '停止选点' : '开始选点';
 
                 /* 与「工具 → 拾取」共用同一个精准准星光标 */
@@ -4052,6 +4832,9 @@
                 setInfo(regMode
                     ? '配准选点：点参考层和目标层上的任意位置，按层自动编号 R0..／A0..'
                     : '已结束选点（标记已隐藏，点「开始选点」可继续）');
+
+                /* 选点期间把表格挂出来；退出选点时收掉，免得挡住视口 */
+                setRegTableVisible(regMode);
                 regRender();
                 regDrawMarks();     // 立刻刷一次，退出时把标记抹掉
             });
@@ -4062,10 +4845,19 @@
         {
             regClear.addEventListener('click', function ()
             {
-                regRefPts.length = 0;
-                regDstPts.length = 0;
-                regRender();
+                regClearAll();
                 setInfo('已清空点对');
+            });
+        }
+
+        /* 侧栏摘要点一下就能展开/收起浮动表格 —— 面板里没有多余的按钮位置 */
+        var regListEl = $('reg-list');
+        if (regListEl)
+        {
+            regListEl.classList.add('clickable');
+            regListEl.addEventListener('click', function ()
+            {
+                setRegTableVisible(!regTableVisible);
             });
         }
 
@@ -4980,6 +5772,10 @@
     {
         app = appRef;
 
+        /* 序号标签（N-N 选点 R/A、工具拾取 P）跟着渲染帧走。
+         * 常驻注册一次，内部按模式自行判断要不要画 —— 比"进模式注册、退模式注销"
+         * 少一类状态，也不会漏掉 Esc 之类的退出路径。 */
+        app.onAfterRender = uiFrameMarks;
 
         // 图表绑定按区域拆分，便于定位（原 593 行 init 的等价展开）
         bindTopbar();
@@ -5079,6 +5875,58 @@
     /* ---- bindProps ---- */
     function bindProps()
     {
+        /* ---- 属性面板的「变换」行 ---- */
+        var xMain = $('p-xform-main');
+        if (xMain)
+        {
+            xMain.addEventListener('click', function ()
+            {
+                var l = app ? app.getSelected() : null;
+                if (!l || !l.xformSteps || !l.xformSteps.length) { return; }
+                propXformOpen = !propXformOpen;
+                renderXformProp(l);
+            });
+        }
+
+        var xCopy = $('p-xform-copy');
+        if (xCopy)
+        {
+            xCopy.addEventListener('click', function ()
+            {
+                var l = app ? app.getSelected() : null;
+                if (!l || !l.xformMat || isIdentityMat(l.xformMat)) { return; }
+
+                var t = matToText(l.xformMat);
+                function done() { setInfo('已复制 ' + l.name + ' 的累计变换（16 个数）'); }
+                if (global.navigator && navigator.clipboard && navigator.clipboard.writeText)
+                {
+                    navigator.clipboard.writeText(t).then(done, function () { fallbackCopy(t, done); });
+                }
+                else
+                {
+                    fallbackCopy(t, done);
+                }
+            });
+        }
+
+        var xUndo = $('p-xform-undo');
+        if (xUndo)
+        {
+            xUndo.addEventListener('click', function ()
+            {
+                undoLastXformOf(app ? app.getSelected() : null);
+            });
+        }
+
+        var xInv = $('p-xform-inv');
+        if (xInv)
+        {
+            xInv.addEventListener('click', function ()
+            {
+                invertLayerXform(app ? app.getSelected() : null);
+            });
+        }
+
         // 属性控件
         $('p-name').addEventListener('change', function ()
         {

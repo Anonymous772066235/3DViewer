@@ -120,10 +120,8 @@
                 global.MV.ui.setInfo('WebGL 上下文已恢复，正在重建显存资源');
             };
         })(this);
-        if (this.urlMark > 0)
-        {
-            this.renderer.pickMarkLen = this.urlMark;   // ?mark= 覆盖拾取十字的单臂长度
-        }
+        /* `?mark=` 是给旧的 3D 十字拾取标记调"单臂长度"用的；
+         * 拾取改成 DOM 标签后长度没有意义了，参数保留解析但不再生效。 */
 
         if (!this.renderer.init())
         {
@@ -155,7 +153,24 @@
             colors: params.get('colors') === '1',
             noconfirm: params.get('noconfirm') === '1',
             debug: params.get('debug') === '1',
-            cull: params.get('cull') !== '0'
+            cull: params.get('cull') !== '0',
+
+        /* 单层「显示端」点数上限。
+         *
+         * 46 万 + 36 万点的两份点云，双视图下每帧要画 165 万个点
+         * （每个图层在主视图画一次、在对面的 ghost 再画一次）。
+         * 点云是单次 drawArrays、无分块剔除，代价与点数线性相关，
+         * 这就是配准期间帧率被拖住的主因。
+         *
+         * 抽稀只影响「画出来的点」，不碰 positions —— 拾取、配准、
+         * 统计、导出仍用全量数据。1200px 视口本来也分辨不出 46 万个点。
+         * ?ptcap=0 可关闭，?ptcap=N 可改。 */
+        pointCap: (function () {
+            var v = params.get('ptcap');
+            if (v === null) { return 180000; }
+            var n = parseInt(v, 10);
+            return isFinite(n) && n >= 0 ? n : 180000;
+        })()
         };
         var wireParam = params.get('wire');
         this.urlWire = wireParam === '1' || wireParam === '2';
@@ -1090,6 +1105,34 @@
     };
 
     /* ---------------- 包围盒 / 视图 ---------------- */
+    /* 把包围盒 8 个角点按矩阵变换后重新取包络。
+     * 刚体变换下「变换后包围盒」比「包围盒变换」更紧，但这里要求简单可靠，
+     * 8 个角点已经足够（每帧至多几十次乘法）。 */
+    function xformedBBox(bb, m)
+    {
+        if (!bb || !m || !bb.min || !bb.max) { return bb; }
+
+        var mn = [Infinity, Infinity, Infinity];
+        var mx = [-Infinity, -Infinity, -Infinity];
+
+        for (var k = 0; k < 8; k++)
+        {
+            var x = (k & 1) ? bb.max[0] : bb.min[0];
+            var y = (k & 2) ? bb.max[1] : bb.min[1];
+            var z = (k & 4) ? bb.max[2] : bb.min[2];
+
+            var tx = m[0] * x + m[1] * y + m[2] * z + m[3];
+            var ty = m[4] * x + m[5] * y + m[6] * z + m[7];
+            var tz = m[8] * x + m[9] * y + m[10] * z + m[11];
+
+            if (tx < mn[0]) { mn[0] = tx; } if (tx > mx[0]) { mx[0] = tx; }
+            if (ty < mn[1]) { mn[1] = ty; } if (ty > mx[1]) { mx[1] = ty; }
+            if (tz < mn[2]) { mn[2] = tz; } if (tz > mx[2]) { mx[2] = tz; }
+        }
+
+        return { min: mn, max: mx };
+    }
+
     App.prototype.computeBBox = function (slots)
     {
         // 单窗口模式下所有槽位合并显示，忽略槽位过滤
@@ -1110,7 +1153,10 @@
             {
                 continue;
             }
-            B.merge(box, l.data.bbox);
+            /* 预览态（配准过程中的 layer.previewMat）必须按变换后的包络参与，
+             * 否则场景包围盒/适应视图仍以为它待在原位 —— 相机看着空地，
+             * 而目标早就被画到几米之外，表现就是「配准过程中目标看不见」。 */
+            B.merge(box, l.previewMat ? xformedBBox(l.data.bbox, l.previewMat) : l.data.bbox);
         }
         return box;
     };
@@ -2163,10 +2209,16 @@
 
         if (this.dirty)
         {
-            this.renderer.pickMarks = this.pickPoints;
             this.healBBoxes();
             this.renderFrame();
             this.dirty = false;
+
+            /* 逐帧叠加层（N-N 序号标签）必须和画面同帧更新。
+             *
+             * 挂在这里而不是自己起 rAF/定时器：自带节流的 DOM 叠加层会落后于
+             * 相机（实测 50ms 定时器在拖视角时肉眼可见地"黏"在后面），
+             * 而且这一帧的相机矩阵此刻才是定稿的，投影结果与画面严格一致。 */
+            if (this.onAfterRender) { this.onAfterRender(); }
         }
 
         this.frameCount++;
