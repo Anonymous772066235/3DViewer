@@ -4012,6 +4012,90 @@
             : '以当前参数运行 ICP（运行中可按 Esc 终止）';
     }
 
+    /* ---------------- ICP Worker（配准计算线程） ----------------
+     *
+     * 把 ICP 迭代搬到 Web Worker：主线程只收进度、写一个预览 uniform，
+     * 配准期间保持 60fps 可拖视角。
+     *
+     * 此前 ICP 单轮 ~215ms、收尾轮再 20 轮，全在主线程就是一串 200ms 级冻结
+     * （实测最大帧间隔 933ms）。搬过去之后这些计算不再占主线程。
+     *
+     * 详见 js/icp_worker.js。Worker 不可用（老浏览器 / 创建失败）时自动退回
+     * 原来的 tick 主线程推进 —— 两条路径的收敛判据与烘焙逻辑完全一致。
+     */
+    var icpWorkerInst = null;
+    var icpWorkerSeq = 0;
+    var icpWorkerBroken = false;
+
+    /* 把 ui.js 自己的 ?v= 也带给 worker，否则它 importScripts 的 core/algo
+     * 会命中旧缓存，出现"页面是新的、算法是旧的"这种极难查的问题。 */
+    function scriptVersionTag()
+    {
+        var s = document.querySelector('script[src*="ui.js"]');
+        if (!s) { return ''; }
+        var m = /[?&]v=([^&]+)/.exec(s.src);
+        return m ? m[1] : '';
+    }
+
+    function getIcpWorker()
+    {
+        if (icpWorkerInst || icpWorkerBroken) { return icpWorkerInst; }
+        if (!global.Worker) { icpWorkerBroken = true; return null; }
+
+        try
+        {
+            var v = scriptVersionTag();
+            icpWorkerInst = new global.Worker('js/icp_worker.js' + (v ? ('?v=' + v) : ''));
+        }
+        catch (e)
+        {
+            icpWorkerBroken = true;
+            icpWorkerInst = null;
+        }
+        return icpWorkerInst;
+    }
+
+    /* 一次请求；onStep 在每轮迭代时回调。resolve 的是 done / ready / mats 消息 */
+    function icpWorkerCall(msg, onStep)
+    {
+        var w = getIcpWorker();
+        if (!w) { return Promise.reject(new Error('no worker')); }
+
+        var id = ++icpWorkerSeq;
+        msg.id = id;
+
+        return new Promise(function (resolve, reject)
+        {
+            function onMsg(e)
+            {
+                var m = e.data || {};
+                if (m.id !== id) { return; }
+
+                if (m.type === 'step')
+                {
+                    if (onStep) { onStep(m); }
+                    return;
+                }
+
+                w.removeEventListener('message', onMsg);
+
+                if (m.type === 'cancelled') { reject(new Error('cancelled')); return; }
+                if (m.type === 'error') { reject(new Error(m.message || 'worker error')); return; }
+
+                resolve(m);
+            }
+
+            w.addEventListener('message', onMsg);
+            w.postMessage(msg);
+        });
+    }
+
+    function cancelIcpWorker()
+    {
+        if (!icpWorkerInst) { return; }
+        try { icpWorkerInst.postMessage({ cmd: 'cancel' }); } catch (e) { }
+    }
+
     function finishIcpRun()
     {
         icpRunning = false;
@@ -4023,6 +4107,7 @@
         if (!icpRunning) { return false; }
 
         icpRunSeq++;             // 让当前运行的后续 tick 全部失效
+        cancelIcpWorker();       // Worker 路径：让它内部循环尽快退出
         finishIcpRun();
 
         /* 预览只挂在 layer.previewMat 上，数据没动过 —— 清掉矩阵即回到原位 */
@@ -4222,13 +4307,10 @@
 
         var solver = null;
 
-        /* 创建正式 ICP 求解器（初值来自粗配准验证结果） */
-        function buildMainSolver()
+        /* 主 ICP 的求解参数 —— **两条路径共用**（Worker / 主线程），
+         * 否则同一份数据会因容差不同而收敛到不同的迭代次数与 RMS。 */
+        function mainSolveOptions()
         {
-            /* 关键：maxDist 必须容纳粗配准的残留误差。
-             * 粗配准给的是"够用"的位姿，残差可能几毫米到十几毫米；
-             * 若 maxDist 卡在 10，初值再好也几乎找不到对应点，
-             * 参与点只剩几十个，ICP 等于白跑 —— 粗配准就失去意义了。 */
             /* 容差下限按数据尺度给：两片点云刚粗对齐时残差常有十几毫米，
              * 用户默认的 10mm 会让参与点只剩几十个（实测 6478 → 43），
              * RMS 看着不小，其实是"点太少"。 */
@@ -4237,22 +4319,15 @@
             /* 只做"兜底放宽"，不做"随残差等比放大"。
              * 等比放大（试过 ×2.5）在初值本来就在容差内时反而有害：
              * 残差 5.5 被放大成 13.7，ICP 递减从 41 起步，
-             * 大量错配参与求解，把好好的初值拉坏到 RMS 13.6。
-             * 正确做法：初值够准就按原容差跑，只有确实吃不到点时才放宽。 */
+             * 大量错配参与求解，把好好的初值拉坏到 RMS 13.6。 */
             if (bestInit && isFinite(bestRms) && bestRms > maxDist && maxDist > 0)
             {
                 effMaxDist = bestRms * 1.5;
             }
 
-            /* 初值残差已知且远小于容差时，容差本身就该跟着缩 —— 上面那句
-             * `max(maxDist, diag*0.025)` 是为"刚粗对齐、残差十几毫米"兜底的，
-             * 对"主轴假设给出 0.27mm"这种好初值就成了 21mm 的宽松门。
-             *
-             * 实测代价：844mm 的件上首轮 trim 再乘 3 得 63mm 容差，
-             * 薄板另一侧 / 孔壁 / 装夹面全被当成对应点，首轮把 RMS 从 0.35
-             * 拉到 9.6、次轮 24.2，第三轮才回到 0.47 —— 白烧两轮
-             * （每轮 1.6~4 秒，因为 KD 在大容差下剪不动枝）。
-             * 收紧后同一份数据 10~15 轮收敛、RMS 0.048，耗时减半。 */
+            /* 初值残差远小于容差时把容差收紧：上面那句 `max(maxDist, diag*0.025)`
+             * 是为"刚粗对齐、残差十几毫米"兜底的，对"主轴假设给出 0.27mm"这种
+             * 好初值就成了 21mm 的宽松门 —— 实测会把首轮 RMS 从 0.35 拉到 9.6。 */
             var trimBoost = 2;
             if (bestInit && isFinite(bestRms) && bestRms > 0 && effMaxDist > 0 &&
                 bestRms < effMaxDist * 0.3)
@@ -4261,35 +4336,53 @@
                 trimBoost = 0.5;
             }
 
-            /* 全量 KD 只建一次：主 ICP 与两轮收尾用的都是同一份 fixed.pos */
+            /* 初值兜底链：验证通过的候选 → 粗配准矩阵（含质心对齐）→ 单位阵。
+             *
+             * 曾经在这里加过 peekXformMat()（拿矩阵框当前值当初值），那是错的：
+             * 矩阵框记录的是「已经烘焙进数据的变换」，数据里早就含有它 ——
+             * 再拿它当初值等于把同一个刚体变换又乘一遍，表现就是
+             * 「N-N 应用后不勾 4PCS，配准直接失败」。 */
+            return {
+                maxIter: maxIter,
+                sampleRatio: sampleRatio,
+                normalThresh: thresh,
+                tol: tol,
+                maxDist: effMaxDist,
+                trimBoost: trimBoost,
+                initMat: bestInit || coarseMat || null
+            };
+        }
+
+        /* 创建正式 ICP 求解器（主线程路径；Worker 路径用 mainSolveOptions 直接发参数） */
+        function buildMainSolver()
+        {
+            var opts = mainSolveOptions();
+
+            /* 全量 KD 只建一次：主 ICP 与两轮收尾用的都是同一份 fixed.pos。
+             * Worker 路径那边由 Worker 自己缓存，这里保留给同步路径。 */
             if (!fullKd && global.MV.kdtree && global.MV.kdtree.build)
             {
                 fullKd = global.MV.kdtree.build(fixed.pos);
             }
+            opts.kd = fullKd;
 
-            return global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm,
-                {
-                    maxIter: maxIter,
-                    sampleRatio: sampleRatio,
-                    normalThresh: thresh,
-                    tol: tol,
-                    maxDist: effMaxDist,
-                    trimBoost: trimBoost,
-                    /* 初值兜底链：验证通过的候选 → 粗配准矩阵（含质心对齐）→ 单位阵。
-                     *
-                     * 曾经在这里加过 peekXformMat()（拿矩阵框当前值当初值），那是错的：
-                     * 矩阵框记录的是「已经烘焙进数据的变换」，数据里早就含有它。
-                     * 再拿它当 ICP 初值等于把同一个刚体变换又乘一遍 —— 点云被推到
-                     * 几米之外，全部落在 maxDist 以外，对应点一个都找不到，
-                     * 表现就是「N-N 应用后不勾 4PCS，配准直接失败」。 */
-                    initMat: bestInit || coarseMat || null,
-                    /* 固定点集没变，复用打分器建的树 */
-                    kd: fullKd
-                });
+            return global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm, opts);
         }
 
-        if (phase === 'icp')
+        /* 启动主 ICP —— **唯一入口**，两个调用点（未勾 4PCS 的初始化、stepVerify 收尾）
+         * 都走这里，避免"一处走 Worker、另一处仍同步建求解器"。
+         *
+         * 返回 true 表示已经异步接管（后面不要再 settimeout tick）；
+         * 返回 false 表示主线程已备好 solver，继续按帧推进。 */
+        function bootMainIcp()
         {
+            if (getIcpWorker())
+            {
+                if (!tCoarseEnd) { tCoarseEnd = nowMs(); }
+                startWorkerIcp();
+                return true;
+            }
+
             try
             {
                 solver = buildMainSolver();
@@ -4298,16 +4391,25 @@
             {
                 if (info) { info.textContent = '出错：' + e.message; }
                 xformInfo('ICP 出错：' + e.message, true);
-                return;
+                finishIcpRun();
+                return true;
             }
 
             if (!solver)
             {
                 if (info) { info.textContent = '配准失败：数据不足'; }
                 xformInfo('ICP 失败', true);
-                        finishIcpRun();
-                return;
+                finishIcpRun();
+                return true;
             }
+
+            if (!tCoarseEnd) { tCoarseEnd = nowMs(); }
+            return false;
+        }
+
+        if (phase === 'icp')
+        {
+            if (bootMainIcp()) { return; }
         }
 
         if (info)
@@ -4332,6 +4434,10 @@
         var tRun = nowMs();
         var tCoarseEnd = 0;
         var refineCount = 0;           // 已做过的「收紧容差」收尾轮数（最多 2 轮）
+
+        /* ICP 迭代走 Worker（粗配准 / 候选验证仍在主线程，它们单块已压到 75~200ms）。
+         * 注意：这里**不能**提前判断 —— 勾了 4PCS 时 phase 先是 'coarse'，
+         * 真正的入口在 stepVerify 结尾（phase 变 'icp' 处），由 bootMainIcp() 统一决定。 */
 
         // 每帧只跑一轮，并用 rAF 调度：这样每一次迭代都会渲染一帧，
         // 能看到数据逐步收敛的过程。用 setTimeout 的话几十轮会在几毫秒内
@@ -4653,17 +4759,7 @@
 
             phase = 'icp';
 
-            try { solver = buildMainSolver(); }
-            catch (e2) { solver = null; }
-
-            if (!solver)
-            {
-                if (info) { info.textContent = '配准失败：数据不足'; }
-                xformInfo('ICP 失败', true);
-                        finishIcpRun();
-                return;
-            }
-
+            /* 先算出「采用了哪个候选」的说明：Worker 路径也要用它拼结果文案 */
             if (bestInit)
             {
                 coarseNote = '\n粗配准 ' + cands.length + ' 个候选，采用「' +
@@ -4679,9 +4775,13 @@
             }
 
             if (info)
-        {
-            info.textContent = '开始精配准…' + (hadPreview ? '（已先撤销未应用的矩阵预览）' : '');
-        }
+            {
+                info.textContent = '开始精配准…' + (hadPreview ? '（已先撤销未应用的矩阵预览）' : '');
+            }
+
+            /* Worker 可用时这里直接异步接管；否则主线程已建好 solver，继续按帧推进 */
+            if (bootMainIcp()) { return; }
+
             nextIteration(tick);
             return;
 
@@ -4858,6 +4958,165 @@
             stepIcp();
         }
 
+        /* ---------------- Worker 路径（与上面同步路径等价） ---------------- */
+
+        function onWorkerStep(m)
+        {
+            if (myRun !== icpRunSeq) { return; }
+
+            /* 预览只写一个 uniform：数据不动、不上传顶点 */
+            if (target && m.mat) { setGpuPreview(target, m.mat); }
+
+            if (info && !m.done)
+            {
+                info.textContent = '迭代 ' + m.iters + ' 次   RMS ' +
+                    (isFinite(m.rms) ? m.rms.toFixed(4) : '—') + '   点 ' + m.used;
+            }
+        }
+
+        function workerFail(err)
+        {
+            if (myRun !== icpRunSeq) { return; }
+
+            clearGpuPreview(dstLay);
+            if (info) { info.textContent = '配准失败：' + ((err && err.message) || err); }
+            xformInfo('ICP 失败：' + ((err && err.message) || err), true);
+            finishIcpRun();
+        }
+
+        function startWorkerIcp()
+        {
+            if (info) { info.textContent = '准备精配准…'; }
+
+            icpWorkerCall({ cmd: 'init', fixed: { pos: fixed.pos, nrm: fixed.nrm } })
+                .then(function ()
+                {
+                    if (myRun !== icpRunSeq) { return null; }
+                    if (!tCoarseEnd) { tCoarseEnd = nowMs(); }
+
+                    return icpWorkerCall({
+                        cmd: 'solve',
+                        moving: { pos: moving.pos, nrm: moving.nrm },
+                        /* 与主线程路径同一份参数（含"好初值收紧容差"那段决策），
+                         * 否则两条路径的迭代次数与 RMS 会对不上 */
+                        opts: mainSolveOptions()
+                    }, onWorkerStep);
+                })
+                .then(function (res)
+                {
+                    if (!res || myRun !== icpRunSeq) { return; }
+                    return afterWorkerSolve(res);
+                })
+                .catch(function (err) { workerFail(err); });
+        }
+
+        function afterWorkerSolve(res)
+        {
+            var dt = Date.now() - t0;
+            var diverged = !isFinite(res.rms) || (diag > 0 && res.rms > diag * 0.5);
+
+            if (diverged)
+            {
+                clearGpuPreview(target || dstLay);
+                if (info)
+                {
+                    info.textContent = '配准未收敛：迭代 ' + res.iters + ' 次后 RMS = ' +
+                        res.rms.toFixed(2) + '（数据尺度 ' + diag.toFixed(1) + '）\n' +
+                        '已放弃该结果，数据保持原位。可尝试：调低「采样」数值、\n' +
+                        '调大「迭代」，或先用 N-N 配准给一个接近的初值。';
+                }
+                finishIcpRun();
+                xformInfo('配准未收敛，已放弃结果（数据未被移动）', true);
+                setInfo('ICP 未收敛（RMS ' + res.rms.toFixed(2) + '）', false, 'fail');
+                logTiming('ICP 配准（未收敛）', dt, '迭代 ' + res.iters + ' 次');
+                return;
+            }
+
+            /* 收尾轮：收紧容差再跑一轮，仍然交给 Worker */
+            if (refineCount < 2 && isFinite(res.rms) && res.used >= 500 &&
+                diag > 0 && res.rms > diag * 0.001)
+            {
+                refineCount++;
+                var tightDist = Math.max(1, diag * (refineCount === 1 ? 0.008 : 0.003));
+
+                if (info)
+                {
+                    info.textContent = '容差收紧到 ' + tightDist.toFixed(1) + ' mm，收尾迭代…';
+                }
+
+                return icpWorkerCall({
+                    cmd: 'solve',
+                    moving: { pos: moving.pos, nrm: moving.nrm },
+                    opts: {
+                        maxIter: 20,
+                        sampleRatio: sampleRatio,
+                        normalThresh: thresh,
+                        tol: tol,
+                        maxDist: tightDist,
+                        trimBoost: 0,
+                        initMat: res.mat
+                    }
+                }, onWorkerStep)
+                .then(function (r2)
+                {
+                    if (myRun !== icpRunSeq) { return null; }
+                    return afterWorkerSolve(r2);
+                });
+            }
+
+            /* 收敛：与同步路径完全相同的烘焙逻辑 */
+            var movedRot = 0, movedLen = 0;
+            if (res.mat)
+            {
+                var trm = res.mat[0] + res.mat[5] + res.mat[10];
+                movedRot = Math.acos(Math.max(-1, Math.min(1, (trm - 1) / 2))) * 180 / Math.PI;
+                movedLen = Math.sqrt(res.mat[3] * res.mat[3] +
+                                     res.mat[7] * res.mat[7] +
+                                     res.mat[11] * res.mat[11]);
+            }
+            var stayed = (movedRot < 0.05 && movedLen < 0.01);
+
+            var baked;
+            if (stayed)
+            {
+                clearGpuPreview(dstLay);
+                clearPreview();
+                baked = true;
+            }
+            else
+            {
+                baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
+            }
+
+            if (baked && app.selectLayer) { app.selectLayer(dstLay.id); }
+
+            var txt = '迭代 ' + res.iters + ' 次' +
+                      (refineCount ? '（含 ' + refineCount + ' 轮收紧容差）' : '') +
+                      '，RMS = ' + res.rms.toFixed(4) +
+                      '\n参与点 ' + res.used + '，' +
+                      (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
+                      '\n耗时 ' + dt + ' ms' + sampleNote + coarseNote;
+            if (info) { info.textContent = txt; }
+
+            xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
+                '\n' + (baked
+                    ? (stayed
+                        ? ('「' + dstLay.name + '」已在原位：本次增量≈单位阵（没有重复施加），' +
+                           '累计变换见属性面板「变换」')
+                        : ('已把增量 ' + xformBrief(res.mat, 2, 2) + ' 烘焙到「' + dstLay.name + '」'))
+                    : ('未能自动应用，请点「应用」把矩阵作用到「' + dstLay.name + '」')), res.rms > 1);
+
+            setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
+
+            var coarseMs = tCoarseEnd ? (tCoarseEnd - tRun) : 0;
+            var iterMs = tCoarseEnd ? (nowMs() - tCoarseEnd) : 0;
+            var stageNote = '迭代 ' + res.iters + ' 次 · RMS ' + res.rms.toFixed(4) + ' · Worker';
+            if (coarseMs > 0) { stageNote += ' · 粗配准 ' + fmtDur(coarseMs) + ' / 迭代 ' + fmtDur(iterMs); }
+            logTiming('ICP 配准', dt, stageNote);
+            finishIcpRun();
+        }
+
+        /* 到这里说明主线程路径已备好 solver（Worker 路径在 bootMainIcp 里就 return 了） */
         setTimeout(tick, 30);
     }
 
