@@ -28,11 +28,75 @@
         }
     });
 
+    /* 自动赋色：按槽位分组，**深 / 浅两套**。
+     *
+     * 改动三条：
+     *   1. 6 色并且刻意拉开色相 —— 原来是 4 个同色系的蓝（200°~215°），
+     *      第 5 个图层就开始撞色，而人眼对同色系内的细微差别几乎不敏感；
+     *   2. 浅色一套整体压深 20~30%：白底上 `#6fc3ff` / `#8fb9ff` 的对比度只有 1.6:1，
+     *      轮廓直接发虚；
+     *   3. 选色由 `pickColor()` 按当前主题取，切主题时 `recolorLayers()` 会把
+     *      "没被手动改过色"的图层换到另一套的同索引位置。 */
     var PALETTE = {
-        A: ['#4da3ff', '#6fc3ff', '#3f8fd8', '#8fb9ff'],
-        B: ['#ffb347', '#ff8f6b', '#f0c05a', '#ff9f43'],
-        S: ['#8fd694', '#a9d46e', '#5fd0a8', '#c2d97a']
+        dark: {
+            A: ['#4da3ff', '#2eccb5', '#9b8cff', '#4dc9ff', '#6f8dff', '#38b6d6'],
+            B: ['#ffb347', '#ff7a5c', '#ffd166', '#f4956b', '#ffa07a', '#e8b04b'],
+            S: ['#8fd694', '#a9d46e', '#5fd0a8', '#7ed957', '#b7d95c', '#57c98b']
+        },
+        light: {
+            A: ['#1f6fd0', '#0e8a78', '#5b47c4', '#1a86b8', '#3a5fd0', '#0f7f9c'],
+            B: ['#c47a10', '#c0452a', '#b38900', '#b85f2c', '#c2622f', '#a86a1a'],
+            S: ['#2f8f4a', '#5a8f1c', '#1a8a68', '#3d8f2a', '#6f8f20', '#1d8a56']
+        }
     };
+
+    function paletteSet(light)
+    {
+        return light ? PALETTE.light : PALETTE.dark;
+    }
+
+    /* 在 hex 上做提亮 / 压暗（amt > 0 提亮，< 0 压暗），用于派生同色系的线框与边界 */
+    function tintHex(hex, amt)
+    {
+        var rgb = global.MV.util.hexToRgb(hex);
+        if (!rgb) { return hex; }
+
+        var out = [0, 0, 0];
+        for (var i = 0; i < 3; i++)
+        {
+            var c = rgb[i];
+            out[i] = (amt >= 0) ? (c + (1 - c) * amt) : (c * (1 + amt));
+        }
+        return global.MV.util.rgbToHex(out);
+    }
+
+    /* 从主色派生一整套附属色。
+     *
+     * 原来线框写死 `#2f9df0`、边界写死 `#22d3ee` —— 三个图层叠在一起时线框全是同一个蓝，
+     * 根本分不清哪圈线属于谁。改成同色系派生后，线框/边界天然与面片同族，不用记第二套色卡。
+     * 浅色主题下派生方向反过来（压暗而不是提亮）：浅底上更深的线才看得清。 */
+    function applyDerivedColors(lay, hex, light)
+    {
+        var wire = tintHex(hex, light ? -0.18 : 0.30);
+        var bound = tintHex(hex, light ? -0.45 : -0.30);
+
+        /* 背面色：中性灰，避免与正面色抢眼。
+         * 原来还留着一个 `backColor: '#b03a30'`（红）而 rgb 是灰 —— hex 与 rgb 不一致，
+         * 渲染只用 rgb 所以没暴露，但任何人读 hex 都会拿到错的值。这里统一。 */
+        lay.backColor = light ? '#7a828c' : '#6b7078';
+        lay.backColorRgb = global.MV.util.hexToRgb(lay.backColor);
+
+        lay.wireColor = wire;
+        lay.wireColorRgb = global.MV.util.hexToRgb(wire);
+
+        lay.boundaryColor = bound;
+        lay.boundaryColorRgb = global.MV.util.hexToRgb(bound);
+
+        /* 顶点色：深色主题用近白衬深底；浅色主题必须用深灰 ——
+         * 原来的 `#f2f3fa` 在白底上等于隐形。 */
+        lay.vertColor = light ? '#3a4048' : '#f2f3fa';
+        lay.vertColorRgb = global.MV.util.hexToRgb(lay.vertColor);
+    }
 
     function App()
     {
@@ -47,12 +111,26 @@
         this.pickPoints = [];
 
         this.settings = {
-            /* ?theme=light 要在这里就生效：setTheme 是在 init() 之后调的，
-             * 那时首帧已经按深色画过。分享链接 / 截图希望开屏即是目标主题，
-             * 所以构造期先按 URL 定下背景色（setTheme 随后再覆盖一次，无副作用）。 */
-            bg: (global.location && (global.location.search || '').indexOf('theme=light') >= 0)
-                ? [0.933, 0.945, 0.961]
-                : [0.078, 0.094, 0.129],
+            /* 背景色必须在**构造期**就定下来：setTheme 是在 init() 之后调的，
+             * 那时 canvas 已经按深色清过一次屏 —— 浅色模式下刷新会看到一帧暗色。
+             * 规则与 <head> 里的内联脚本、以及 init 末尾恢复主题时完全一致：
+             * 先看 URL ?theme=，再退回 localStorage（默认深色）。 */
+            bg: (function ()
+            {
+                var light = false;
+                try
+                {
+                    var qs = (global.location && global.location.search) || '';
+                    if (qs.indexOf('theme=light') >= 0) { light = true; }
+                    else if (qs.indexOf('theme=dark') < 0)
+                    {
+                        light = (global.localStorage.getItem('viewer3d.theme') === 'light');
+                    }
+                }
+                catch (e) { /* 隐私模式：退回深色 */ }
+
+                return light ? [0.933, 0.945, 0.961] : [0.078, 0.094, 0.129];
+            })(),
             grid: false,          /* 地面网格默认关闭 */
             axes: true,
             ghost: true,
@@ -533,16 +611,56 @@
     };
 
     /* ---------------- 图层管理 ---------------- */
+    /* 取下一个自动色。返回 { hex, idx }：
+     * idx 要记在图层上 —— 切主题时靠它在另一套色卡里找到"同一个位置"的颜色
+     * （否则深色下第 3 个图层是紫的，切到浅色会变成别的色相，用户会以为数据变了）。 */
     App.prototype.pickColor = function (slot)
     {
-        var list = PALETTE[slot] || PALETTE.S;
-        var c = list[this.paletteCursor[slot] % list.length];
+        var set = paletteSet(this.settings.themeLight);
+        var list = set[slot] || set.S;
+
+        var idx = this.paletteCursor[slot] % list.length;
         this.paletteCursor[slot] = (this.paletteCursor[slot] + 1) % list.length;
-        return c;
+
+        return { hex: list[idx], idx: idx };
+    };
+
+    /* 切主题后重算「自动色」图层：主色换到另一套色卡的同索引位置，派生色一并对齐。
+     * 用户手动改过任何一项颜色的图层（autoColor=false）整层跳过 —— 不去覆盖他的选择。 */
+    App.prototype.recolorLayers = function ()
+    {
+        var set = paletteSet(this.settings.themeLight);
+        var light = !!this.settings.themeLight;
+        var changed = 0;
+
+        for (var i = 0; i < this.layers.length; i++)
+        {
+            var L = this.layers[i];
+            if (!L || L.autoColor === false) { continue; }
+
+            var list = set[L.slot] || set.S;
+            var idx = (L.autoIdx || 0) % list.length;
+            var hex = list[idx];
+
+            L.color = hex;
+            L.colorRgb = global.MV.util.hexToRgb(hex);
+
+            applyDerivedColors(L, hex, light);
+            changed++;
+        }
+
+        if (changed)
+        {
+            this.markDirty();
+            if (global.MV.ui && global.MV.ui.renderTree) { global.MV.ui.renderTree(); }
+        }
     };
 
     // 同一文件的多个图层之间双向联动的显示属性
     var LINK_KEYS = [
+        /* autoColor / autoIdx 也要联动：同一文件在 A/B 两侧必须保持同色，
+         * 否则"两侧表现一致"这条设计就破了 */
+        'autoColor', 'autoIdx',
         'color', 'colorRgb', 'backColor', 'backColorRgb',
         'wireColor', 'wireColorRgb', 'vertColor', 'vertColorRgb',
         'boundaryColor', 'boundaryColorRgb',
@@ -582,9 +700,10 @@
     /* 顶点云统一外观：青色 + 小点径，便于与源网格区分 */
     App.prototype.applyVertexCloudStyle = function (lay)
     {
-        var hex = '#22d3ee';
+        /* 青色在深底上很跳，在白底上偏亮（对比度约 2.2:1）——浅色主题压深一档 */
+        var hex = this.settings.themeLight ? '#0e8a9c' : '#22d3ee';
         lay.color = hex;
-        lay.colorRgb = global.MV.ui.hexToRgb(hex);
+        lay.colorRgb = global.MV.util.hexToRgb(hex);
         lay.pointSize = 2;
         lay.opacity = 1;
         lay.pointColorMode = 0;
@@ -737,7 +856,8 @@
             }
         }
 
-        var hex = this.pickColor(slot);
+        var picked = this.pickColor(slot);
+        var hex = picked.hex;
         var layer = {
             id: this.nextId++,
             /* 会话内唯一（树里显示为 #12）；uid 跨会话也唯一，供日志/导出引用 */
@@ -758,15 +878,22 @@
         {
             props = {
                 color: hex,
-                colorRgb: global.MV.ui.hexToRgb(hex),
-                backColor: '#b03a30',
-                backColorRgb: global.MV.ui.hexToRgb('#6b7078'),   // 背面色：中性灰，避免与正面色抢眼
-                wireColor: '#2f9df0',
-                wireColorRgb: global.MV.ui.hexToRgb('#2f9df0'),
+                colorRgb: global.MV.util.hexToRgb(hex),
+
+                /* autoColor / autoIdx：切主题时据此换到另一套色卡的同索引颜色。
+                 * 用户手动改过任意一项颜色后 autoColor 置 false，整层不再自动变。 */
+                autoColor: true,
+                autoIdx: picked.idx,
+
+                /* 以下四项由 applyDerivedColors() 按主色 + 主题填 */
+                backColor: '#6b7078',
+                backColorRgb: global.MV.util.hexToRgb('#6b7078'),
+                wireColor: hex,
+                wireColorRgb: global.MV.util.hexToRgb(hex),
                 vertColor: '#f2f3fa',
-                vertColorRgb: global.MV.ui.hexToRgb('#f2f3fa'),
-                boundaryColor: '#22d3ee',
-                boundaryColorRgb: global.MV.ui.hexToRgb('#22d3ee'),
+                vertColorRgb: global.MV.util.hexToRgb('#f2f3fa'),
+                boundaryColor: hex,
+                boundaryColorRgb: global.MV.util.hexToRgb(hex),
                 opacity: 1,
                 pointSize: 3,
                 // 有标量场时默认用标量场（彩虹）着色，否则单色
@@ -783,6 +910,9 @@
                 showNormals: false,
                 normalLen: 1
             };
+
+            applyDerivedColors(props, hex, !!this.settings.themeLight);
+
             this.propsByKey[k] = props;
         }
 
@@ -1077,7 +1207,7 @@
 
         var self = this;
         global.MV.ui.showConfirm('清空全部 ' + this.layers.length +
-            ' 个图层？该操作不可撤销。', function ()
+            ' 个图层？此操作不可撤销，建议先导出需要保留的数据。', function ()
         {
             self.doClearAll();
         });
@@ -1161,13 +1291,17 @@
         return box;
     };
 
-    App.prototype.fitView = function (vi, fitEmpty)
+    /* slotsOverride：用别的槽位集合来定 bbox。
+     * 双窗共享同一个相机，各自 fit 会互相覆盖 —— 见 mergedSlots 的说明。 */
+    App.prototype.fitView = function (vi, fitEmpty, slotsOverride)
     {
         var v = this.views[vi];
-        var box = this.computeBBox(v.slots);
+        var useSlots = slotsOverride || v.slots;
+
+        var box = this.computeBBox(useSlots);
         if (!B.valid(box))
         {
-            box = this.computeBBox(v.slots, true);
+            box = this.computeBBox(useSlots, true);
         }
         if (!B.valid(box))
         {
@@ -1198,13 +1332,63 @@
         }
     };
 
+    /* 该视图当前有没有「可见图层」参与渲染。
+     * 载入流程用它判断"这个视图是不是空的"——只有空视图才自动适配，
+     * 已有数据的视图保持用户摆好的相机。隐藏的图层不算（它不在画面上）。 */
+    App.prototype.viewHasLayers = function (vi)
+    {
+        var v = this.views[vi];
+        if (!v || !v.slots) { return false; }
+
+        for (var i = 0; i < this.layers.length; i++)
+        {
+            var L = this.layers[i];
+            if (L.visible === false) { continue; }
+            if (v.slots[L.slot]) { return true; }
+        }
+        return false;
+    };
+
+    /* 所有视图可见槽位的并集。
+     *
+     * **双窗共享同一个相机对象**（`camera: sharedCam`），这是"同视角对比"的设计：
+     * 但正因如此，`fitView(0)` 框 A、`fitView(1)` 框 B 会互相覆盖 ——
+     * 后执行的赢，结果两个窗口都只看得到最后那片数据，另一片完全不可见。
+     * 实测 a/b 相距 3 米时，两个视图的相机 target 都停在 b 的位置。
+     * 所以"适应"对共享相机只能做一次，且必须框住并集。 */
+    App.prototype.mergedSlots = function ()
+    {
+        /* 单窗：A/B/S 全部在同一个视口里渲染（不在本槽的以 ghost 叠加），
+         * slots 不再起过滤作用。这里必须全选 —— 否则只载入 B 槽文件时，
+         * 视图 0 的 {A,S} 框不到它，画面停在默认距离，看起来像"载入失败"。 */
+        if (this.settings.singleView) { return { A: true, B: true, S: true }; }
+
+        var merged = { A: false, B: false, S: false };
+        var n = this.views.length;
+
+        for (var i = 0; i < n; i++)
+        {
+            var sl = this.views[i].slots;
+            for (var k in sl)
+            {
+                if (sl[k]) { merged[k] = true; }
+            }
+        }
+        return merged;
+    };
+
     App.prototype.fitAll = function ()
     {
-        this.fitView(0, true);
-        if (!this.settings.singleView)
+        /* 相机同步时两个视图共用同一个相机对象，「分别 fit」等于互相覆盖
+         * （后执行的赢），所以并集只 fit 一次；关掉同步后各自独立，才分开 fit。 */
+        if (this.settings.syncCam || this.settings.singleView)
         {
-            this.fitView(1, true);
+            this.fitView(0, true, this.mergedSlots());
+            return;
         }
+
+        this.fitView(0, true);
+        this.fitView(1, true);
     };
 
     /* 单窗口 / 双窗口切换：单窗口时 A/B/S 全部图层在同一个视口渲染 */
@@ -1540,8 +1724,15 @@
         var dlMs = file._downloadMs || 0;
         /* 是否来自「载入 → 最近」：日志里标出来，便于区分重开与首次导入 */
         var fromRecent = !!this._recentLoading;
-        // 只有「导入前完全没有图层」才自动适配视角；之后导入一律保持当前相机
-        var wasEmpty = this.layers.length === 0;
+
+        /* 自动适配的判据是「**该视图**导入前是空的」，不是「全局没有图层」。
+         *
+         * 原来用 `this.layers.length === 0`：双窗下先载 A（视图 0 有数据）、
+         * 再载 B 时全局已非空 → 视图 1 不做 fit，相机还停在 fitView 给的兜底
+         * 距离（500），B 稍大或稍远就完全不在画面里 —— 用户看到的是
+         * "载入成功了但什么都没有"。左右半屏分别拖放也是同一个问题。 */
+        var empty0 = !this.viewHasLayers(0);
+        var empty1 = !this.viewHasLayers(1);
 
         global.MV.ui.setProgress(true, '读取 ' + file.name, 0);
 
@@ -1768,14 +1959,23 @@
         this.selectedId = null;
         }
 
-        // 仅在首次导入（此前没有任何图层）时自动适配；之后导入保持当前视角，不打断正在看的画面
-        if (wasEmpty)
+        /* 只适配「本次之前还是空的那几个视图」：
+         * 已有数据的视图不动，避免打断正在看/正在对比的画面。
+         *
+         * 但**相机是共享的**，所以不能分别 fit —— 用并集一次框住：
+         * 双窗先载 A 再载 B 时，第二次要把 A 的范围也算进来，
+         * 否则相机只框着 B，A 直接从视图里消失。 */
+        if (this.settings.syncCam || this.settings.singleView)
         {
-            this.fitView(0, false);
-            if (!this.settings.singleView)
+            if (empty0 || (!this.settings.singleView && empty1))
             {
-                this.fitView(1, false);
+                this.fitView(0, false, this.mergedSlots());
             }
+        }
+        else
+        {
+            if (empty0) { this.fitView(0, false); }
+            if (empty1) { this.fitView(1, false); }
         }
 
         document.getElementById('drop-hint').classList.add('hidden');
@@ -2271,6 +2471,11 @@
             this.renderer.ghostAlpha = light ? 0.26 : 0.16;
         }
 
+        /* 图层色跟着主题走：深色的亮蓝/亮橙在白底上会发虚，
+         * 由 recolorLayers 把「没被手动改过色」的图层换到另一套色卡的同索引位置。
+         * 放在 applyTheme 之前 —— CSS 变量先切，图层色再跟上，避免中间态闪一下。 */
+        this.recolorLayers();
+
         if (global.MV.ui && global.MV.ui.applyTheme)
         {
             global.MV.ui.applyTheme(light);
@@ -2367,16 +2572,21 @@
             canvas.classList.remove('dragging');
             try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
 
-            // Ctrl + 单击，或点过「重设旋转中心」按钮后的单击：拾取表面点作为新的旋转中心
+            /* Ctrl + 单击，或点过「重设旋转中心」按钮后的单击：拾取表面点作为新的旋转中心。
+             *
+             * `suppressPick` 由上层（N-N 选点模式）设置：那时左键单击的语义是
+             * "选一个配准点"，不能再顺手改旋转中心、也不能加拾取点 ——
+             * 否则同一次单击会同时被两个功能接走。app 不判断 UI 的模式，
+             * 只认这个开关（分层：下层提供能力，开关由上层控制）。 */
             var still = d.mode === 'orbit' && (d.moved || 0) < 5;
-            var wantPick = (e.ctrlKey || self.pickMode) && still;
+            var wantPick = (e.ctrlKey || self.pickMode) && still && !self.suppressPick;
             if (wantPick)
             {
                 self.pickMode = false;
                 canvas.style.cursor = '';
                 self.pickTarget(d.sx, d.sy);
             }
-            else if (self.pickInfo && still)
+            else if (self.pickInfo && still && !self.suppressPick)
             {
                 self.addPickPoint(d.sx, d.sy);
             }
@@ -2404,8 +2614,9 @@
 
         canvas.addEventListener('dblclick', function (e)
         {
-            // 拾取模式下双击仍作“取点”，不重设旋转中心
-            if (self.pickInfo)
+            /* 拾取模式 / N-N 选点模式下双击仍作"取点"，不重设旋转中心：
+             * 双击必然伴随两次单击，那两次已经各自取了一个点。 */
+            if (self.pickInfo || self.suppressPick)
             {
                 return;
             }

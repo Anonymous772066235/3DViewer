@@ -2117,6 +2117,30 @@ function pickCandidates(layer, eye, dir, tri)
         return m;
     }
 
+    /* ---------------- 确定性伪随机源（mulberry32） ----------------
+     *
+     * ICP 的下采样原来用 `Math.random()`，后果是**同一份数据每次配准结果都不同**：
+     * 采样到的点集变了 → 参与点数变了 → RMS 与迭代次数跟着变。
+     * 实测同一初值连跑三次：rms = 1.258051 / 1.261276 / 1.265164，
+     * 参与点 200876 / 200760 / 200785。用户看到的就是"同一对数据，配准时好时坏"。
+     *
+     * 换成固定种子重播：同一个 seed（默认 0）必得同一批采样点，
+     * 于是 ICP 结果可复现，回归测试才有意义。需要另一组采样时传 opts.seed。 */
+    var icpRngState = 0x9E3779B9;
+
+    function icpSeed(s)
+    {
+        icpRngState = (s | 0) || 0x9E3779B9;
+    }
+
+    function icpRand()
+    {
+        icpRngState = (icpRngState + 0x6D2B79F5) | 0;
+        var t = Math.imul(icpRngState ^ (icpRngState >>> 15), 1 | icpRngState);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+
     /* opts 同 symmetric()；另支持 onIter(iters, rms, step) 返回 false 中止 */
     function createSolver(srcPos, srcNrm, dstPos, dstNrm, opts)
     {
@@ -2195,9 +2219,11 @@ function pickCandidates(layer, eye, dir, tri)
             t = [im[3], im[7], im[11]];
         }
 
-        /* 随机下采样：一次性抽取固定的索引集合，之后每轮都用同一批点。
+        /* 下采样：一次性抽取固定的索引集合，之后每轮都用同一批点。
          * 若每轮重新随机，RMS 会持续抖动、收敛判据失效。
-         * 不采样时 idxList 保持 null，走零开销的全量遍历。 */
+         * 不采样时 idxList 保持 null，走零开销的全量遍历。
+         *
+         * 采样本身也必须是**确定性**的（见 icpRand 的注释）。 */
         var idxList = null;
         if (sampleRatio < 0.9999)
         {
@@ -2205,13 +2231,15 @@ function pickCandidates(layer, eye, dir, tri)
 
             if (want < nSrc)
             {
+                icpSeed(opts.seed);
+
                 var pool = new Int32Array(nSrc);
                 for (var pi2 = 0; pi2 < nSrc; pi2++) { pool[pi2] = pi2; }
 
-                // 部分 Fisher-Yates：只需要前 want 个
+                // 部分 Fisher-Yates：只需要前 want 个（用确定性随机，不用 Math.random）
                 for (var pi3 = 0; pi3 < want; pi3++)
                 {
-                    var pj = pi3 + Math.floor(Math.random() * (nSrc - pi3));
+                    var pj = pi3 + Math.floor(icpRand() * (nSrc - pi3));
                     var pt = pool[pi3];
                     pool[pi3] = pool[pj];
                     pool[pj] = pt;

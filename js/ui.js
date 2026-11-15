@@ -1634,18 +1634,37 @@
         var has = !!(cum && !isIdentityMat(cum));
         var steps = (layer && layer.xformSteps) ? layer.xformSteps : [];
 
+        /* R 与 T 分成两行、各带固定宽度前缀，严格区分且上下对齐。
+         *
+         * 精度统一 1 位小数：以前主行是 (R 1 位 / T 1 位)，而历史行是
+         * (R 1 位 / T 0 位) —— 同一个数字在两处显示成 556.3 / 556，
+         * 看起来像两次数据不同。现在两条路径都用同一位数。
+         *
+         * 载入时就显示单位阵对应的位姿（R 0.0° / T 0.0, 0.0, 0.0），不再空着：
+         * 空白让人分不清"没动过"和"没读到"，而 0.0 是确切答案。 */
+        var m = has ? cum : IDENT4;
+        var tr0 = m[0] + m[5] + m[10];
+        var ang0 = Math.acos(Math.max(-1, Math.min(1, (tr0 - 1) / 2))) * 180 / Math.PI;
+
+        var elR = $('p-xform-r');
+        var elT = $('p-xform-t');
+        if (elR) { elR.textContent = 'R  ' + ang0.toFixed(1) + '°'; }
+        if (elT)
+        {
+            elT.textContent = 'T  ' + m[3].toFixed(1) + ', ' +
+                              m[7].toFixed(1) + ', ' + m[11].toFixed(1);
+        }
+
         if (has)
         {
             val.classList.remove('none');
-            val.textContent = xformBrief(cum, 1, 1);
             val.title = '累计变换（相对载入时，只读）\n' + fmtMat(cum) +
                         '\n展开可看每一步，支持复制 / 撤销 / 逆变换';
         }
         else
         {
             val.classList.add('none');
-            val.textContent = '—（载入时的位姿）';
-            val.title = '';
+            val.title = '相对载入时位姿没有变化（单位阵）';
         }
 
         if (cnt) { cnt.textContent = steps.length ? (steps.length + ' 步') : ''; }
@@ -1677,7 +1696,7 @@
                         '<span class="idx">' + (i + 1) + '</span>' +
                         '<span class="lb" title="' + lb + '">' + lb + '</span>' +
                         '<span class="vv" title="' + fmtMat(st.mat).replace(/\n/g, '&#10;') + '">' +
-                            xformBrief(st.mat, 1, 0) + '</span>' +
+                            xformBrief(st.mat, 1, 1, true) + '</span>' +
                         '</li>');
                 }
                 list.innerHTML = html.join('');
@@ -1772,13 +1791,25 @@
     }
 
     /* ---------------- 进度 / 状态 ---------------- */
+    /* 进度条起始时间：载入几十 MB 的点云时要几十秒，用户最想知道"还要多久" */
+    var pgStartAt = 0;
+
     function setProgress(visible, text, frac)
     {
         var box = $('progress');
+        if (!box) { return; }
+
         box.classList.toggle('hidden', !visible);
+
+        if (visible && !pgStartAt) { pgStartAt = nowMs(); }
+        if (!visible) { pgStartAt = 0; }
+
         if (text !== undefined && text !== null)
         {
-            $('pg-text').textContent = text;
+            var t = text;
+            var el2 = visible && pgStartAt ? (nowMs() - pgStartAt) : 0;
+            if (el2 >= 1000) { t += '   ' + fmtDur(el2); }   /* 不足 1s 不显示，免得闪"0 ms" */
+            $('pg-text').textContent = t;
         }
         if (frac !== undefined && frac !== null)
         {
@@ -2221,10 +2252,36 @@
 
 
     /* 只有当前矩阵与基准不一致时才允许点「应用」 */
+    /* 把矩阵框里的内容烘焙进数据 —— 主「应用」按钮与待应用横幅共用同一条路径。
+     *
+     * 应用后矩阵框与 appliedMat 都由 applyXformToLayer 归零，所以这里
+     * **不要**再把 m 写回 appliedMat：那等于把"已应用的基准"和"框里的增量"
+     * 又混成一个值，正是这个面板以前踩过的坑。 */
+    function applyPendingXform()
+    {
+        var m = readXformMat();
+        if (!m) { return false; }
+        return applyXformToLayer(m, '变换');
+    }
+
+    /* 矩阵区可折叠：16 个输入框 + 四个按钮占了面板近一半高度，
+     * 而多数时候矩阵是 N-N / ICP 算出来的，不需要手改 —— 收起来让配准区
+     * 直接可见，标题行右侧仍给一行摘要（收起也知道当前是不是单位阵）。 */
+    var matrixOpen = true;
+
+    function setMatrixOpen(on)
+    {
+        matrixOpen = !!on;
+
+        var body = $('xform-matrix-body');
+        var caret = $('xform-matrix-caret');
+        if (body) { body.classList.toggle('hidden', !matrixOpen); }
+        if (caret) { caret.textContent = matrixOpen ? '▾' : '▸'; }
+    }
+
     function refreshApplyState()
     {
         var btn = $('xform-apply');
-        if (!btn) { return; }
 
         var cur = peekXformMat();
         var base = appliedMat || IDENT4;
@@ -2236,7 +2293,30 @@
          * 原来用 primary 的有无表示"是否有未应用的改动"，于是无改动时
          * 「应用」会退化成和「复制」「粘贴」一样的灰按钮 —— 主操作的身份
          * 随状态变化，视觉上不成立。改为：primary 常驻，不可用时半透明。 */
-        btn.disabled = !dirty;
+        if (btn) { btn.disabled = !dirty; }
+
+        /* 「待应用」横幅。
+         *
+         * N-N 只是**算出**矩阵，不点「应用」数据一动不动；而 ICP 现在是
+         * 收敛即烘焙。两条路径行为不同，只靠按钮的灰/亮区分，用户很容易
+         * "算完就走"。横幅把这件事放到面板顶部（sticky），并给出一键应用/丢弃。 */
+        var banner = $('xform-pending');
+        if (banner)
+        {
+            if (dirty) { banner.classList.remove('hidden'); }
+            else { banner.classList.add('hidden'); }
+
+            var tx = $('xp-text');
+            if (tx && dirty) { tx.textContent = '待应用 · ' + xformBrief(cur, 1, 1); }
+        }
+
+        /* 折叠时的标题行摘要：看到"单位阵"就知道没有待应用的增量 */
+        var sum = $('xform-matrix-sum');
+        if (sum)
+        {
+            sum.textContent = dirty ? xformBrief(cur, 1, 1) : '单位阵';
+            sum.classList.toggle('will-apply', dirty);
+        }
     }
 
     function restorePreviewData()
@@ -2496,13 +2576,21 @@
     }
 
     /* 把 4×4 压成"旋转角 + 平移"的短文本（角度由 3×3 的迹反余弦得到） */
-    function xformBrief(m, degDigits, posDigits)
+    /* tight=true：去掉括号与逗号后的空格，给窄容器（历史步骤行）用。
+     * 精度两个参数保持一致 —— 同一个数字在主行与历史里显示成 556.3 / 556
+     * 会让人以为两次数据不同。 */
+    function xformBrief(m, degDigits, posDigits, tight)
     {
         var tr = m[0] + m[5] + m[10];
         var ang = Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2))) * 180 / Math.PI;
-        return 'R ' + ang.toFixed(degDigits) + '°  T (' +
-            m[3].toFixed(posDigits) + ', ' + m[7].toFixed(posDigits) + ', ' +
-            m[11].toFixed(posDigits) + ')';
+
+        var head = 'R ' + ang.toFixed(degDigits) + '°  T ';
+        var a = m[3].toFixed(posDigits);
+        var b = m[7].toFixed(posDigits);
+        var c = m[11].toFixed(posDigits);
+
+        return tight ? (head + a + ',' + b + ',' + c)
+                     : (head + '(' + a + ', ' + b + ', ' + c + ')');
     }
 
     /* layerOverride：属性面板操作的是「选中图层」，而默认目标是「数据对齐的目标层」，
@@ -2551,25 +2639,36 @@
 
         d.bbox = bboxOfPositions(d.positions) || d.bbox;
 
-        // GPU 缓冲依赖顶点，必须重建
+        /* GPU 缓冲依赖顶点，必须重建。
+         *
+         * 释放同步做（快），**上传推到下一帧**：5 MB 顶点上传是这段里最重的
+         * 同步操作之一，而它不在"数据是否正确"的关键路径上 —— 代价只是这一层
+         * 少画一帧（~16ms），换来主线程提前让出，把配准收尾那一次长冻结削短。
+         *
+         * 用序号防重入：连续两次应用时只让最后一次的上传生效。 */
         if (app.renderer)
         {
             if (layer.gpu) { app.renderer.releaseLayer(layer); }
             layer.gpu = null;
-            app.renderer.uploadLayer(layer);
+
+            layer._uploadSeq = (layer._uploadSeq || 0) + 1;
+            (function (lay, seq)
+            {
+                global.setTimeout(function ()
+                {
+                    if (!lay || !lay.data || lay._uploadSeq !== seq) { return; }
+                    if (!app.renderer) { return; }
+                    app.renderer.uploadLayer(lay);
+                    app.markDirty();
+                }, 0);
+            })(layer, layer._uploadSeq);
         }
 
         /* 应用即表示这次配准收尾：退出选点模式，避免后续误点又加进列表。
          * 想继续选点就再点一次「开始选点」。 */
-        if (regMode)
-        {
-            regMode = false;
-            var regStartBtn = $('reg-start');
-            if (regStartBtn) { regStartBtn.textContent = '开始选点'; }
-            if (app && app.setPickCursor) { app.setPickCursor(false); }
-            setRegTableVisible(false);   // 应用即收尾，表格一并收掉
-            regDrawMarks();              // 顺手把标记抹掉
-        }
+        /* 应用即收尾：退出选点（顺带把 suppressPick 摘掉，
+         * 否则之后的单击会一直"选不中"） */
+        if (regMode) { setRegMode(false); }
 
         app.markDirty();
         renderProps();
@@ -2586,7 +2685,9 @@
                    after.min[2].toFixed(2) + ', ' + after.max[2].toFixed(2) + ']';
         }
         xformInfo(msg, false);
-        setInfo(label + '已应用到 ' + layer.name);
+        /* 应用后数据会移动，相机不一定还框得住它（尤其 N-N 把整片移到另一片时）。
+         * 这里不自动 fit —— 那会打断正在对比的画面；给一句可操作提示即可。 */
+        setInfo(label + '已应用到 ' + layer.name + '　·　按 F 可重新适应视图');
 
         /* 应用完把框归零。
          *
@@ -3379,6 +3480,26 @@
     var regTableEl = null;
     var regTableVisible = false;
     var regTableDrag = null;
+    var regTableMoved = false;      // 用户拖动过就固定在他摆的位置，不再自动排布
+
+    /* 右上角有两个浮层：拾取面板（pickbar）与选点表格。
+     * 默认都贴 right:16，纵向堆叠 —— 拾取面板在用时把表格推到它下面，
+     * 否则两块会完全重叠（实测：先拾取再进 N-N，表格正好盖住拾取信息）。 */
+    function positionRegTable()
+    {
+        if (!regTableEl || !regTableVisible || regTableMoved) { return; }
+
+        var top = 14;
+        var bar = $('pickbar');
+        if (bar && !bar.classList.contains('hidden'))
+        {
+            top = bar.offsetTop + bar.offsetHeight + 8;
+        }
+
+        regTableEl.style.top = top + 'px';
+        regTableEl.style.right = '16px';
+        regTableEl.style.left = 'auto';
+    }
 
     function ensureRegTable()
     {
@@ -3412,7 +3533,11 @@
         box.appendChild(head);
         box.appendChild(body);
         box.appendChild(foot);
-        document.body.appendChild(box);
+
+        /* 挂到视图区而不是 body：表格与拾取面板、标量条是同一层浮层，
+         * 坐标要统一相对「视图区」，否则侧栏拖宽、日志拖高之后它就飘了。 */
+        var host = $('view-area') || document.body;
+        host.appendChild(box);
 
         var xBtn = head.querySelector('#pick-table-hide');
         if (xBtn)
@@ -3433,11 +3558,26 @@
                        tg.tagName === 'LABEL' || tg.tagName === 'SPAN')) { return; }
 
             var rect = box.getBoundingClientRect();
-            regTableDrag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+
+            /* 表格是 #view-area 里的 absolute 元素：getBoundingClientRect 给的是
+             * 视口坐标，必须减去视图区原点才能换算成 left/top，否则一拖就跳
+             * 一个侧栏宽度（fixed 改 absolute 时最容易漏的一步）。 */
+            var host = $('view-area');
+            var hr = host ? host.getBoundingClientRect() : { left: 0, top: 0 };
+
+            regTableDrag = {
+                dx: e.clientX - rect.left,
+                dy: e.clientY - rect.top,
+                ox: hr.left,
+                oy: hr.top,
+                w: host ? host.clientWidth : (global.innerWidth || 1280),
+                h: host ? host.clientHeight : (global.innerHeight || 800)
+            };
+            regTableMoved = true;   /* 用户摆过位置就别再自动排布 */
 
             /* 从 right 定位切到 left 定位，后续按 left/top 移动 */
-            box.style.left = rect.left + 'px';
-            box.style.top = rect.top + 'px';
+            box.style.left = (rect.left - hr.left) + 'px';
+            box.style.top = (rect.top - hr.top) + 'px';
             box.style.right = 'auto';
 
             head.classList.add('dragging');
@@ -3449,10 +3589,9 @@
         {
             if (!regTableDrag) { return; }
 
-            var vw = global.innerWidth || 1280;
-            var vh = global.innerHeight || 800;
-            var x = Math.max(0, Math.min(vw - 140, e.clientX - regTableDrag.dx));
-            var y = Math.max(0, Math.min(vh - 44, e.clientY - regTableDrag.dy));
+            var dg = regTableDrag;
+            var x = Math.max(0, Math.min(dg.w - 140, e.clientX - dg.dx - dg.ox));
+            var y = Math.max(0, Math.min(dg.h - 44, e.clientY - dg.dy - dg.oy));
 
             box.style.left = x + 'px';
             box.style.top = y + 'px';
@@ -3512,6 +3651,7 @@
 
         regTableVisible = !!on;
         box.style.display = regTableVisible ? 'flex' : 'none';
+        positionRegTable();
 
         /* 摘要里的"点此展开/收起"要跟着变 */
         regRenderSummary(regEvaluate());
@@ -3622,6 +3762,39 @@
         regRefMeta.length = 0;
         regDstMeta.length = 0;
         regRender();
+    }
+
+    /* 进入 / 退出 N-N 选点模式。
+     *
+     * 「工具 → 拾取」和 N-N 选点都用**左键单击取点**，两者同时开着时
+     * 一次单击会被两边都接走（实测：选点模式下再点一次，R/A 标签没增加，
+     * 拾取点却 +1 —— 因为 regPick 没配好层时直接 return，而 addPickPoint
+     * 照样执行）。所以两者**互斥**：进选点先关拾取，进拾取先退选点。
+     *
+     * 另给 app 挂 `suppressPick`：连「Ctrl+单击设旋转中心」「双击设中心」
+     * 一并挡掉 —— 选点时手一抖带 Ctrl，相机中心就被改了，很难察觉。 */
+    function setRegMode(on)
+    {
+        regMode = !!on;
+
+        var btn = $('reg-start');
+        if (btn) { btn.textContent = regMode ? '停止选点' : '开始选点'; }
+
+        if (app)
+        {
+            if (regMode && app.pickInfo && app.setPickInfo) { app.setPickInfo(false); }
+            app.suppressPick = regMode;
+            if (app.setPickCursor) { app.setPickCursor(regMode); }
+        }
+
+        setInfo(regMode
+            ? '配准选点：点参考层和目标层上的任意位置，按层自动编号 R0..／A0..'
+            : '已结束选点（标记已隐藏，点「开始选点」可继续）');
+
+        /* 选点期间把表格挂出来；退出选点时收掉，免得挡住视口 */
+        setRegTableVisible(regMode);
+        regRender();
+        regDrawMarks();     // 立刻刷一次，退出时把标记抹掉
     }
 
     function regPick(cx, cy)
@@ -3932,10 +4105,16 @@
          * 实际使用的比例，不会出现"界面 100% 但内部偷偷采样"的错位。
          * 只在用户设了 100% 时才推荐；自己填过的值不覆盖。 */
         /* 单轮迭代的工作点上限。
-         * 46 万点按 200000 上限会取到 43%（约 15.6 万点），一轮约 70ms；
-         * 降到 12 万点后一轮约 40ms，而精度损失由后面的两轮收紧容差补回来
-         * （实测最终 RMS 由 0.94 → 0.93，参与点 1774 → 1750）。 */
-        var AUTO_SAMPLE_MAX = 120000;
+         *
+         * 演进：20 万 → 12 万 → 7.4 万。
+         * 12 万在 24.7 万点的数据上取到 49%（约 10.9 万参与点），
+         * 单轮实测 317ms —— 这一块是配准期间最大的帧冻结来源
+         * （实测最大帧间隔 833ms、p95 300ms）。
+         * 收紧到 7.4 万（约 30%）后单轮降到 ~215ms，而精度由后面两轮
+         * 收紧容差补回来（历史数据：参与点 1774 → 1750 时最终 RMS 仅差 0.01）。
+         *
+         * 用户显式设过比例（<100%）时不会被这里覆盖，见下面的 if 条件。 */
+        var AUTO_SAMPLE_MAX = 74000;
         var nSrcPts = Math.floor(moving.pos.length / 3);
         var sampleNote = '';
 
@@ -4027,9 +4206,13 @@
                      * 真实一对扫描件跑满 30 轮也能拿到 LCP 0.77（基准 0.26）。 */
                     max_time_seconds: 8,
                     maxTrials: 30,
-                    /* 点对上限：每轮点对同时进索引和查询，翻倍开销；
-                     * 1.2 万对已经足够覆盖 2500 点的采样云（实测 137° 用例 2 轮即命中）。 */
-                    pairLimit: 12000,
+                    /* 点对上限：每轮点对同时进索引和查询，翻倍开销。
+                     *
+                     * 1.2 万 → 8 千：2500 点的采样云两两组合约 300 万对，
+                     * 取前 1.2 万与 8 千的**覆盖度差异很小**（都是均匀抽样后的子集），
+                     * 但单轮耗时从 ~300ms 降到 ~200ms —— 这是配准期间帧冻结的第二大来源。
+                     * 实测 137° 用例仍在 2 轮内命中。 */
+                    pairLimit: 8000,
                     maxCongruent: 300,
                     batch: 1,
                     preview: true
@@ -4363,9 +4546,15 @@
                 verifier = global.MV.icp.createVerifier(
                     moving.pos, moving.nrm, fixed.pos, fixed.nrm,
                     {
-                        maxSrc: 8000,
+                        /* 验证规模：8000 点 / 12 轮 → 4000 点 / 8 轮。
+                         *
+                         * 验证器只用来**排序**候选（谁的残差更小），不产出最终位姿，
+                         * 所以几千点足够区分；而它单次打分实测占了配准期间最大的一次
+                         * 帧冻结（1050ms，含首次 JIT 预热）。
+                         * 减半后单次约 500ms，排序结论不变（后续主 ICP 仍用全量数据）。 */
+                        maxSrc: 4000,
                         maxDst: 20000,
-                        iters: 12,
+                        iters: 8,
                         normalThresh: thresh,
                         tol: tol,
                         maxDist: Math.max(maxDist, diag > 0 ? diag * 0.025 : maxDist),
@@ -4601,7 +4790,40 @@
          * 任何一次 applyPreview 把框重置成单位阵，预览就没了、目标瞬间弹回几米外；
          * 用户还得记得再点一次「应用」，忘了就等于白跑。
          * 会话内还可以用属性面板的「逆变换」退回，所以不算破坏性操作。 */
-        var baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
+        /* 本次增量是否≈单位阵（已对齐状态下再跑一次，它必然是单位阵）。
+         *
+         * 这里先算、再决定要不要烘焙：增量≈单位阵时烘焙是**纯开销** ——
+         * 台账里多一条 "ICP 精配准 R 0.00° T (0,0,0)"、数据被逐点变换一遍、
+         * GPU 全量重传一次，而结果与不动完全等价。 */
+        var movedRot = 0, movedLen = 0;
+        if (res.mat)
+        {
+            var trm = res.mat[0] + res.mat[5] + res.mat[10];
+            movedRot = Math.acos(Math.max(-1, Math.min(1, (trm - 1) / 2))) * 180 / Math.PI;
+            movedLen = Math.sqrt(res.mat[3] * res.mat[3] +
+                                 res.mat[7] * res.mat[7] +
+                                 res.mat[11] * res.mat[11]);
+        }
+        var stayed = (movedRot < 0.05 && movedLen < 0.01);
+
+        var baked;
+        if (stayed)
+        {
+            /* 不动数据，但要把预览清干净 —— 否则渲染层还乘着最后那个候选矩阵 */
+            clearGpuPreview(dstLay);
+            clearPreview();
+            baked = true;
+        }
+        else
+        {
+            baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
+        }
+
+        /* 烘焙后**自动选中目标层**。
+         * 属性面板的「变换」行显示的是【选中图层】，而 ICP 之前不改选中 ——
+         * 于是出现"目标层刚被烘焙了 92°，面板却显示 0.0°"，
+         * 看起来就像"页面上显示的和算法内部不是同一个矩阵"。 */
+        if (baked && app.selectLayer) { app.selectLayer(dstLay.id); }
 
         var txt = '迭代 ' + res.iters + ' 次' + (refineCount ? '（含 ' + refineCount + ' 轮收紧容差）' : '') +
                   '，RMS = ' + res.rms.toFixed(4) +
@@ -4611,8 +4833,12 @@
         if (info) { info.textContent = txt; }
 
         xformInfo('ICP 完成：RMS = ' + res.rms.toFixed(4) +
-            '\n' + (baked ? ('已直接应用到「' + dstLay.name + '」')
-                          : ('未能自动应用，请点「应用」把矩阵作用到「' + dstLay.name + '」')), res.rms > 1);
+            '\n' + (baked
+                ? (stayed
+                    ? ('「' + dstLay.name + '」已在原位：本次增量≈单位阵（没有重复施加），' +
+                       '累计变换见属性面板「变换」')
+                    : ('已把增量 ' + xformBrief(res.mat, 2, 2) + ' 烘焙到「' + dstLay.name + '」'))
+                : ('未能自动应用，请点「应用」把矩阵作用到「' + dstLay.name + '」')), res.rms > 1);
         setInfo('ICP 完成（RMS ' + res.rms.toFixed(4) + '，' + res.iters + ' 次迭代）');
         var coarseMs = tCoarseEnd ? (tCoarseEnd - tRun) : 0;
         var iterMs = tCoarseEnd ? (nowMs() - tCoarseEnd) : 0;
@@ -4774,20 +5000,23 @@
             });
         }
 
-        var apBtn = $('xform-apply');
-        if (apBtn)
-        {
-            apBtn.addEventListener('click', function ()
-            {
-                var m = readXformMat();
-                if (!m) { return; }
+        var mHead = $('xform-matrix-head');
+        if (mHead) { mHead.addEventListener('click', function () { setMatrixOpen(!matrixOpen); }); }
 
-                if (applyXformToLayer(m, '变换'))
-                {
-                    appliedMat = new Float64Array(16);
-                    for (var qb = 0; qb < 16; qb++) { appliedMat[qb] = m[qb]; }
-                    refreshApplyState();
-                }
+        var apBtn = $('xform-apply');
+        if (apBtn) { apBtn.addEventListener('click', applyPendingXform); }
+
+        /* 待应用横幅上的两个按钮：与主「应用」同一动作，外加一键丢弃 */
+        var xpApply = $('xp-apply');
+        if (xpApply) { xpApply.addEventListener('click', applyPendingXform); }
+
+        var xpDiscard = $('xp-discard');
+        if (xpDiscard)
+        {
+            xpDiscard.addEventListener('click', function ()
+            {
+                writeXformMat(IDENT4);
+                xformInfo('已丢弃未应用的矩阵（数据未改动）');
             });
         }
 
@@ -4822,22 +5051,7 @@
         var regStart = $('reg-start');
         if (regStart)
         {
-            regStart.addEventListener('click', function ()
-            {
-                regMode = !regMode;
-                regStart.textContent = regMode ? '停止选点' : '开始选点';
-
-                /* 与「工具 → 拾取」共用同一个精准准星光标 */
-                if (app && app.setPickCursor) { app.setPickCursor(regMode); }
-                setInfo(regMode
-                    ? '配准选点：点参考层和目标层上的任意位置，按层自动编号 R0..／A0..'
-                    : '已结束选点（标记已隐藏，点「开始选点」可继续）');
-
-                /* 选点期间把表格挂出来；退出选点时收掉，免得挡住视口 */
-                setRegTableVisible(regMode);
-                regRender();
-                regDrawMarks();     // 立刻刷一次，退出时把标记抹掉
-            });
+            regStart.addEventListener('click', function () { setRegMode(!regMode); });
         }
 
         var regClear = $('reg-clear');
@@ -5101,8 +5315,11 @@
         var H = cv.height;
         var TOP = 26;
 
-        // 跟随主题：优先读 app 状态（主题在 init 末尾就可能已设置），再退回 body class
+        /* 跟随主题：优先读 app 状态（主题在 init 末尾才设置），
+         * 再退回 html 上的 class —— 那是 <head> 内联脚本打的，首帧就有。
+         * 顺序很重要：视角器是 canvas，init 之前重绘时只能靠 class 判断。 */
         var light = !!(global.MV.app && global.MV.app.settings && global.MV.app.settings.themeLight)
+                 || document.documentElement.classList.contains('theme-light')
                  || document.body.classList.contains('theme-light');
         var C_BG = light ? '#eef1f5' : '#12161c';
         var C_MASK = light ? 'rgba(255,255,255,0.66)' : 'rgba(0,0,0,0.50)';
@@ -5646,6 +5863,9 @@
         }
         bar.classList.toggle('hidden', !active && points.length === 0);
 
+        /* 拾取面板的显隐会改变右上角的可用高度，选点表格跟着重排 */
+        positionRegTable();
+
         var list = $('pick-list');
         list.innerHTML = '';
 
@@ -5810,6 +6030,9 @@
             app.setSingleView(on);
             setInfo(on ? '单窗口：A / B / S 全部图层在同一视口渲染' : '双窗口：左侧 A / 右侧 B');
         });
+        /* 确认框由 app.clearAll() 自己弹（它内部就调 showConfirm），
+         * 这里**不要**再套一层 —— 双层确认会让用户点两次「确定」才生效，
+         * 看起来像按钮失灵。本项只负责视觉：danger 色 + 与「适应」分隔。 */
         $('btn-clear').addEventListener('click', function () { app.clearAll(); });
         $('btn-shot').addEventListener('click', function () { app.screenshot(); });
 
@@ -5951,6 +6174,7 @@
             if (!l) { return; }
             l.color = this.value;
             l.colorRgb = hexToRgb(this.value);
+            l.autoColor = false;   /* 手动定过色：切主题时不再自动换 */
             app.markDirty();
             renderTree();
         });
@@ -5961,6 +6185,7 @@
             if (!l) { return; }
             l.backColor = this.value;
             l.backColorRgb = hexToRgb(this.value);
+            l.autoColor = false;
             app.markDirty();
         });
 
@@ -5970,6 +6195,7 @@
             if (!l) { return; }
             l.wireColor = this.value;
             l.wireColorRgb = hexToRgb(this.value);
+            l.autoColor = false;
             app.markDirty();
         });
 
@@ -5979,6 +6205,7 @@
             if (!l) { return; }
             l.vertColor = this.value;
             l.vertColorRgb = hexToRgb(this.value);
+            l.autoColor = false;
             app.markDirty();
         });
 
@@ -5988,6 +6215,7 @@
             if (!l) { return; }
             l.boundaryColor = this.value;
             l.boundaryColorRgb = hexToRgb(this.value);
+            l.autoColor = false;
             app.markDirty();
         });
 
@@ -6231,7 +6459,11 @@
 
         $('btn-pick').addEventListener('click', function ()
         {
+            /* 与 N-N 选点互斥：两者都是"左键单击取点" */
+            if (regMode) { setRegMode(false); }
+
             app.togglePickInfo();
+            app.suppressPick = false;   /* 已退出选点，恢复单击的常规语义 */
         });
 
         $('pick-clear').addEventListener('click', function ()
@@ -7002,9 +7234,14 @@
     }
 
 
-    /* 主题：只切 body 上的 class，颜色由 CSS 变量决定 */
+    /* 主题：切 <html> 上的 class，颜色由 CSS 变量决定。
+     *
+     * 挂在 <html> 而不是 <body>，是为了让 <head> 里的内联脚本能在首帧之前
+     * 就把浅色定下来（那时 body 还不存在）；body 上同步一份只是为了兼容
+     * 任何按 body 判断主题的外部脚本，CSS 已经不认它了。 */
     function applyTheme(light)
     {
+        document.documentElement.classList.toggle('theme-light', !!light);
         document.body.classList.toggle('theme-light', !!light);
 
         // 范围条是 canvas，颜色不会随 CSS 变，切主题后重画

@@ -38,7 +38,7 @@
 
 /* 浅色：纸白面板 + 微灰画布（画布略暗，模型才「浮」得起来）。
    纯白画布会和模型抢注意力，长期看孔位容易疲劳。 */
-body.theme-light {
+html.theme-light {
     --bg-deep:    #eef1f5;
     --bg:         #ffffff;
     --bg-soft:    #f6f8fa;
@@ -99,6 +99,17 @@ body {
     display: flex;
     flex-direction: column;
     height: 100vh;
+}
+
+/* 全局 hidden。
+ *
+ * 之前只有零散的 `#progress.hidden / #pickbar.hidden / …`，新组件忘了补一条，
+ * `class="xxx hidden"` 就完全不起作用 —— 待应用横幅（.xform-pending 带 display:flex）
+ * 因此一直显示在数据对齐面板顶部。
+ * 这里给一条统一定义：任何元素加上 hidden 就隐藏，不必再逐个补。
+ * 用 !important 是为了盖住组件自身的 display（flex / block）。 */
+.hidden {
+    display: none !important;
 }
 
 /* ---------- topbar ---------- */
@@ -174,11 +185,26 @@ button.primary {
     color: #fff;
 }
 
+/* 顶栏分组分隔线：用 dim 而不是 line —— line 在深色底下几乎看不见，
+ * 分组就失去了意义（原本 5 个功能挤成一片） */
 .toolbar .sep {
     width: 1px;
-    height: 20px;
-    background: var(--line);
-    margin: 0 4px;
+    height: 22px;
+    background: var(--dim);
+    opacity: .45;
+    margin: 0 5px;
+}
+
+/* 危险操作（清空）：平时压成次要色，悬停才提示红 —— 不与「适应」这类高频安全操作抢视觉，
+ * 但悬停时立刻能看出它是破坏性的 */
+button.danger-btn {
+    color: var(--dim);
+}
+
+button.danger-btn:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--bg-hover);
 }
 
 /* ---------- main ---------- */
@@ -689,9 +715,13 @@ body.split-dragging {
 #progress {
     position: absolute;
     left: 50%;
-    bottom: 22px;
+    /* 原来贴底：日志面板一展开（或标量条出现）就被压住，
+     * 而载入这种几十秒的任务恰恰最需要看见进度。移到顶部中央，
+     * 错开 10px 处的视图标签。 */
+    top: 52px;
     transform: translateX(-50%);
     width: 320px;
+    z-index: 12;
     padding: 10px 12px;
     background: rgba(18, 22, 30, .94);
     border: 1px solid var(--line);
@@ -847,8 +877,8 @@ body.split-dragging {
 .st-log-row.warn { color: #e0a63c; }
 .st-log-row > .m { flex: 1 1 auto; min-width: 0; }
 
-body.theme-light .st-log-row.fail { color: #c62828; }
-body.theme-light .st-log-row.warn { color: #9a6a00; }
+html.theme-light .st-log-row.fail { color: #c62828; }
+html.theme-light .st-log-row.warn { color: #9a6a00; }
 
 /* 单行摘要（始终可见） */
 #st-line {
@@ -1828,49 +1858,49 @@ button.danger:hover {
 .seg-ico:disabled:hover { background: transparent; color: var(--text); }
 
 /* ---------- 浅色主题细节修正 ---------- */
-body.theme-light #statusbar,
-body.theme-light #statusbar .dbg {
+html.theme-light #statusbar,
+html.theme-light #statusbar .dbg {
     color: var(--dim);
 }
 
-body.theme-light ::-webkit-scrollbar-thumb {
+html.theme-light ::-webkit-scrollbar-thumb {
     background: var(--line);
 }
-body.theme-light ::-webkit-scrollbar-thumb:hover {
+html.theme-light ::-webkit-scrollbar-thumb:hover {
     background: var(--dim);
 }
-body.theme-light ::-webkit-scrollbar-track {
+html.theme-light ::-webkit-scrollbar-track {
     background: var(--bg-deep);
 }
 
-body.theme-light input[type=color] {
+html.theme-light input[type=color] {
     border-color: var(--line);
     background: #ffffff;
 }
 
-body.theme-light .menu {
+html.theme-light .menu {
     box-shadow: var(--shadow);
 }
 
 /* ---------- 浅色主题：半透明浮层（视图标签 / 中央提示 / 进度 / 面板条） ---------- */
-body.theme-light .view-tag,
-body.theme-light #drop-hint,
-body.theme-light #progress,
-body.theme-light #sfbar,
-body.theme-light #pickbar,
-body.theme-light .seg-bar,
-body.theme-light #help {
+html.theme-light .view-tag,
+html.theme-light #drop-hint,
+html.theme-light #progress,
+html.theme-light #sfbar,
+html.theme-light #pickbar,
+html.theme-light .seg-bar,
+html.theme-light #help {
     background: rgba(255, 255, 255, .94);
     border-color: var(--line);
     color: var(--text);
 }
 
-body.theme-light .view-tag,
-body.theme-light #drop-hint {
+html.theme-light .view-tag,
+html.theme-light #drop-hint {
     color: var(--dim);
 }
 
-body.theme-light .modal {
+html.theme-light .modal {
     background: rgba(31, 45, 61, .30);
 }
 
@@ -2286,7 +2316,7 @@ button.danger,
     touch-action: none;
 }
 
-body.theme-light #p-sfhist.sf-ruler {
+html.theme-light #p-sfhist.sf-ruler {
     background: transparent;
 }
 
@@ -2725,14 +2755,14 @@ body.theme-light #p-sfhist.sf-ruler {
 }
 
 /* 浅色主题：玻璃换成白雾，文字压暗到同色系深档（亮青/亮琥珀在白底上不可读） */
-body.theme-light .pick-mark.dst {
+html.theme-light .pick-mark.dst {
     --mark-c: #8a5a00;
     --mark-bg: rgba(255, 252, 245, .92);
     --mark-line: rgba(201, 143, 18, .60);
     --mark-halo: rgba(201, 143, 18, .14);
 }
 
-body.theme-light .pick-mark.ref {
+html.theme-light .pick-mark.ref {
     --mark-c: #0b6e6e;
     --mark-bg: rgba(248, 253, 253, .92);
     --mark-line: rgba(26, 156, 156, .60);
@@ -2756,25 +2786,28 @@ body.theme-light .pick-mark.ref {
     --mark-halo: rgba(120, 132, 148, .16);
 }
 
-body.theme-light .pick-mark.pick.active {
+html.theme-light .pick-mark.pick.active {
     --mark-c: #6b39c9;
     --mark-bg: rgba(250, 247, 255, .92);
     --mark-line: rgba(140, 100, 220, .60);
     --mark-halo: rgba(140, 100, 220, .14);
 }
 
-body.theme-light .pick-mark.pick.idle {
+html.theme-light .pick-mark.pick.idle {
     --mark-c: #5b6572;
     --mark-bg: rgba(248, 250, 252, .92);
     --mark-line: rgba(140, 150, 162, .55);
     --mark-halo: rgba(140, 150, 162, .12);
 }
 
-/* ---------- 选点表格：默认浮在视口右上角，标题栏可拖动 ---------- */
+/* ---------- 选点表格：浮在视图区右上角，标题栏可拖动 ----------
+ * 用 absolute（相对 #view-area）而不是 fixed：侧栏可拖宽、日志可拖高，
+ * fixed 会跟着窗口而不是视图区，一改布局就错位。top 由 positionRegTable()
+ * 按「拾取面板是否占着右上角」动态算。 */
 .pick-table {
-    position: fixed;
-    top: 86px;
-    right: 18px;
+    position: absolute;
+    top: 14px;
+    right: 16px;
     z-index: 40;
     display: none;              /* flex，由 setRegTableVisible 切 */
     flex-direction: column;
@@ -3083,6 +3116,84 @@ body.theme-light .pick-mark.pick.idle {
     justify-content: flex-end;
 }
 
+/* 可折叠的段落标题（变换矩阵）：右侧给一行摘要，收起时也能看出当前值 */
+.group-title.xform-matrix-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.group-title.xform-matrix-head:hover { color: var(--text); }
+
+.group-title .g-head-sum {
+    margin-left: auto;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    color: var(--dim);
+    text-transform: none;
+    letter-spacing: 0;
+    max-width: 62%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-title .g-caret {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--dim);
+}
+
+/* 有未应用的增量时，摘要转强调色 —— 与顶部横幅是同一个信号 */
+.group-title .g-head-sum.will-apply {
+    color: var(--accent);
+}
+
+/* 待应用横幅：sticky 在面板顶部 —— 面板很长（矩阵 + 配准），
+ * 滚到下面时也要看得见"还有矩阵没应用" */
+.xform-pending {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0;
+    padding: 5px 7px 5px 9px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--accent-soft, rgba(56, 139, 253, .12));
+    font-size: 11px;
+}
+
+.xform-pending .xp-dot {
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(56, 139, 253, .18);
+}
+
+.xform-pending .xp-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    color: var(--text);
+}
+
+.xform-pending .xp-btn {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
 /* ---------- 属性面板：变换（累计 + 历史 + 复制 / 逆变换） ----------
  * 数据对齐面板的矩阵框只承载「待应用的增量」（应用即归零），
  * 所以"这个图层相对载入时被变过什么"归属性面板管 —— 属性属于对象，
@@ -3104,8 +3215,17 @@ body.theme-light .pick-mark.pick.idle {
 .prop-xform-val {
     flex: 1 1 auto;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
     font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 10.5px;
+    line-height: 1.42;
+}
+
+/* R / T 各一行：前缀用等宽固定，两行的数值起点自然对齐 */
+.prop-xform-val .p-xf-line {
+    display: block;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
