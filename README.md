@@ -4,7 +4,7 @@
 
 ![双窗并排对比：左侧优化前、右侧优化后](docs/images/dual-window.png)
 
-纯原生 JavaScript + WebGL2 实现，没有框架、没有打包步骤、没有 npm 依赖。双击 `serve.bat` 即可在浏览器中打开。
+纯原生 JavaScript + WebGL2 实现，没有框架、没有打包步骤、没有 npm 依赖。双击 `serve.bat` 即可在浏览器中打开——**推荐用这个方式**，配准走独立线程、路径载入与孔位优化都可用；直接双击 `index.html` 也能看模型，但功能有缺口（见[两种打开方式](#两种打开方式推荐-servebat)）。
 
 ---
 
@@ -97,6 +97,37 @@ python server/serve.py
 |---|---|---|
 | `VIEWER_PORT` | `8765` | 本地服务端口 |
 | `VIEWER_NOBROWSER` | — | 设为 `1` 则不自动打开浏览器 |
+
+### 两种打开方式：推荐 `serve.bat`
+
+界面也可以直接双击 `index.html` 打开，但**功能并不等价**：
+
+| 功能 | 双击 `serve.bat`（http） | 双击 `index.html`（`file://`） |
+|---|---|---|
+| 载入、渲染、视角、拾取、测量、裁剪、导出 | ✅ | ✅ |
+| 数据对齐（N-N / ICP / 4PCS） | ✅ | ✅ 但只能在主线程算 |
+| **配准期间拖动视角** | ✅ 计算在独立线程，主线程约 17 ms/帧 | ⚠️ 回退主线程，按分片推进，约 34 ms 一顿 |
+| 孔位优化 | ✅ 与页面同源，双击即用 | ⚠️ 需另跑 `server/start_bridge.bat`（8790 端口） |
+| 属性面板显示文件绝对路径 | ✅ 走 `/locate` | ⚠️ 同上，需 `start_bridge.bat` |
+| `?url=` 用相对路径载入 | ✅ 走 `/file?path=` | ❌ 浏览器禁止 `fetch` 本地文件 |
+| 「载入历史」按路径重开 | ✅ | ❌ 条目还在，但点不开 |
+| 需要 Python | ✅ | ❌ 纯静态 |
+
+原因（实测，不是兼容性玄学）：
+
+```
+new Worker('js/icp_worker.js')
+  → SecurityError: Script at 'file:///…' cannot be accessed from origin 'null'
+fetch('js/core.js')
+  → TypeError: Failed to fetch
+```
+
+浏览器只在 `http(s)` 源下允许创建 `Worker`，也禁止 `file://` 页面 `fetch` 本地文件。
+`file://` 下界面看起来完全正常（状态栏"就绪"、模型正常渲染），失败都是**静默降级**：
+Worker 创建失败会被捕获并回退主线程，所以只是变慢、不报错——容易被误判成"配准怎么有点卡"。
+
+> **推荐 `serve.bat`**：一条命令同时得到「静态页面 + `/file` 路径载入 + `/locate` 路径反查 + `/optimize` 孔位优化 + 独立计算线程」，不需要额外启动任何东西。
+> 只有「把工具发给别人、对方没装 Python」时才建议直接双击 `index.html`。
 
 ### 加载数据
 
@@ -311,7 +342,9 @@ curl http://127.0.0.1:8765/health
 | Python | 3.8+（仅用于启动本地服务，非必需——也可用任意静态服务器） |
 | 构建工具 | **不需要** |
 
-> 直接双击 `index.html` 用 `file://` 打开也能查看模型，但孔位优化需要额外启动 `server/start_bridge.bat`。推荐始终用 `serve.bat`。
+> 直接双击 `index.html` 用 `file://` 打开也能查看模型，但配准只能跑在主线程、`?url=` 与「载入历史」不可用；
+> 孔位优化与路径反查需额外启动 `server/start_bridge.bat`。
+> **推荐始终用 `serve.bat`** —— 两种方式的完整对照见「[两种打开方式](#两种打开方式推荐-servebat)」。
 
 ---
 

@@ -661,6 +661,13 @@
             this.dirty = true;
 
             this.updateRects();
+
+            /* 视口宽度变了，分隔线也要跟着挪。
+             * 拖侧栏 / 折叠面板都会走到这里（ResizeObserver 观察 canvas），
+             * 但这条线原来只在 setSplitRatio 里写过位置 ——
+             * 于是拖侧栏时画布已经跟上了，分隔线还停在旧像素处。 */
+            this.syncSplitLine();
+
             if (this.renderer && this.renderer.ready)
             {
                 this.renderFrame();
@@ -1631,28 +1638,42 @@
     /* 单窗口 / 双窗口切换：单窗口时 A/B/S 全部图层在同一个视口渲染 */
     /* 双窗分隔比例：0.5 各半，0 全给右视图，1 全给左视图。
      * 拖动分隔线时连续调用；同时把 DOM 上的分隔线挪到对应位置。 */
+    /* 只把分隔线（含右侧角标）摆到当前比例对应的像素位置。
+     *
+     * 与 setSplitRatio 分开的原因：`splitRatio` 没变、但 `#view-area` 的宽度变了
+     * 的情况很常见 —— 拖左侧栏、折叠属性面板、进出单窗都会发生。
+     * 那种时候只需要挪线，不需要重算比例、也不需要再跑一遍 updateRects。 */
+    App.prototype.syncSplitLine = function ()
+    {
+        var line = document.getElementById('split-line');
+        var area = document.getElementById('view-area');
+        if (!line || !area)
+        {
+            return;
+        }
+
+        var px = Math.round((area.clientWidth || 0) * this.settings.splitRatio);
+        if (this._splitPx === px)
+        {
+            return;
+        }
+
+        this._splitPx = px;
+        line.style.left = px + 'px';
+        line.style.marginLeft = '-1px';
+
+        /* 右侧角标的 CSS 是固定的 left: calc(50% + 12px)，
+         * 分隔线一动它就跟不上了，这里同步成相对分隔线的位置 */
+        var tagR = document.getElementById('tag-right');
+        if (tagR) { tagR.style.left = (px + 12) + 'px'; }
+    };
+
     App.prototype.setSplitRatio = function (ratio)
     {
         ratio = Math.max(0.02, Math.min(0.98, Number(ratio) || 0.5));
         this.settings.splitRatio = ratio;
 
-        var line = document.getElementById('split-line');
-        var area = document.getElementById('view-area');
-        if (line && area)
-        {
-            var px = Math.round((area.clientWidth || 0) * ratio);
-            if (this._splitPx !== px)
-            {
-                this._splitPx = px;
-                line.style.left = px + 'px';
-                line.style.marginLeft = '-1px';
-
-                /* 右侧角标的 CSS 是固定的 left: calc(50% + 12px)，
-                 * 分隔线一动它就跟不上了，这里同步成相对分隔线的位置 */
-                var tagR = document.getElementById('tag-right');
-                if (tagR) { tagR.style.left = (px + 12) + 'px'; }
-            }
-        }
+        this.syncSplitLine();
 
         /* 矩形要立刻跟着变：updateRects 平时只在 resize / 切模式时调用，
          * 拖动过程中不重算的话，画面会停在旧切分上 */

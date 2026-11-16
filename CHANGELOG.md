@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.3.6` |
+| 当前版本 | `1.0.3.7` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-16 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -3930,3 +3930,37 @@ The script at '.../js/core.js?v=1.0.3.5' failed to load.
 `server/serve.py` 虽然发了 `Cache-Control: no-store/no-cache`，但只要有人用别的静态服务器、
 或浏览器对同一 URL 复用了内存缓存，就会拿到旧 JS。
 **规则：任何 `js/*.js` 改动都必须同时升 `?v=`（= 版本号），否则改等于没改。**
+
+---
+
+## 侧栏拖拽时分隔线不同步（2026-11-16，v1.0.3.7）
+
+**现象**：双窗模式下拖动左侧栏改变宽度，中间的分隔线不跟着动，画面已经重排了但线还停在旧位置。
+
+**原因**：分隔线的像素位置只在 `setSplitRatio()` 里写：
+
+```js
+var px = Math.round((area.clientWidth || 0) * ratio);
+if (this._splitPx !== px) { this._splitPx = px; line.style.left = px + 'px'; }
+```
+
+而侧栏拖拽只改侧栏自身宽度：
+
+```js
+function move(e2) { side.style.flex = '0 0 ' + w + 'px'; side.style.width = w + 'px'; }
+```
+
+画布因为有 `ResizeObserver` 会自动跟上（`resize()` → 重建 drawing buffer + `updateRects`），
+唯独这条 DOM 线没人通知 —— 于是只有线掉队，观感就是"更新不及时"。
+
+**修法**：把"摆线"从 `setSplitRatio` 里抽成 `syncSplitLine()`，在 `resize()` 的尺寸变化分支里调用一次。
+`splitRatio` 没变时只挪线，不重算视口、不重复 `updateRects`。
+
+实测（模拟拖动侧栏）：
+
+| 阶段 | 视口宽 | 线 left | 期望 | 画布缓冲 |
+| --- | --- | --- | --- | --- |
+| 初始 | 883 | 442 | 442 | 883×550 |
+| 拖 +140（未松手） | 743 | 372 | 372 | 743×550 |
+| 回拖 −60 | 943 | 472 | 472 | 943×550 |
+| 比例改 0.35 | 943 | 330 | 330 | 943×550 |
