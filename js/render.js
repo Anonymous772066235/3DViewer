@@ -417,6 +417,30 @@
         return true;
     }
 
+    /* ---------------- 线框 / 顶点的显示开销控制 ----------------
+     *
+     * 实测（231,200 三角形的小曲面）：
+     *   面片   462,400 个三角形（正背面 / 两个视口合计）
+     *   线框   694,960 个索引 = 347,480 条边   —— 一次 draw，无剔除
+     *   顶点   116,281 个点，点径 3px × dpr
+     *
+     * 打开线框+顶点后绘制量变成 3 倍多，而这两样既不做剔除也不做 LOD。
+     *
+     * 两条自动规则（?density=0 可关）：
+     *   1. 平均边长 < WIRE_MIN_PX 像素时不画线框 —— 线与线已经挤成一片色块，
+     *      画出来没有信息量（CAD 缩远自动隐藏边线就是这个道理）；
+     *   2. 平均边长 < 点径时不画顶点 —— 点互相重叠，同理。
+     *
+     * 另外顶点超过 VERT_CAP 时按步长抽稀，点径也设了上限。 */
+    var WIRE_MIN_PX = 2.0;         // 线框最小可见边长（像素）
+    var VERT_CAP = 100000;         // 顶点最多画多少个
+    var VERT_MAX_PX = 16;          // 点径上限（CSS 像素）
+
+    function densityCullOn()
+    {
+        return !(global.MV.config && global.MV.config.density === false);
+    }
+
     /* 顶点焊接总开关；实际是否焊接还要看格式（见 uploadLayer，只有 STL 参与）
      * false = 全局关闭，所有格式都不去重 */
     var WELD_VERTICES = true;
@@ -1320,10 +1344,18 @@
     };
 
     /* 按图层当前完整状态绘制网格（面片正/反面、线框、顶点、法向） */
-    Renderer.prototype.drawMeshLayer = function (layer, mvp, viewM, ctx, alpha)
+    Renderer.prototype.drawMeshLayer = function (layer, mvp, viewM, ctx, alpha, view)
     {
         var gl = this.gl;
         var col = [layer.colorRgb[0], layer.colorRgb[1], layer.colorRgb[2], alpha];
+
+        /* 当前视口「每毫米多少像素」：线框/顶点是否值得画由它决定 */
+        var pxPerMm = 0;
+        if (view && view.camera && view.h > 0)
+        {
+            var fovY = view.camera.fovY || view.camera.fov || 0.785;
+            pxPerMm = view.h / (2 * Math.max(1e-6, view.camera.distance) * Math.tan(fovY / 2));
+        }
 
         /* 预览态（layer.previewMat 存在）只画面片。
          * 线框 / 顶点 / 法向 / 边界这些辅助路径在顶点被 uModel 大幅移动后
@@ -1377,14 +1409,54 @@
                 gl.disable(gl.CULL_FACE);
             }
         }
+        /* 平均边长（像素）：三角面近似均匀时 edge ≈ 对角线 / √三角形数 */
+        var g0 = layer.gpu;
+        var avgEdgePx = 1e9;
+        if (pxPerMm > 0 && g0 && g0.triCount > 0)
+        {
+            var bb0 = layer.data.bbox;
+            if (bb0 && bb0.min)
+            {
+                var dx0 = bb0.max[0] - bb0.min[0];
+                var dy0 = bb0.max[1] - bb0.min[1];
+                var dz0 = bb0.max[2] - bb0.min[2];
+                avgEdgePx = Math.sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0) * pxPerMm /
+                            Math.sqrt(g0.triCount);
+            }
+        }
+
         if (layer.showWire)
         {
-            this.drawWire(layer, mvp);
+            if (densityCullOn() && avgEdgePx < WIRE_MIN_PX)
+            {
+                this.stats.wireSkipped = (this.stats.wireSkipped || 0) + 1;
+            }
+            else
+            {
+                this.drawWire(layer, mvp);
+                if (g0 && g0.wireCount)
+                {
+                    this.stats.wireLines = (this.stats.wireLines || 0) + g0.wireCount / 2;
+                }
+            }
         }
         // 边界线不在这里画：由 renderFrame 在本视图末尾统一绘制（避免被面片绘制状态影响）
         if (layer.showVerts)
         {
-            this.drawVerts(layer, mvp, ctx, alpha);
+            var ptPx = (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale;
+            if (densityCullOn() && avgEdgePx < ptPx * 1.1)
+            {
+                this.stats.vertSkipped = (this.stats.vertSkipped || 0) + 1;
+            }
+            else
+            {
+                this.drawVerts(layer, mvp, ctx, alpha);
+                if (g0)
+                {
+                    this.stats.vertPoints = (this.stats.vertPoints || 0) +
+                        (g0.vertDrawCount || g0.vertCount || 0);
+                }
+            }
         }
         if (layer.showNormals)
         {
@@ -1812,11 +1884,14 @@
 
         // 索引化后 posBuffer 里已是去重顶点，直接 0..vertCount-1
         var total = g.vertCount || (g.triCount * 3);
-        var n = total;
+
+        /* 超过上限按步长抽稀：顶点标记只用来"看密度"，没必要全画 */
+        var stride = (VERT_CAP > 0 && total > VERT_CAP) ? Math.ceil(total / VERT_CAP) : 1;
+        var n = Math.floor(total / stride);
         var idx = new Uint32Array(n);
         for (var i = 0; i < n; i++)
         {
-            idx[i] = i;
+            idx[i] = i * stride;
         }
 
         var vao = gl.createVertexArray();
@@ -1831,7 +1906,9 @@
 
         g.vertVao = vao;
         g.vertBuffer = ibo;
-        g.vertCount = n;
+        /* vertCount 保留"真实顶点数"（属性面板、调试串在用），
+         * 绘制数量单独记，避免统计与显示混为一谈。 */
+        g.vertDrawCount = n;
     };
 
     Renderer.prototype.drawVerts = function (layer, mvp, ctx, alpha)
@@ -1852,7 +1929,9 @@
         gl.uniformMatrix4fv(this.pointU.uMVP, false, mvp);
         gl.uniformMatrix4fv(this.pointU.uModel, false, this.modelOf(layer));
         var vc = layer.vertColorRgb || [0.95, 0.95, 0.98];
-        gl.uniform1f(this.pointU.uPointSize, (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale);
+        /* 点径上限：放到 24px 时 10 万个点就是几千万片元，纯 overdraw */
+        var vptPx = (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale;
+        gl.uniform1f(this.pointU.uPointSize, Math.min(vptPx, VERT_MAX_PX * (ctx.dpr || 1)));
         /* 预览态（配准过程中 layer.previewMat 存在）必须往前顶一点点。
          *
          * 两片点云对齐后几乎完全重合，深度值相同；参考先画并写了深度，
@@ -1867,7 +1946,7 @@
         gl.uniform1f(this.pointU.uAlpha, alpha);
         gl.uniform1i(this.pointU.uRound, 1);
         gl.bindVertexArray(g.vertVao);
-        gl.drawElements(gl.POINTS, g.vertCount, gl.UNSIGNED_INT, 0);
+        gl.drawElements(gl.POINTS, g.vertDrawCount || g.vertCount, gl.UNSIGNED_INT, 0);
         gl.bindVertexArray(null);
 
         this.stats.draws++;
@@ -2196,7 +2275,7 @@
                     if (ctx.settings.ghostMode === 1)
                     {
                         // 实体叠加：完全按对面图层当前显示状态绘制（颜色、线框、顶点、法向、着色、透明度）
-                        this.drawMeshLayer(lay, mvp, viewM, ctx, lay.opacity);
+                        this.drawMeshLayer(lay, mvp, viewM, ctx, lay.opacity, view);
                     }
                     else
                     {
@@ -2207,7 +2286,7 @@
                 }
                 else
                 {
-                    this.drawMeshLayer(lay, mvp, viewM, ctx, lay.opacity);
+                    this.drawMeshLayer(lay, mvp, viewM, ctx, lay.opacity, view);
                 }
             }
             else

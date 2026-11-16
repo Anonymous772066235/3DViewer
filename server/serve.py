@@ -24,6 +24,38 @@ import bridge as opt   # noqa: E402  （服务端模块统一在 server/ 下）
 PORT = int(os.environ.get('VIEWER_PORT', '8765'))
 ROOT = os.path.dirname(HERE)   # 静态资源根 = 3DViewer/
 
+"""静态资源的 MIME 必须【硬编码】，不能用 mimetypes.guess_type 直接猜。
+
+Windows 上 Python 的 mimetypes 会读注册表，而 HKEY_CLASSES_ROOT\.js 常被写成
+text/plain —— 结果是 .js 以 text/plain 返回。
+
+`<script src>` 对此是宽容的（没有 nosniff 就照跑），所以页面一直"看着正常"；
+但 Worker 里的 importScripts() **强制要求 JavaScript MIME**，否则直接抛
+"NetworkError: The script ... failed to load"。
+表现极具迷惑性：Worker 建得出来、主线程完全流畅，但配准一个进度都不回报，
+按钮一直停在「运行 ICP」——整条线程静默失效。"""
+
+MIME_FIX = {
+    '.js': 'text/javascript',
+    '.mjs': 'text/javascript',
+    '.css': 'text/css',
+    '.html': 'text/html',
+    '.htm': 'text/html',
+    '.json': 'application/json',
+    '.wasm': 'application/wasm',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.map': 'application/json',
+}
+
+
+def guess_ctype(full):
+    """先查硬编码表，再退回 mimetypes（其余类型注册表不影响）"""
+    ext = os.path.splitext(full)[1].lower()
+    if ext in MIME_FIX:
+        return MIME_FIX[ext]
+    return mimetypes.guess_type(full)[0] or 'application/octet-stream'
+
 
 class Handler(opt.Handler):
     server_version = 'ViewerServe/1.0'
@@ -72,7 +104,7 @@ class Handler(opt.Handler):
             self._json(404, {'error': 'not allowed or not found', 'path': raw})
             return
 
-        ctype = mimetypes.guess_type(full)[0] or 'application/octet-stream'
+        ctype = guess_ctype(full)
         try:
             size = os.path.getsize(full)
         except OSError:
@@ -104,7 +136,7 @@ class Handler(opt.Handler):
             self.send_error(500, 'Read error')
             return
 
-        ctype = mimetypes.guess_type(full)[0] or 'application/octet-stream'
+        ctype = guess_ctype(full)
         if ctype.startswith('text/') or ctype in ('application/javascript',
                                                   'application/json'):
             ctype += '; charset=utf-8'

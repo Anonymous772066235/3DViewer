@@ -55,7 +55,7 @@
         return light ? PALETTE.light : PALETTE.dark;
     }
 
-    /* 在 hex 上做提亮 / 压暗（amt > 0 提亮，< 0 压暗），用于派生同色系的线框与边界 */
+    /* 在 hex 上做提亮 / 压暗（amt > 0 提亮，< 0 压暗） */
     function tintHex(hex, amt)
     {
         var rgb = global.MV.util.hexToRgb(hex);
@@ -70,6 +70,56 @@
         return global.MV.util.rgbToHex(out);
     }
 
+    /* 相对亮度（sRGB 近似权重），用来判断「面片算亮还是算暗」 */
+    function relLum(hex)
+    {
+        var c = global.MV.util.hexToRgb(hex);
+        if (!c) { return 0.5; }
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    }
+
+    function rgb2hsl(r, g, b)
+    {
+        var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+        var l = (mx + mn) / 2, h = 0, sat = 0, d = mx - mn;
+
+        if (d > 1e-9)
+        {
+            sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+            if (mx === r) { h = (g - b) / d + (g < b ? 6 : 0); }
+            else if (mx === g) { h = (b - r) / d + 2; }
+            else { h = (r - g) / d + 4; }
+            h /= 6;
+        }
+        return [h, sat, l];
+    }
+
+    function hsl2hex(h, s, l)
+    {
+        h = ((h % 1) + 1) % 1;
+        s = Math.max(0, Math.min(1, s));
+        l = Math.max(0, Math.min(1, l));
+
+        function hue2rgb(p, q, t)
+        {
+            if (t < 0) { t += 1; }
+            if (t > 1) { t -= 1; }
+            if (t < 1 / 6) { return p + (q - p) * 6 * t; }
+            if (t < 1 / 2) { return q; }
+            if (t < 2 / 3) { return p + (q - p) * (2 / 3 - t) * 6; }
+            return p;
+        }
+
+        if (s < 1e-9) { return global.MV.util.rgbToHex([l, l, l]); }
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        return global.MV.util.rgbToHex([
+            hue2rgb(p, q, h + 1 / 3),
+            hue2rgb(p, q, h),
+            hue2rgb(p, q, h - 1 / 3)
+        ]);
+    }
+
     /* 从主色派生一整套附属色。
      *
      * 原来线框写死 `#2f9df0`、边界写死 `#22d3ee` —— 三个图层叠在一起时线框全是同一个蓝，
@@ -77,8 +127,42 @@
      * 浅色主题下派生方向反过来（压暗而不是提亮）：浅底上更深的线才看得清。 */
     function applyDerivedColors(lay, hex, light)
     {
-        var wire = tintHex(hex, light ? -0.18 : 0.30);
-        var bound = tintHex(hex, light ? -0.45 : -0.30);
+        /* 四个通道各占一个「视觉维度」，不再靠同色相的明度分档：
+         *
+         *   面片 = 槽位色（蓝 / 橙 / 绿三族）—— 负责标识 A / B / S
+         *   线框 = 中性反色（面片亮→近黑，面片暗→近白）—— 只负责"勾边"
+         *   顶点 = 面片色相 +180° 的高饱和强调色   —— 只负责"点"
+         *   边界 = 固定警示红                       —— 只负责"开放边/缺陷"
+         *
+         * 旧方案是「线框 = 主色 +30%、顶点 = 近白、边界 = 主色 −30%」，
+         * 三者全在同一个色相上，只差一两档明度。同时打开线框和顶点时
+         * 蓝底上出现浅蓝线 + 近白点，根本分不清谁是谁。
+         *
+         * 现在线框是中性色，天然不与任何槽位色相撞；顶点用互补色，
+         * 与面片色相距离 180°，即使线框和顶点同时开也不会混淆。 */
+        var lum = relLum(hex);
+
+        /* 线框：亮面片压到近黑，暗面片提到近白 —— 与面片的明度差恒 > 0.4 */
+        var wire = (lum > 0.42) ? '#11151c' : '#eef2f8';
+
+        /* 边界：固定洋红（"开放边 / 不封闭"的缺陷标记，不随图层变色） */
+        var bound = light ? '#b8125e' : '#ff2d95';
+
+        /* 顶点：面片补色；若补色与边界撞车（青绿面的补色正是红/洋红），
+         * 再转 70°。实测青色面片补色落在 355°，与洋红 330° 只差 25°，
+         * 顶点和边界就分不清了 —— 这一步是必须的避让。 */
+        var hsl = rgb2hsl.apply(null, global.MV.util.hexToRgb(hex) || [0.5, 0.5, 0.5]);
+        var vh = hsl[0] + 0.5;
+        var bh = rgb2hsl.apply(null, global.MV.util.hexToRgb(bound))[0];
+
+        function hueGap(a, b)
+        {
+            var d = Math.abs(((a % 1) + 1) % 1 - ((b % 1) + 1) % 1);
+            return (d > 0.5 ? 1 - d : d) * 360;
+        }
+        if (hueGap(vh, bh) < 50) { vh += 70 / 360; }
+
+        var vert = hsl2hex(vh, 0.92, lum > 0.42 ? 0.58 : 0.66);
 
         /* 背面色：中性灰，避免与正面色抢眼。
          * 原来还留着一个 `backColor: '#b03a30'`（红）而 rgb 是灰 —— hex 与 rgb 不一致，
@@ -92,9 +176,8 @@
         lay.boundaryColor = bound;
         lay.boundaryColorRgb = global.MV.util.hexToRgb(bound);
 
-        /* 顶点色：深色主题用近白衬深底；浅色主题必须用深灰 ——
-         * 原来的 `#f2f3fa` 在白底上等于隐形。 */
-        lay.vertColor = light ? '#3a4048' : '#f2f3fa';
+        /* 顶点色是「面片补色」，不再是近白/深灰 —— 那正是与线框撞车的来源 */
+        lay.vertColor = vert;
         lay.vertColorRgb = global.MV.util.hexToRgb(lay.vertColor);
     }
 
@@ -232,6 +315,10 @@
             noconfirm: params.get('noconfirm') === '1',
             debug: params.get('debug') === '1',
             cull: params.get('cull') !== '0',
+
+        /* 线框 / 顶点「按屏幕密度自动隐藏」。?density=0 关闭，
+         * 用于对比或强制查看密集网格的全部边线。 */
+        density: params.get('density') !== '0',
 
         /* 单层「显示端」点数上限。
          *
@@ -1281,7 +1368,16 @@
             }
             if (slots && !slots[l.slot])
             {
-                continue;
+                /* 双窗里开了「叠加对面模型」时，对面槽位的图层会以半透明画在
+                 * 本视图内。既然看得见，取景就必须把它算进去 ——
+                 * 否则一开叠加，对面模型整个落在画面外
+                 * （实测偏出视锥 24 倍），开关看起来像没生效。
+                 * 判定条件与 rayPick 里一致：ghost 不含公共层 S。 */
+                var asGhost = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
+                if (!asGhost)
+                {
+                    continue;
+                }
             }
             /* 预览态（配准过程中的 layer.previewMat）必须按变换后的包络参与，
              * 否则场景包围盒/适应视图仍以为它待在原位 —— 相机看着空地，
@@ -1289,6 +1385,136 @@
             B.merge(box, l.previewMat ? xformedBBox(l.data.bbox, l.previewMat) : l.data.bbox);
         }
         return box;
+    };
+
+    /* 适应视图：把数据投到相机坐标系，取「最值 + 中心」，就这么两步。
+     *
+     * 每个顶点在相机坐标系里只有三个分量：(r, u, f) = 右 / 上 / 前。
+     *   · 三个分量的 min/max 就是「投影到屏幕 XY 的范围」，其中点即该对准的注视点；
+     *   · 距离由逐点约束取最大：d >= f + |u| / tan(fovY/2)（水平方向同理）。
+     *
+     * 两遍采样（各 ≤ 10 万点）：第一遍求范围 → 移动注视点；第二遍按新注视点求距离。
+     * 不迭代、不用包围盒角点、不需要收敛判断。
+     *
+     * onlyLayer：只算这一层（单图层「适应」用）。
+     * 返回 0 表示拿不到顶点（交给包围盒兜底）。注视点在函数内一并修正。 */
+    App.prototype.tightFitDistance = function (vi, slots, onlyLayer)
+    {
+        var v = this.views[vi];
+        if (!v || !v.camera) { return 0; }
+
+        var cam = v.camera;
+        var b = cam.basis();
+        var tanY = Math.tan(cam.fov * 0.5);
+        if (!(tanY > 1e-6)) { return 0; }
+
+        var tanX = tanY * ((v.rect && v.rect.h > 0) ? (v.rect.w / v.rect.h) : 1);
+        var F = b.forward, U = b.up, R = b.right;
+
+        /* 参与取景的图层 */
+        var list = [];
+        var totalPts = 0;
+        for (var i = 0; i < this.layers.length; i++)
+        {
+            var l = this.layers[i];
+            if (onlyLayer)
+            {
+                if (l !== onlyLayer) { continue; }
+            }
+            else
+            {
+                if (!l.visible) { continue; }
+                if (slots && !slots[l.slot])
+                {
+                    /* 与 computeBBox / rayPick 一致：叠加的对面图层也算 */
+                    var asGhost = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
+                    if (!asGhost) { continue; }
+                }
+            }
+            if (l.data && l.data.positions && l.data.positions.length >= 3)
+            {
+                list.push(l);
+                totalPts += Math.floor(l.data.positions.length / 3);
+            }
+        }
+        if (!list.length) { return 0; }
+
+        var stride = Math.max(1, Math.ceil(totalPts / 100000));
+
+        /* 扫一遍：返回 (r,u,f) 的最值；need=true 时同时求所需距离 */
+        function measure(center, need)
+        {
+            var u0 = Infinity, u1 = -Infinity;
+            var r0 = Infinity, r1 = -Infinity;
+            var f0 = Infinity, f1 = -Infinity;
+            var dist = 0;
+            var n = 0;
+
+            for (var li = 0; li < list.length; li++)
+            {
+                var lay = list[li];
+                var pos = lay.data.positions;
+                var cnt = Math.floor(pos.length / 3);
+                var M = lay.previewMat || null;
+
+                for (var k = 0; k < cnt; k += stride)
+                {
+                    var px = pos[k * 3], py = pos[k * 3 + 1], pz = pos[k * 3 + 2];
+
+                    if (M)
+                    {
+                        var qx = M[0] * px + M[1] * py + M[2] * pz + M[3];
+                        var qy = M[4] * px + M[5] * py + M[6] * pz + M[7];
+                        var qz = M[8] * px + M[9] * py + M[10] * pz + M[11];
+                        px = qx; py = qy; pz = qz;
+                    }
+
+                    var dx = px - center[0], dy = py - center[1], dz = pz - center[2];
+                    var pr = dx * R[0] + dy * R[1] + dz * R[2];
+                    var pu = dx * U[0] + dy * U[1] + dz * U[2];
+                    var pf = dx * F[0] + dy * F[1] + dz * F[2];
+
+                    if (pr < r0) { r0 = pr; }
+                    if (pr > r1) { r1 = pr; }
+                    if (pu < u0) { u0 = pu; }
+                    if (pu > u1) { u1 = pu; }
+                    if (pf < f0) { f0 = pf; }
+                    if (pf > f1) { f1 = pf; }
+
+                    if (need)
+                    {
+                        var dv = pf + Math.abs(pu) / tanY;
+                        var dh = pf + Math.abs(pr) / tanX;
+                        if (dv > dist) { dist = dv; }
+                        if (dh > dist) { dist = dh; }
+                    }
+                    n++;
+                }
+            }
+            return { u0: u0, u1: u1, r0: r0, r1: r1, f0: f0, f1: f1, dist: dist, n: n };
+        }
+
+        /* 第一遍：求范围 → 注视点挪到范围中心 */
+        var c0 = cam.target;
+        var a = measure(c0, false);
+        if (!a.n) { return 0; }
+
+        var midR = (a.r0 + a.r1) / 2;
+        var midU = (a.u0 + a.u1) / 2;
+        var midF = (a.f0 + a.f1) / 2;
+
+        cam.target = [
+            c0[0] + R[0] * midR + U[0] * midU + F[0] * midF,
+            c0[1] + R[1] * midR + U[1] * midU + F[1] * midF,
+            c0[2] + R[2] * midR + U[2] * midU + F[2] * midF
+        ];
+
+        /* 第二遍：按新注视点求距离。
+         * 乘 1.10：采样按步长取点，端部的极值点可能整段跳过 ——
+         * 实测 46 万点按 5 取 1 时，真实极值比采样值再远约 11%，
+         * 余量给小了会贴边（端部被裁）。宁可留 10%，也不要裁数据。 */
+        var b2 = measure(cam.target, true);
+        return b2.n ? b2.dist * 1.10 : 0;
     };
 
     /* slotsOverride：用别的槽位集合来定 bbox。
@@ -1309,7 +1535,18 @@
         }
         if (B.valid(box))
         {
-            v.camera.fit(box);
+            /* 传视口宽高比：fit 要按水平/垂直两个方向分别算距离 */
+            var aspFit = (v.rect && v.rect.h > 0) ? (v.rect.w / v.rect.h) : 1;
+            v.camera.fit(box, aspFit);
+
+            /* 包围盒只用来定「注视点 + min/max 距离」；真正的距离按实际顶点算，
+             * 否则弧形/细长模型的空角会把画面撑开一大圈空白。 */
+            var tight = this.tightFitDistance(vi, useSlots, null);
+            if (tight > 0)
+            {
+                /* 距离已在函数内按目标占比收敛，这里不再叠边距 */
+                v.camera.distance = Math.max(tight, 1e-3);
+            }
             if (this.urlZoom > 0)
             {
                 v.camera.distance *= this.urlZoom;
@@ -1522,17 +1759,30 @@
         {
             return;
         }
+        var r0 = this.views[0].rect, r1 = this.views[1].rect;
+        var a0 = (r0 && r0.h > 0) ? (r0.w / r0.h) : 1;
+        var a1 = (r1 && r1.h > 0) ? (r1.w / r1.h) : 1;
+
+        function fitOne(vi, asp)
+        {
+            var cam = this.views[vi].camera;
+            cam.fit(layer.data.bbox, asp);
+            var t = this.tightFitDistance(vi, null, layer);
+            if (t > 0) { cam.distance = Math.max(t, 1e-3); }
+        }
+
+        var self2 = this;
         if (this.views[0].slots[layer.slot])
         {
-            this.views[0].camera.fit(layer.data.bbox);
+            fitOne.call(self2, 0, a0);
         }
         if (this.views[1].slots[layer.slot])
         {
-            this.views[1].camera.fit(layer.data.bbox);
+            fitOne.call(self2, 1, a1);
         }
         if (!this.views[0].slots[layer.slot] && !this.views[1].slots[layer.slot])
         {
-            this.views[0].camera.fit(layer.data.bbox);
+            fitOne.call(self2, 0, a0);
         }
         this.markDirty();
     };
@@ -2579,6 +2829,24 @@
              * 否则同一次单击会同时被两个功能接走。app 不判断 UI 的模式，
              * 只认这个开关（分层：下层提供能力，开关由上层控制）。 */
             var still = d.mode === 'orbit' && (d.moved || 0) < 5;
+
+            /* 视口里「点中某个图层」就把它设为当前对象。
+             *
+             * W / N / V / B 这些快捷键原来是作用在 app.getSelected() 上的，
+             * 而 getSelected() 只跟左侧树的选中项走 —— 用户在视口里对着 B 图层
+             * 选点、移动之后按 W，线框却开在树里上一次选中的那个图层上，
+             * 看起来像"快捷键没反应"。
+             *
+             * 只在「没拖动过的单击」时做，避免旋转视角时不停 raycast。 */
+            if (still && self.rayPick && self.selectLayer)
+            {
+                var hitSel = self.rayPick(d.sx, d.sy);
+                if (hitSel && hitSel.layer &&
+                    (!self.getSelected || self.getSelected() !== hitSel.layer))
+                {
+                    self.selectLayer(hitSel.layer.id);
+                }
+            }
             var wantPick = (e.ctrlKey || self.pickMode) && still && !self.suppressPick;
             if (wantPick)
             {

@@ -2261,7 +2261,15 @@ function pickCandidates(layer, eye, dir, tri)
         var rmsHist = [];              // 最近 5 轮的 RMS（停滞早停用）
 
         /* 跑一轮，返回 { done, iters, rms, step, used } */
-        function step()
+        /* 一轮迭代的累加状态；非空表示「有一轮正在分片累加」。
+         *
+         * 主线程路径每帧只喂一小批查询（step(budget)），把一次 200ms 的冻结
+         * 拆成若干 40~50ms 的小块 —— 这就是「时间切片」。
+         * Worker 路径、symmetric()、候选验证器调用 step() 不带参数，
+         * 仍然一次扫完一轮，行为与数值完全不变。 */
+        var acc = null;
+
+        function step(queriesPerCall)
         {
             if (done || iters >= maxIter)
             {
@@ -2274,19 +2282,37 @@ function pickCandidates(layer, eye, dir, tri)
              * 避免大阈值把错配带进最终解。
              * 初始偏差较大时，固定的小阈值会让几乎所有对应被丢弃，
              * 剩下的少量重叠点给出不唯一的解（实测偏移 50 会停在 15）。 */
-            var curMaxDist = maxDist;
-            if (maxDist > 0 && maxIter > 1)
+            if (!acc)
             {
-                var decay = 1 - Math.min(1, iters / (maxIter * 0.66));
-                curMaxDist = maxDist * (1 + trimBoost * decay);
+                var curMaxDist0 = maxDist;
+                if (maxDist > 0 && maxIter > 1)
+                {
+                    var decay = 1 - Math.min(1, iters / (maxIter * 0.66));
+                    curMaxDist0 = maxDist * (1 + trimBoost * decay);
+                }
+
+                acc = {
+                    A: new Float64Array(36),
+                    b: new Float64Array(6),
+                    cnt: 0,
+                    sumSq: 0,
+                    si: 0,
+                    curMaxDist: curMaxDist0
+                };
             }
 
-            var A = new Float64Array(36);
-            var b = new Float64Array(6);
-            var cnt = 0;
-            var sumSq = 0;
+            var A = acc.A;
+            var b = acc.b;
+            var curMaxDist = acc.curMaxDist;
+            var cnt = acc.cnt;
+            var sumSq = acc.sumSq;
 
-            for (var si = 0; si < nSamples; si++)
+            /* 本次最多扫多少个点；不带参数 = 一次扫完（等于原来的行为） */
+            var budget = (queriesPerCall > 0) ? (queriesPerCall | 0) : nSamples;
+            var startSi = acc.si;
+            var stopSi = Math.min(nSamples, startSi + budget);
+
+            for (var si = startSi; si < stopSi; si++)
             {
                 var i = idxList ? idxList[si] : si;
                 var p0 = i * 3;
@@ -2375,6 +2401,21 @@ function pickCandidates(layer, eye, dir, tri)
                     cnt++;
                 }
             }
+
+            /* 存回累加器：下一片从这里继续 */
+            acc.si = stopSi;
+            acc.cnt = cnt;
+            acc.sumSq = sumSq;
+
+            if (stopSi < nSamples)
+            {
+                /* 本轮没扫完 —— 不是迭代结束，iters / R / t 都不动 */
+                return { done: false, partial: true, iters: iters, rms: lastRms,
+                         step: 0, used: used };
+            }
+
+            /* 一轮扫完：清掉累加器，照原逻辑求解 */
+            acc = null;
 
             if (cnt < 6)
             {

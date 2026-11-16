@@ -361,16 +361,100 @@
         if (this.distance > this.maxDistance) { this.distance = this.maxDistance; }
     };
 
-    OrbitCamera.prototype.fit = function (bbox)
+    /* 取景：按包围盒在相机「右 / 上」方向上的**投影范围**算距离。
+     *
+     * 旧写法 distance = R / sin(fov/2) * 1.25 有两处多余留白：
+     *   1) R 是「半个对角线」。扁长模型的实际屏幕范围远小于它 ——
+     *      水平方向的跨度吃满，垂直方向就空着；
+     *   2) 固定 1.25 的边距再吃掉 25%。
+     *
+     * 现在把 8 个角点投到相机的 right / up / forward 三个轴上，取真实半宽、
+     * 半高，分别按水平与垂直视场角求所需距离、取大者，再乘一点呼吸余量。
+     *
+     *   aspect：视口宽高比（w/h），默认 1（正方形，偏保守）
+     *   margin：额外留白系数，默认 1.04
+     */
+    OrbitCamera.prototype.fit = function (bbox, aspect, margin)
     {
         if (!BBox.valid(bbox))
         {
             return;
         }
-        this.target = BBox.center(bbox);
+
+        var c = BBox.center(bbox);
+        this.target = [c[0], c[1], c[2]];
+
+        var asp = (aspect > 0) ? aspect : 1;
+        var m = (margin > 0) ? margin : 1.04;
+
+        var b = this.basis();
+        var R = b.right, U = b.up, F = b.forward;
+
+        var tanY = Math.tan(this.fov * 0.5);
+        var tanX = tanY * asp;
+
+        /* 逐角点解约束，而不是「max(深度) + max(横向)/tan」。
+         *
+         * 一个角点在相机坐标系里是 (r_i, u_i, f_i)，它在距离 d 处的投影落在
+         * 视锥内的条件是：
+         *      |u_i| / (d - f_i) <= tanY      →  d >= f_i + |u_i| / tanY
+         * 水平方向同理。对 8 个角点取最大即可。
+         *
+         * 之前写成 max(f_i) + max(|u_i|) / tanY —— 把「最深的角」和「最偏的角」
+         * 当成同一个点，扁平模型斜着看时深度项被无谓地放大：
+         * 实测 800×90×210 的点云相机被推到 961，画面只占 55%×67%。
+         * 精确约束后距离明显收紧，留白只剩 margin。 */
+        var dist = 0;
+        for (var i = 0; i < 8; i++)
+        {
+            var dx = ((i & 1) ? bbox.max[0] : bbox.min[0]) - c[0];
+            var dy = ((i & 2) ? bbox.max[1] : bbox.min[1]) - c[1];
+            var dz = ((i & 4) ? bbox.max[2] : bbox.min[2]) - c[2];
+
+            var pr = dx * R[0] + dy * R[1] + dz * R[2];
+            var pu = dx * U[0] + dy * U[1] + dz * U[2];
+            var pf = dx * F[0] + dy * F[1] + dz * F[2];
+
+            var needV = pf + Math.abs(pu) / tanY;
+            var needH = pf + Math.abs(pr) / tanX;
+
+            if (needV > dist) { dist = needV; }
+            if (needH > dist) { dist = needH; }
+        }
+
+        /* 自校正：解析式再对，也可能因为 fov / 视口比例的细微出入差几个百分点。
+         * 这里直接按角点的实际 NDC 迭代缩放距离，把「最外那个角」钉在
+         * 1/margin 的位置 —— 无论模型形状、视角，最终占比都是稳定的。 */
+        var target = 1 / m;
+        for (var it = 0; it < 4; it++)
+        {
+            var mxN = 0;
+            for (var k = 0; k < 8; k++)
+            {
+                var ex = ((k & 1) ? bbox.max[0] : bbox.min[0]) - c[0];
+                var ey = ((k & 2) ? bbox.max[1] : bbox.min[1]) - c[1];
+                var ez = ((k & 4) ? bbox.max[2] : bbox.min[2]) - c[2];
+
+                var dep = dist - (ex * F[0] + ey * F[1] + ez * F[2]);
+                if (dep < 1e-6) { mxN = 1e9; break; }
+
+                var nx = Math.abs(ex * R[0] + ey * R[1] + ez * R[2]) / (dep * tanX);
+                var ny = Math.abs(ex * U[0] + ey * U[1] + ez * U[2]) / (dep * tanY);
+                if (nx > mxN) { mxN = nx; }
+                if (ny > mxN) { mxN = ny; }
+            }
+
+            if (!(mxN > 1e-6) || !isFinite(mxN)) { break; }
+            var scale = mxN / target;
+            if (Math.abs(scale - 1) < 0.005) { break; }
+            dist *= scale;
+        }
+
         var r = BBox.radius(bbox);
         if (!(r > 1e-6)) { r = 1; }
-        this.distance = r / Math.sin(this.fov * 0.5) * 1.25;
+        if (!(dist > r * 1e-3)) { dist = r * 2.5; }   // 退化包围盒（点/线）兜底
+
+        this.distance = dist;
         this.minDistance = r * 1e-4;
         this.maxDistance = r * 1e4;
     };

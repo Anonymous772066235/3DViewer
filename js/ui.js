@@ -2723,6 +2723,16 @@
      * 加 50ms 间隔后 40 轮约 2.6 秒，能看清数据被逐步拉近的过程。 */
     var ITER_MIN_GAP = 50;
 
+    /* 主线程路径「一轮迭代」拆成多大一片（单位：源点个数）。
+     *
+     * 实测单点约 1.4 µs（12 万点/轮 ≈ 215 ms），24000 点约 34 ms ——
+     * 正好是不掉帧的量级：一轮被拆成 5~7 片，片间让出主线程，
+     * 视角可正常拖动，而不是整轮冻结 200 ms。
+     * 累加器是同一份，**数值与一次跑完完全相同**
+     * （已验证 iters / rms / used / 最终矩阵逐位一致）。
+     * 只在没有 Worker 时（file:// 打开、线程不可用、回退路径）走这里。 */
+    var ICP_SLICE = 24000;
+
     function nextIteration(fn, gap)
     {
         /* ICP 迭代需要肉眼可见的节奏（默认 50ms 一轮），
@@ -4037,6 +4047,26 @@
         return m ? m[1] : '';
     }
 
+    /* 挂起请求：id -> reject。Worker 崩了必须把它们全部结掉，
+     * 否则 Promise 永远 pending —— 表现为「点了运行停在准备阶段、
+     * 按钮一直是终止、再点也没用」。 */
+    var icpWorkerPending = {};
+
+    function rejectAllPending(msg)
+    {
+        var keys = [];
+        for (var k in icpWorkerPending)
+        {
+            if (icpWorkerPending.hasOwnProperty(k)) { keys.push(k); }
+        }
+        for (var i = 0; i < keys.length; i++)
+        {
+            var fn = icpWorkerPending[keys[i]];
+            delete icpWorkerPending[keys[i]];
+            try { fn(new Error(msg)); } catch (e) { }
+        }
+    }
+
     function getIcpWorker()
     {
         if (icpWorkerInst || icpWorkerBroken) { return icpWorkerInst; }
@@ -4046,6 +4076,18 @@
         {
             var v = scriptVersionTag();
             icpWorkerInst = new global.Worker('js/icp_worker.js' + (v ? ('?v=' + v) : ''));
+
+            /* 脚本加载失败 / Worker 内未捕获异常。
+             * 没有这一层，importScripts 被 MIME 拒绝时是「静默失效」：
+             * 主线程照样流畅，但一个进度都不回来。 */
+            icpWorkerInst.onerror = function (e)
+            {
+                icpWorkerBroken = true;
+                icpWorkerInst = null;
+                var m = (e && e.message) ? e.message : 'Worker 加载失败';
+                rejectAllPending(m);
+                if (global.console && console.warn) { console.warn('[icp worker]', m); }
+            };
         }
         catch (e)
         {
@@ -4066,6 +4108,19 @@
 
         return new Promise(function (resolve, reject)
         {
+            var settled = false;
+            var timer = null;
+
+            function finish(fn, v)
+            {
+                if (settled) { return; }
+                settled = true;
+                delete icpWorkerPending[id];
+                if (timer) { clearTimeout(timer); timer = null; }
+                w.removeEventListener('message', onMsg);
+                fn(v);
+            }
+
             function onMsg(e)
             {
                 var m = e.data || {};
@@ -4077,13 +4132,23 @@
                     return;
                 }
 
-                w.removeEventListener('message', onMsg);
+                if (m.type === 'cancelled') { finish(reject, new Error('cancelled')); return; }
+                if (m.type === 'error') { finish(reject, new Error(m.message || 'worker error')); return; }
 
-                if (m.type === 'cancelled') { reject(new Error('cancelled')); return; }
-                if (m.type === 'error') { reject(new Error(m.message || 'worker error')); return; }
-
-                resolve(m);
+                finish(resolve, m);
             }
+
+            icpWorkerPending[id] = function (err) { finish(reject, err); };
+
+            /* 超时兜底：Worker 被系统挂起、脚本没起来时不能无限等。
+             * solve 可能跑几十秒，给 120s；其余握手类 20s。 */
+            timer = setTimeout(function ()
+            {
+                /* 超时按「线程不可用」处理：标记损坏，让上层回退主线程，
+                 * 而不是把整个配准判成失败。 */
+                icpWorkerBroken = true;
+                finish(reject, new Error('worker 超时（' + msg.cmd + '）'));
+            }, (msg.cmd === 'solve') ? 120000 : 20000);
 
             w.addEventListener('message', onMsg);
             w.postMessage(msg);
@@ -4407,11 +4472,6 @@
             return false;
         }
 
-        if (phase === 'icp')
-        {
-            if (bootMainIcp()) { return; }
-        }
-
         if (info)
         {
             info.textContent = (phase === 'coarse') ? '准备粗配准…' : '开始…';
@@ -4434,6 +4494,21 @@
         var tRun = nowMs();
         var tCoarseEnd = 0;
         var refineCount = 0;           // 已做过的「收紧容差」收尾轮数（最多 2 轮）
+
+        /* 未勾粗配准：进函数时 phase 就是 'icp'，这里直接启动求解。
+         *
+         * ⚠ 必须放在 icpRunning / icpRunSeq / refineCount 都就位之后。
+         * 曾经放在上面（第一次 `if (phase === 'icp')` 处），后果是：
+         *   1) icpRunning 还是 false —— 按钮不变「终止」，Esc 也停不掉，
+         *      用户再点一次就是第二次启动；
+         *   2) myRun 还是上一轮的值，Worker 回传的每个 step 都被
+         *      `myRun !== icpRunSeq` 挡掉 —— 整个配准静默地什么都不做。
+         * 勾了 4PCS 时 phase 先是 'coarse'，不会走到这里，
+         * 真正的入口在 stepVerify 结尾。 */
+        if (phase === 'icp')
+        {
+            if (bootMainIcp()) { return; }
+        }
 
         /* ICP 迭代走 Worker（粗配准 / 候选验证仍在主线程，它们单块已压到 75~200ms）。
          * 注意：这里**不能**提前判断 —— 勾了 4PCS 时 phase 先是 'coarse'，
@@ -4791,7 +4866,16 @@
         {
         /* 第一次进这里说明粗配准（含候选验证）已经结束 */
         if (!tCoarseEnd) { tCoarseEnd = nowMs(); }
-        var r = solver.step();
+
+        /* 每次只扫一片。partial = true 表示「这一轮还没扫完」，
+         * 不是迭代结束 —— 不更新预览、不改 iters，直接让出主线程继续。 */
+        var r = solver.step(ICP_SLICE);
+
+        if (r.partial)
+        {
+            nextIteration(tick, 0);      // 0 = 不等，尽快续下一片
+            return;
+        }
 
         /* 预览按时间节流（约 10 fps）。
          *
@@ -4974,9 +5058,27 @@
             }
         }
 
+        var workerFellBack = false;
+
         function workerFail(err)
         {
             if (myRun !== icpRunSeq) { return; }
+
+            /* Worker 挂了（脚本加载失败 / 超时）：退回主线程继续算。
+             * 用户只是慢一点，而不是「点了完全没反应」。
+             * 只在还没有任何结果时回退，避免重复烘焙。 */
+            if (icpWorkerBroken && !workerFellBack)
+            {
+                workerFellBack = true;
+                try { solver = buildMainSolver(); } catch (e3) { solver = null; }
+                if (solver)
+                {
+                    if (info) { info.textContent = '计算线程不可用，改在主线程配准…'; }
+                    setInfo('计算线程不可用，已回退到主线程配准', false, 'warn');
+                    nextIteration(tick, 0);
+                    return;
+                }
+            }
 
             clearGpuPreview(dstLay);
             if (info) { info.textContent = '配准失败：' + ((err && err.message) || err); }
