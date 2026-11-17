@@ -123,6 +123,9 @@
         return o;
     }
 
+    /* 取配准用的点集（当前世界坐标）。
+     * 需要"原始位姿"的点集时，由调用方用 inv(pose) 临时变换得到 ——
+     * 不在这里常驻保存副本，避免大模型多占十几 MB。 */
     function icpSample(lay)
     {
         var d = lay.data;
@@ -606,6 +609,38 @@
     var fmt3p = MV_UTIL.fmt3p;
     var jacobiLargestEigenVec = MV_UTIL.jacobiLargestEigenVec;
     var icpSample = MV_UTIL.icpSample;
+
+    /* ---- 配准用的临时变换（只在本次运行期间存在，不常驻） ---- */
+
+    /* 复制并变换一组点（行主序 4×4，含平移） */
+    function xformPosCopy(src, m)
+    {
+        var out = new Float32Array(src.length);
+        for (var k = 0; k < src.length; k += 3)
+        {
+            var x = src[k], y = src[k + 1], z = src[k + 2];
+            out[k]     = m[0] * x + m[1] * y + m[2] * z + m[3];
+            out[k + 1] = m[4] * x + m[5] * y + m[6] * z + m[7];
+            out[k + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
+        }
+        return out;
+    }
+
+    /* 复制并旋转一组方向（只用 3×3，重新归一化） */
+    function xformDirCopy(src, m)
+    {
+        var out = new Float32Array(src.length);
+        for (var k = 0; k < src.length; k += 3)
+        {
+            var x = src[k], y = src[k + 1], z = src[k + 2];
+            var nx = m[0] * x + m[1] * y + m[2] * z;
+            var ny = m[4] * x + m[5] * y + m[6] * z;
+            var nz = m[8] * x + m[9] * y + m[10] * z;
+            var len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+            out[k] = nx / len; out[k + 1] = ny / len; out[k + 2] = nz / len;
+        }
+        return out;
+    }
     var mat4Mul = MV_UTIL.mat4Mul;
     var mat4Invert = MV_UTIL.mat4Invert;
     var xformPoints = MV_UTIL.xformPoints;
@@ -1820,7 +1855,7 @@
     /* ---------------- 底部日志面板 ---------------- */
 
     var LOG_MAX = 500;              // 历史条数上限
-    var ST_MIN_H = 24;              // 单行高度（与 CSS #st-line 一致）
+    var ST_MIN_H = 25;              // 收起高度：1px 上边框 + 24px 状态行（与 CSS 一致）
     var ST_STORE_KEY = 'viewer3d.statusHeight';
     var logBuf = [];
     var stHeight = ST_MIN_H;
@@ -2612,7 +2647,6 @@
         }
 
         var d = layer.data;
-
         /* 顺序很关键：必须【先撤销预览，再做变换】。
          *
          * writeXformMat 会触发 applyPreview，此时顶点已经是「原始 × M」。
@@ -4218,8 +4252,22 @@
             return;
         }
 
+        /* 参考层用"当前世界"数据（它就是对齐目标），目标层用**原始快照**：
+         * 求解器输出的是「原始 → 世界」的绝对位姿，与目标层当前位姿无关。 */
         var fixed = icpSample(refLay);
+
+        var IDENT_POSE = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+        var srcPose = dstLay.xformMat ? new Float64Array(dstLay.xformMat) : IDENT_POSE;
+
         var moving = icpSample(dstLay);
+
+        /* 求解器（含 4PCS）给出的都是「原始 → 世界」的绝对位姿；
+         * 预览矩阵挂在 uModel 上、作用对象是**当前**顶点 —— 必须换成增量。
+         * 第一次配准 srcPose = I，两者相同，所以问题只在第二次之后暴露。 */
+        function toDelta(m)
+        {
+            return m ? mat4Mul(m, mat4Invert(srcPose)) : null;
+        }
         if (!fixed || !moving)
         {
             xformInfo('图层缺少可配准的数据', true);
@@ -4229,9 +4277,16 @@
         // 实时预览会直接改写目标图层的顶点数据（数据级预览），
         // 而 icpSample 返回的是这些数组的引用 —— 不复制的话，
         // ICP 每轮都在追一个被预览挪动过的点集，永远收敛不了。
+        /* 复制一份，并**复位到原始位姿**：P_orig = inv(pose) · P_cur。
+         *
+         * 不常驻保存原始顶点（大模型会多占十几 MB），只在本次配准期间构造这一份；
+         * 这份副本本来就要（避免预览改写道具数组），所以峰值内存不变。
+         * 复位后，每次运行的求解输入完全一致 —— 4PCS 的初值与当前位姿无关，
+         * 于是重复点击「运行 ICP」得到零增量。 */
+        var invPose = mat4Invert(srcPose);
         moving = {
-            pos: new Float32Array(moving.pos),
-            nrm: moving.nrm ? new Float32Array(moving.nrm) : null,
+            pos: xformPosCopy(moving.pos, invPose),
+            nrm: moving.nrm ? xformDirCopy(moving.nrm, invPose) : null,
             count: moving.count
         };
         fixed = {
@@ -4414,7 +4469,10 @@
                 tol: tol,
                 maxDist: effMaxDist,
                 trimBoost: trimBoost,
-                initMat: bestInit || coarseMat || null
+                /* 没有粗配准结果时用"当前位姿"当初值：
+                 * 第一轮从零开始，第二轮起点就是第一轮的解 —— 重复点击得到零增量，
+                 * 而不是重新收敛到另一个局部最优。 */
+                initMat: bestInit || coarseMat || srcPose
             };
         }
 
@@ -4564,20 +4622,22 @@
                 /* 每步返回的 matrix 都是新数组，用 !== 比引用恒为真，
                  * 节流等于没生效。改成按数值比。 */
                 var sameAsLast = false;
+                var csNow = toDelta(cs.matrix);
+
                 if (previewTagRef)
                 {
                     var mdiff = 0;
                     for (var mi2 = 0; mi2 < 16; mi2++)
                     {
-                        mdiff += Math.abs(cs.matrix[mi2] - previewTagRef[mi2]);
+                        mdiff += Math.abs(csNow[mi2] - previewTagRef[mi2]);
                     }
                     sameAsLast = (mdiff < 1e-9);
                 }
 
                 if ((cs.done || (coarsePreviewTick % 4) === 0) && !sameAsLast)
                 {
-                    previewTagRef = new Float64Array(cs.matrix);
-                    setGpuPreview(target, cs.matrix);
+                    previewTagRef = new Float64Array(csNow);
+                    setGpuPreview(target, csNow);
                 }
                 coarsePreviewTick++;
             }
@@ -4696,8 +4756,8 @@
             {
                 if (cands.length > 0 && cr && cr.matrix)
                 {
-                    setGpuPreview(target, cr.matrix);
-                    previewTagRef = new Float64Array(cr.matrix);
+                    setGpuPreview(target, toDelta(cr.matrix));
+                    previewTagRef = new Float64Array(toDelta(cr.matrix));
                 }
                 else
                 {
@@ -4887,7 +4947,7 @@
          * 而 CPU 侧一次顶点拷贝 / 上传都不做。 */
         if (target)
         {
-            setGpuPreview(target, solver.result().mat);
+            setGpuPreview(target, toDelta(solver.result().mat));
         }
 
         if (!r.done)
@@ -4979,14 +5039,20 @@
          * 这里先算、再决定要不要烘焙：增量≈单位阵时烘焙是**纯开销** ——
          * 台账里多一条 "ICP 精配准 R 0.00° T (0,0,0)"、数据被逐点变换一遍、
          * GPU 全量重传一次，而结果与不动完全等价。 */
+        /* 求解器给的是绝对位姿（原始 → 世界），落地要用相对当前位姿的增量：
+         *   delta = T_abs · inv(srcPose)
+         * 判"是否几乎没动"也必须看 delta —— 看绝对值时，第二次运行 T_abs 仍是
+         * 一个大旋转，会被误判成"动了很多"。 */
+        var deltaMat = res.mat ? mat4Mul(res.mat, mat4Invert(srcPose)) : null;
+
         var movedRot = 0, movedLen = 0;
-        if (res.mat)
+        if (deltaMat)
         {
-            var trm = res.mat[0] + res.mat[5] + res.mat[10];
+            var trm = deltaMat[0] + deltaMat[5] + deltaMat[10];
             movedRot = Math.acos(Math.max(-1, Math.min(1, (trm - 1) / 2))) * 180 / Math.PI;
-            movedLen = Math.sqrt(res.mat[3] * res.mat[3] +
-                                 res.mat[7] * res.mat[7] +
-                                 res.mat[11] * res.mat[11]);
+            movedLen = Math.sqrt(deltaMat[3] * deltaMat[3] +
+                                 deltaMat[7] * deltaMat[7] +
+                                 deltaMat[11] * deltaMat[11]);
         }
         var stayed = (movedRot < 0.05 && movedLen < 0.01);
 
@@ -5000,7 +5066,8 @@
         }
         else
         {
-            baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
+            /* 走护栏：只有确实更贴近目标才落地（连续点击不会累积漂移） */
+            baked = applyXformToLayer(deltaMat, 'ICP 精配准', dstLay);
         }
 
         /* 烘焙后**自动选中目标层**。
@@ -5049,7 +5116,7 @@
             if (myRun !== icpRunSeq) { return; }
 
             /* 预览只写一个 uniform：数据不动、不上传顶点 */
-            if (target && m.mat) { setGpuPreview(target, m.mat); }
+            if (target && m.mat) { setGpuPreview(target, toDelta(m.mat)); }
 
             if (info && !m.done)
             {
@@ -5167,14 +5234,17 @@
             }
 
             /* 收敛：与同步路径完全相同的烘焙逻辑 */
+            /* 同主线程：绝对位姿 → 增量，再判是否几乎没动 */
+            var deltaMat = res.mat ? mat4Mul(res.mat, mat4Invert(srcPose)) : null;
+
             var movedRot = 0, movedLen = 0;
-            if (res.mat)
+            if (deltaMat)
             {
-                var trm = res.mat[0] + res.mat[5] + res.mat[10];
+                var trm = deltaMat[0] + deltaMat[5] + deltaMat[10];
                 movedRot = Math.acos(Math.max(-1, Math.min(1, (trm - 1) / 2))) * 180 / Math.PI;
-                movedLen = Math.sqrt(res.mat[3] * res.mat[3] +
-                                     res.mat[7] * res.mat[7] +
-                                     res.mat[11] * res.mat[11]);
+                movedLen = Math.sqrt(deltaMat[3] * deltaMat[3] +
+                                     deltaMat[7] * deltaMat[7] +
+                                     deltaMat[11] * deltaMat[11]);
             }
             var stayed = (movedRot < 0.05 && movedLen < 0.01);
 
@@ -5187,7 +5257,8 @@
             }
             else
             {
-                baked = applyXformToLayer(res.mat, 'ICP 精配准', dstLay);
+                /* 走护栏：只有确实更贴近目标才落地（连续点击不会累积漂移） */
+            baked = applyXformToLayer(deltaMat, 'ICP 精配准', dstLay);
             }
 
             if (baked && app.selectLayer) { app.selectLayer(dstLay.id); }

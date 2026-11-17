@@ -398,11 +398,14 @@
         var maxTri = opts.maxTriangles || DEFAULT_MAX_TRIANGLES;
         var verts = new F32Accum(1 << 20);
         var faces = new I32Accum(1 << 20);
-        var numBuf = new Float64Array(4);
+        /* 8 个槽：v 行可能是 x y z r g b（带顶点色的 OBJ） */
+        var numBuf = new Float64Array(8);
         var idxBuf = new Int32Array(64);
         var triCount = 0;
         var srcTri = 0;
         var vcount = 0;
+        /* 顶点色：懒分配，只有真的出现 6 列 v 行时才占内存 */
+        var vcolors = null;
         var full = false;
         var bbox = global.MV.math.BBox.empty();
 
@@ -431,6 +434,23 @@
                         var x = numBuf[0], y = numBuf[1], z = numBuf[2];
                         verts.push3(x, y, z);
                         vcount++;
+
+                        /* v x y z r g b —— 有的导出器把顶点色写在坐标后面。
+                         * 混合出现时补白，保证颜色索引与顶点索引一一对应。 */
+                        if (n >= 6)
+                        {
+                            if (!vcolors) { vcolors = new F32Accum(1 << 20); }
+                            var cr = numBuf[3], cg = numBuf[4], cb = numBuf[5];
+                            if (cr > 1.0 || cg > 1.0 || cb > 1.0)
+                            {
+                                cr /= 255; cg /= 255; cb /= 255;
+                            }
+                            vcolors.push3(cr, cg, cb);
+                        }
+                        else if (vcolors)
+                        {
+                            vcolors.push3(1, 1, 1);
+                        }
                         if (x < bbox.min[0]) { bbox.min[0] = x; }
                         if (y < bbox.min[1]) { bbox.min[1] = y; }
                         if (z < bbox.min[2]) { bbox.min[2] = z; }
@@ -473,17 +493,45 @@
 
         var vdata = verts.data;
         var fdata = faces.data;
+
+        /* 只有顶点、没有面（扫描点云常这么导出）→ 按点云返回。
+         * 以前会返回 0 个三角形的网格，被下游判成"文件中没有可显示的数据"。 */
+        if (triCount === 0 && vcount > 0)
+        {
+            return {
+                kind: 'points',
+                positions: verts.result(),
+                count: vcount,
+                colors: vcolors ? vcolors.result() : null,
+                tags: null,
+                bbox: bbox,
+                format: 'OBJ',
+                truncated: false,
+                totalSource: vcount,
+                note: ''
+            };
+        }
+
         var pos = new Float32Array(triCount * 9);
+        var cdata = vcolors ? vcolors.data : null;
+        var cols = vcolors ? new Float32Array(triCount * 9) : null;
         var w = 0;
         for (var i = 0; i < triCount * 3; i++)
         {
             var vi = fdata[i] * 3;
-            pos[w++] = vdata[vi];
-            pos[w++] = vdata[vi + 1];
-            pos[w++] = vdata[vi + 2];
+            pos[w] = vdata[vi];
+            pos[w + 1] = vdata[vi + 1];
+            pos[w + 2] = vdata[vi + 2];
+            if (cols)
+            {
+                cols[w] = cdata[vi];
+                cols[w + 1] = cdata[vi + 1];
+                cols[w + 2] = cdata[vi + 2];
+            }
+            w += 3;
         }
 
-        return {
+        var objRes = {
             kind: 'mesh',
             positions: pos,
             count: triCount,
@@ -493,6 +541,8 @@
             totalSource: srcTri,
             note: full ? ('仅载入前 ' + triCount + ' 个三角形') : ''
         };
+        if (cols) { objRes.colors = cols; }
+        return objRes;
     }
 
     function scanFace(line, vcount, out)
@@ -768,8 +818,15 @@
         }
         var listProp = idxList.length > 0 ? idxList[0] : null;
 
-        var maxFace = Math.min(fElem.count, Math.ceil(maxTri / 2) + fElem.count);
-        var outPos = new Float32Array(Math.min(fElem.count * 9, maxTri * 9));
+        /* 三角形数上限按「索引个数」估，而不是「面数 × 9」——
+         * 一个四边形面会扇形拆成 2 个三角形、五边形 3 个……
+         * 早先按面数分配，四边形只会写出第 1 个三角形，其余被 stop 截断。
+         * 索引数 = 面块字节数 / 单索引字节数（fan 的三角形数恒小于索引数）。 */
+        var idxSize = PLY_TYPES[listProp ? listProp.type : 'int'] || 4;
+        var faceBytes = Math.max(0, file.size - dataStart - totalV * stride);
+        var idxCount = Math.floor(faceBytes / idxSize);
+        var capTri = Math.max(1, Math.min(maxTri, idxCount));
+        var outPos = new Float32Array(capTri * 9);
         var w = 0;
         var tri = 0;
         var stop = false;
@@ -821,7 +878,7 @@
             bbox: bbox,
             format: 'PLY(binary)',
             truncated: stop,
-            totalSource: fElem.count,
+            totalSource: fElem ? fElem.count : totalV,
             note: stop ? ('仅载入前 ' + tri + ' 个三角形') : ''
         };
     }
@@ -834,6 +891,17 @@
         var bbox = global.MV.math.BBox.empty();
         var vnames = vElem.props.map(function (p) { return p.name; });
         var ix = vnames.indexOf('x'), iy = vnames.indexOf('y'), iz = vnames.indexOf('z');
+
+        /* 顶点色：规范里叫 red/green/blue；有些导出器写成 r/g/b，一并认。
+         * 点云 PLY 绝大多数带颜色，不解析就等于把颜色丢了。 */
+        var ir = vnames.indexOf('red'), ig = vnames.indexOf('green'), ib = vnames.indexOf('blue');
+        if (ir < 0 || ig < 0 || ib < 0)
+        {
+            ir = vnames.indexOf('r'); ig = vnames.indexOf('g'); ib = vnames.indexOf('b');
+        }
+        var hasC = (ir >= 0 && ig >= 0 && ib >= 0);
+        var colors = hasC ? new Float32Array(vElem.count * 3) : null;
+
         var seen = 0;
         var inFace = 0;
         var tri = 0;
@@ -864,6 +932,18 @@
                         if (x > bbox.max[0]) { bbox.max[0] = x; }
                         if (y > bbox.max[1]) { bbox.max[1] = y; }
                         if (z > bbox.max[2]) { bbox.max[2] = z; }
+
+                        if (hasC && n > ir && n > ig && n > ib)
+                        {
+                            var cr = numBuf[ir], cg = numBuf[ig], cb = numBuf[ib];
+                            if (cr > 1.0 || cg > 1.0 || cb > 1.0)
+                            {
+                                cr /= 255; cg /= 255; cb /= 255;
+                            }
+                            colors[seen * 3] = cr;
+                            colors[seen * 3 + 1] = cg;
+                            colors[seen * 3 + 2] = cb;
+                        }
                     }
                     seen++;
                 }
@@ -873,7 +953,12 @@
                     if (m >= 4)
                     {
                         var c = numBuf[0];
-                        for (var k = 1; k + 1 <= c; k++)
+
+                        /* 扇形三角化：顶点索引在 numBuf[1..c]，第一个三角形是
+                         * (numBuf[1], numBuf[2], numBuf[3])，所以 k 必须从 2 起。
+                         * k=1 会得到 (v0, v0, v1) 的退化面 —— 一个三角面被读成两个，
+                         * 四边形被读成三个，三角形总数凭空翻倍。 */
+                        for (var k = 2; k + 1 <= c; k++)
                         {
                             if (tri >= maxTri)
                             {
@@ -898,6 +983,25 @@
             }
         }, dataStart);
 
+        /* face 元素在 PLY 里是**可选**的：扫描仪导出的点云通常只有 vertex。
+         * 没有 face（或一个面片都没读到）就按点云返回，不能当成"0 个三角形的网格"。 */
+        if (!fElem || fElem.count === 0 || tri === 0)
+        {
+            var vn = Math.max(0, Math.min(seen, vElem.count));
+            return {
+                kind: 'points',
+                positions: (vn === vElem.count) ? verts : verts.subarray(0, vn * 3),
+                count: vn,
+                colors: colors ? ((vn === vElem.count) ? colors : colors.subarray(0, vn * 3)) : null,
+                tags: null,
+                bbox: bbox,
+                format: 'PLY(ascii)',
+                truncated: false,
+                totalSource: vElem.count,
+                note: ''
+            };
+        }
+
         return {
             kind: 'mesh',
             positions: out.result(),
@@ -905,7 +1009,7 @@
             bbox: bbox,
             format: 'PLY(ascii)',
             truncated: full,
-            totalSource: inFace,
+            totalSource: fElem ? fElem.count : 0,
             note: full ? ('仅载入前 ' + tri + ' 个三角形') : ''
         };
     }
@@ -1443,7 +1547,27 @@
             }
         }
 
-        if (!tri) { throw new Error('OFF 文件里没有面片'); }
+        /* nf = 0（只有顶点）是合法的"点云 OFF"，不是错误。
+         * COFF 的顶点色一并带上，此时不用展开成角点色。 */
+        if (!tri)
+        {
+            if (nv > 0)
+            {
+                return {
+                    kind: 'points',
+                    positions: pos,
+                    count: nv,
+                    colors: col,
+                    tags: null,
+                    bbox: bboxAccum(pos, nv),
+                    format: withColor ? 'COFF' : 'OFF',
+                    truncated: false,
+                    totalSource: nv,
+                    note: ''
+                };
+            }
+            throw new Error('OFF 文件里没有面片');
+        }
 
         var outPos = posAcc.result();
         var res = {
@@ -1770,6 +1894,12 @@
         var full = false;
         var hasColor = false;
 
+        /* 点云累加器：glTF 的 primitive.mode = 0（POINTS）是合法的点云。
+         * 以前不看 mode，直接把每 3 个顶点拼成三角形，得到一堆垃圾几何。 */
+        var ptAcc = null;
+        var ptColAcc = null;
+        var pts = 0;
+
         function pushPrimitive(prim, world)
         {
             if (full) { return; }
@@ -1786,34 +1916,91 @@
             var vertCount = P.length / 3;
             var iCount = idx ? idx.length : vertCount;
 
+            /* 缺省 4 = TRIANGLES */
+            var mode = (prim.mode === undefined) ? 4 : (prim.mode | 0);
+
+            function vidx(k)
+            {
+                return idx ? (idx[k] | 0) : k;
+            }
+
+            function emit(vi, outP, outC)
+            {
+                if (vi < 0 || vi >= vertCount) { vi = 0; }
+
+                var x = P[vi * 3], y = P[vi * 3 + 1], z = P[vi * 3 + 2];
+
+                /* 列主序矩阵变换 */
+                var wx = world[0] * x + world[4] * y + world[8] * z + world[12];
+                var wy = world[1] * x + world[5] * y + world[9] * z + world[13];
+                var wz = world[2] * x + world[6] * y + world[10] * z + world[14];
+
+                /* glTF 是 Y 轴向上，本工具按 Z 轴向上显示 */
+                outP.push3(wx, -wz, wy);
+
+                if (outC)
+                {
+                    if (C) { outC.push3(C[vi * 3] || 0, C[vi * 3 + 1] || 0, C[vi * 3 + 2] || 0); }
+                    else { outC.push3(1, 1, 1); }
+                }
+            }
+
+            /* ① POINTS：每个顶点就是一个点 */
+            if (mode === 0)
+            {
+                if (!ptAcc)
+                {
+                    ptAcc = new F32Accum(4096);
+                    if (C) { ptColAcc = new F32Accum(4096); }
+                }
+                for (var pi = 0; pi < iCount; pi++)
+                {
+                    emit(vidx(pi), ptAcc, ptColAcc);
+                    pts++;
+                }
+                return;
+            }
+
+            /* ② LINES（1/2/3）：既不是面也不是点云，跳过 */
+            if (mode >= 1 && mode <= 3) { return; }
+
             if (C && !colAcc) { colAcc = new F32Accum(4096); hasColor = true; }
+
+            /* ③ TRIANGLES(4) / TRIANGLE_STRIP(5) / TRIANGLE_FAN(6) */
+            function emitTri(a, b, c)
+            {
+                if (tri >= maxTri) { full = true; return false; }
+                emit(vidx(a), posAcc, colAcc);
+                emit(vidx(b), posAcc, colAcc);
+                emit(vidx(c), posAcc, colAcc);
+                tri++;
+                return true;
+            }
+
+            if (mode === 5)
+            {
+                /* strip：奇数面带一次绕序翻转，否则法向会交替反向 */
+                for (var si = 0; si + 2 < iCount; si++)
+                {
+                    var okS = (si & 1) ? emitTri(si + 1, si, si + 2) : emitTri(si, si + 1, si + 2);
+                    if (!okS) { return; }
+                }
+                return;
+            }
+
+            if (mode === 6)
+            {
+                /* fan：首个顶点与相邻两点成面 */
+                for (var fi = 1; fi + 1 < iCount; fi++)
+                {
+                    if (!emitTri(0, fi, fi + 1)) { return; }
+                }
+                return;
+            }
 
             for (var i = 0; i + 2 < iCount; i += 3)
             {
-                if (tri >= maxTri) { full = true; return; }
-
-                for (var k = 0; k < 3; k++)
-                {
-                    var vi = idx ? (idx[i + k] | 0) : (i + k);
-                    if (vi < 0 || vi >= vertCount) { vi = 0; }
-
-                    var x = P[vi * 3], y = P[vi * 3 + 1], z = P[vi * 3 + 2];
-
-                    /* 列主序矩阵变换 */
-                    var wx = world[0] * x + world[4] * y + world[8] * z + world[12];
-                    var wy = world[1] * x + world[5] * y + world[9] * z + world[13];
-                    var wz = world[2] * x + world[6] * y + world[10] * z + world[14];
-
-                    /* glTF 是 Y 轴向上，本工具按 Z 轴向上显示 */
-                    posAcc.push3(wx, -wz, wy);
-
-                    if (colAcc)
-                    {
-                        if (C) { colAcc.push3(C[vi * 3] || 0, C[vi * 3 + 1] || 0, C[vi * 3 + 2] || 0); }
-                        else { colAcc.push3(1, 1, 1); }
-                    }
-                }
-                tri++;
+                if (!emitTri(i, i + 1, i + 2)) { return; }
             }
         }
 
@@ -1858,7 +2045,27 @@
             }
         }
 
-        if (!tri) { throw new Error('glTF 里没有可显示的三角面'); }
+        /* 全是点云（mode 0）→ 返回点图层；三角面优先 */
+        if (!tri)
+        {
+            if (pts > 0 && ptAcc)
+            {
+                var ppos = ptAcc.result();
+                return {
+                    kind: 'points',
+                    positions: ppos,
+                    count: pts,
+                    colors: ptColAcc ? ptColAcc.result() : null,
+                    tags: null,
+                    bbox: bboxAccum(ppos, ppos.length / 3),
+                    format: isGLB ? 'GLB' : 'glTF',
+                    truncated: false,
+                    totalSource: pts,
+                    note: ''
+                };
+            }
+            throw new Error('glTF 里没有可显示的三角面');
+        }
 
         var pos = posAcc.result();
         var res = {

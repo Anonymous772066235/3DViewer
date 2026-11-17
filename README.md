@@ -23,11 +23,11 @@
 | 点云 | 点云 | 两次扫描的形变 |
 | 任意 | 任意 | 两个工件的并列查看 |
 
-两侧视口可以**独立相机**（各转各的），也可以**同步相机**（严格同角度），还可以把一侧作为半透明叠加层投到另一侧。
+两侧视口可以**独立相机**（各转各的），也可以**同步相机**（严格同角度），还可以把一侧作为半透明叠加层投到另一侧。右下角有随画面缩放的比例尺，左下角在视口变化时短暂显示该窗的像素尺寸。
 
 ### 两种数据对不上时：数据对齐
 
-![数据对齐面板：以右侧优化结果为对齐目标](docs/images/data-align.png)
+![数据对齐面板：以右侧优化结果为对齐目标](docs/images/data-align.gif)
 
 扫描件与 CAD 模型往往不在同一姿态。侧栏「数据对齐」提供三种手段：
 
@@ -305,11 +305,13 @@ curl http://127.0.0.1:8765/health
 3DViewer/
 ├── index.html            单页入口
 ├── serve.bat             一键启动（静态服务 + 优化桥接）
-├── check.ps1             冒烟测试（7 个场景）
+├── README.md / CHANGELOG.md / LICENSE
+├── assets/
+│   └── icons/            运行时图标（favicon + 顶栏标记）
 ├── css/style.css         深浅两套主题变量
 ├── js/
 │   ├── core.js           数学（向量 / 矩阵 / 四元数 / 包围盒）+ KD 树
-│   ├── io.js             STL / OBJ / PLY / 点云解析、内存预检
+│   ├── io.js             STL / OBJ / PLY / OFF / glTF / 点云解析、内存预检
 │   ├── algo.js           三角求交、拾取、裁剪、分块索引 + ICP + Super4PCS
 │   ├── render.js         WebGL2 渲染、分块、视角器
 │   ├── ui.js             场景树、属性面板、数据对齐面板、日志、拖拽 + 纯工具函数
@@ -319,9 +321,10 @@ curl http://127.0.0.1:8765/health
 │   ├── serve.py          静态服务 + /health /optimize
 │   ├── bridge.py         调用本地 exe 的桥接
 │   └── start_bridge.bat  独立桥接（file:// 打开时用）
-└── docs/
-    ├── GUIDE.md          完整开发文档
-    └── images/           README 配图
+├── docs/                 纯文档，可整目录删除而不影响运行
+│   ├── GUIDE.md          完整开发文档
+│   └── images/           README 配图
+└── data/                 本地样例数据（已忽略，不入库）
 ```
 
 **分层约定**：`core` / `io` / `algo` 不接触 DOM 和 WebGL，`render` 只管绘制，`ui` 只管界面，`app` 负责编排。下层通过 hooks 向上层通报，不反向依赖。

@@ -164,9 +164,12 @@
         '    else if (uColorMode == 2)',
         '    {',
         '        // 按法向：法向编码为 RGB，同时按"法向 vs 视线"做朝向衰减，背向视线的点为黑',
+        '        // 法向与位置都在模型空间：必须乘 uModel（配准预览正是挂在 uModel 上），',
+        '        // 否则预览旋转时颜色不跟着变，看起来像"光照僵在原地"。',
+        '        mat4 vp = uView * uModel;',
         '        vec3 n = normalize(aAux);',
-        '        vec3 nv = normalize(mat3(uView) * n);',
-        '        float facing = dot(nv, normalize(-(uView * vec4(aPos, 1.0)).xyz));',
+        '        vec3 nv = normalize(mat3(vp) * n);',
+        '        float facing = dot(nv, normalize(-(vp * vec4(aPos, 1.0)).xyz));',
         '        c = (n * 0.5 + 0.5) * (0.05 + 0.95 * max(facing, 0.0));',
         '    }',
         '    else if (uColorMode == 3)',
@@ -250,6 +253,38 @@
         'void main()',
         '{',
         '    fragColor = uColor;',
+        '}'
+    ].join('\n');
+
+    /* 法向：颜色来自顶点属性，按方向着色（X→红 / Y→绿 / Z→蓝，取分量绝对值）。
+     * 与 MeshLab / Blender 的「法向可视化」一致 —— 颜色由数据决定，
+     * 既不参与主题配色，也不需要"固定高亮色"，且任何面片上都醒目。 */
+    var NORMAL_VS = [
+        '#version 300 es',
+        'precision highp float;',
+        'layout(location = 0) in vec3 aPos;',
+        'layout(location = 1) in vec3 aCol;',
+        'uniform mat4 uMVP;',
+        'uniform mat4 uModel;',
+        'uniform float uDepthBias;',
+        'out vec3 vCol;',
+        'void main()',
+        '{',
+        '    vCol = aCol;',
+        '    gl_Position = uMVP * uModel * vec4(aPos, 1.0);',
+        '    gl_Position.z -= uDepthBias * gl_Position.w;',
+        '}'
+    ].join('\n');
+
+    var NORMAL_FS = [
+        '#version 300 es',
+        'precision highp float;',
+        'in vec3 vCol;',
+        'uniform float uAlpha;',
+        'out vec4 fragColor;',
+        'void main()',
+        '{',
+        '    fragColor = vec4(vCol, uAlpha);',
         '}'
     ].join('\n');
 
@@ -671,10 +706,12 @@
         var meshP = program(gl, MESH_VS, MESH_FS);
         var pointP = program(gl, POINT_VS, POINT_FS);
         var lineP = program(gl, LINE_VS, LINE_FS);
+        var normalP = program(gl, NORMAL_VS, NORMAL_FS);
 
         this.meshP = meshP;
         this.pointP = pointP;
         this.lineP = lineP;
+        this.normalP = normalP;
 
         this.meshA = { pos: gl.getAttribLocation(meshP, 'aPos') };
         this.pointA = {
@@ -693,6 +730,7 @@
             'uColor', 'uZMin', 'uZMax', 'uSFMin', 'uSFMax', 'uSCMin', 'uSCMax', 'uOutMode',
                             'uRamp', 'uAlpha', 'uRound']);
         this.lineU = uniforms(gl, lineP, ['uMVP', 'uModel', 'uColor', 'uDepthBias']);
+        this.normalU = uniforms(gl, normalP, ['uMVP', 'uModel', 'uDepthBias', 'uAlpha']);
 
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
@@ -1060,7 +1098,8 @@
         var maxFaces = Number.POSITIVE_INFINITY;
         var stride = Math.max(1, Math.ceil(tri / maxFaces));
         var n = Math.floor((tri + stride - 1) / stride);
-        var out = new Float32Array(n * 6);
+        /* 每个法向 = 2 个顶点 × 6 个 float（xyz + rgb） */
+        var out = new Float32Array(n * 12);
 
         // 法向长度按平均边长缩放，使长度与面尺寸相关
         var probe = Math.max(1, Math.floor(tri / 512));
@@ -1114,12 +1153,23 @@
             var cy = (y0 + y1 + y2) / 3;
             var cz = (z0 + z1 + z2) / 3;
 
+            /* 法向色 = 法线贴图的编码方式：rgb = n * 0.5 + 0.5。
+             * 带符号，所以 +Z 与 -Z 是两种颜色（+Z 偏浅蓝、-Z 偏暗蓝），
+             * 一眼就能看出朝向翻转 —— 这也是各家软件显示「网格法向」的通用配色。 */
+            var nr = nx * 0.5 + 0.5, ng = ny * 0.5 + 0.5, nb = nz * 0.5 + 0.5;
+
             out[w++] = cx;
             out[w++] = cy;
             out[w++] = cz;
+            out[w++] = nr;
+            out[w++] = ng;
+            out[w++] = nb;
             out[w++] = cx + nx * len;
             out[w++] = cy + ny * len;
             out[w++] = cz + nz * len;
+            out[w++] = nr;
+            out[w++] = ng;
+            out[w++] = nb;
         }
 
         var vao = gl.createVertexArray();
@@ -1127,13 +1177,17 @@
         var buf = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, buf);
         gl.bufferData(gl.ARRAY_BUFFER, out.subarray(0, w), gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(this.lineA.pos);
-        gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
+        /* 交错布局：xyz(12B) + rgb(12B)，与 NORMAL_VS 的 location 0/1 对应 */
+        var strideN = 6 * 4;
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, strideN, 0);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, strideN, 12);
         gl.bindVertexArray(null);
 
         g.normalVao = vao;
         g.normalBuffer = buf;
-        g.normalCount = Math.floor(w / 6);
+        g.normalCount = Math.floor(w / 12);
         g.normalKey = key;
     };
 
@@ -1280,6 +1334,15 @@
             // factor 保持 0：斜率项在倾斜面上可能为负，会把面片反向推近而盖住线
             gl.enable(gl.POLYGON_OFFSET_FILL);
             gl.polygonOffset(1.5, 2.0);
+        }
+
+        /* 开线框时把面片压暗一档（shaded with edges 的常规做法）。
+         * 线框是固定的高亮白，面片不压暗的话白线压在亮蓝 / 亮橙面上会糊；
+         * 压暗到 55%：荧光青线要"跳出来"，靠的就是面片够暗。
+         * 这也是 CAD 里 frame/edges 模式的常见观感（暗面 + 亮线）。 */
+        if (layer.showWire)
+        {
+            color = [color[0] * 0.55, color[1] * 0.55, color[2] * 0.55, color[3]];
         }
 
         gl.useProgram(this.meshP);
@@ -1930,7 +1993,10 @@
         gl.uniformMatrix4fv(this.pointU.uModel, false, this.modelOf(layer));
         var vc = layer.vertColorRgb || [0.95, 0.95, 0.98];
         /* 点径上限：放到 24px 时 10 万个点就是几千万片元，纯 overdraw */
-        var vptPx = (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale;
+        /* 顶点标记默认比点云大 1.5px：同时打开面片/线框/顶点/边界时，
+         * 3px 的点被线框和法向一挤就看不见了。上限仍受 VERT_MAX_PX 约束。 */
+        var vptPx = (Math.max(4, (layer.pointSize || 3) + 1.5))
+            * (ctx.dpr || 1) * ctx.settings.pointScale;
         gl.uniform1f(this.pointU.uPointSize, Math.min(vptPx, VERT_MAX_PX * (ctx.dpr || 1)));
         /* 预览态（配准过程中 layer.previewMat 存在）必须往前顶一点点。
          *
@@ -2065,12 +2131,13 @@
         {
             return;
         }
-        gl.useProgram(this.lineP);
-        gl.uniformMatrix4fv(this.lineU.uMVP, false, mvp);
-        gl.uniformMatrix4fv(this.lineU.uModel, false, this.modelOf(layer));
-        gl.uniform1f(this.lineU.uDepthBias, 0.00001);
-        // 法向固定用青色，与任意图层颜色区分
-        gl.uniform4fv(this.lineU.uColor, [0.55, 0.93, 1.0, alpha]);
+        /* 法向走独立程序：颜色来自顶点属性（X→红 / Y→绿 / Z→蓝）。
+         * 这样既不需要固定配色，也不会在某个面片色上消失。 */
+        gl.useProgram(this.normalP);
+        gl.uniformMatrix4fv(this.normalU.uMVP, false, mvp);
+        gl.uniformMatrix4fv(this.normalU.uModel, false, this.modelOf(layer));
+        gl.uniform1f(this.normalU.uDepthBias, 0.00001);
+        gl.uniform1f(this.normalU.uAlpha, alpha);
         gl.bindVertexArray(g.normalVao);
         gl.drawArrays(gl.LINES, 0, g.normalCount * 2);
         gl.bindVertexArray(null);

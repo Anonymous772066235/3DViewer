@@ -70,115 +70,59 @@
         return global.MV.util.rgbToHex(out);
     }
 
-    /* 相对亮度（sRGB 近似权重），用来判断「面片算亮还是算暗」 */
-    function relLum(hex)
-    {
-        var c = global.MV.util.hexToRgb(hex);
-        if (!c) { return 0.5; }
-        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    }
-
-    function rgb2hsl(r, g, b)
-    {
-        var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-        var l = (mx + mn) / 2, h = 0, sat = 0, d = mx - mn;
-
-        if (d > 1e-9)
-        {
-            sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
-            if (mx === r) { h = (g - b) / d + (g < b ? 6 : 0); }
-            else if (mx === g) { h = (b - r) / d + 2; }
-            else { h = (r - g) / d + 4; }
-            h /= 6;
-        }
-        return [h, sat, l];
-    }
-
-    function hsl2hex(h, s, l)
-    {
-        h = ((h % 1) + 1) % 1;
-        s = Math.max(0, Math.min(1, s));
-        l = Math.max(0, Math.min(1, l));
-
-        function hue2rgb(p, q, t)
-        {
-            if (t < 0) { t += 1; }
-            if (t > 1) { t -= 1; }
-            if (t < 1 / 6) { return p + (q - p) * 6 * t; }
-            if (t < 1 / 2) { return q; }
-            if (t < 2 / 3) { return p + (q - p) * (2 / 3 - t) * 6; }
-            return p;
-        }
-
-        if (s < 1e-9) { return global.MV.util.rgbToHex([l, l, l]); }
-        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        var p = 2 * l - q;
-        return global.MV.util.rgbToHex([
-            hue2rgb(p, q, h + 1 / 3),
-            hue2rgb(p, q, h),
-            hue2rgb(p, q, h - 1 / 3)
-        ]);
-    }
-
-    /* 从主色派生一整套附属色。
+    /* 四个通道的标注色 —— **深浅两套主题使用同一组色值**，不随主题变。
      *
-     * 原来线框写死 `#2f9df0`、边界写死 `#22d3ee` —— 三个图层叠在一起时线框全是同一个蓝，
-     * 根本分不清哪圈线属于谁。改成同色系派生后，线框/边界天然与面片同族，不用记第二套色卡。
-     * 浅色主题下派生方向反过来（压暗而不是提亮）：浅底上更深的线才看得清。 */
+     * 选值依据（WCAG 对比度实测，面片色共 36 个，跨深浅两套色卡）：
+     *
+     *   通道   色值        对深底 #161b22   对浅底 #ffffff   离最近面片色
+     *   顶点   #e713a7        4.16             4.16            52°
+     *   边界   #e83068        4.16             4.16            28°
+     *   法向   #0097a7        4.93             3.51             7°
+     *   线框   中性反色       15.4 / 1.06        —              —
+     *
+     * 为什么标注色只能落在紫红 / 红两族：面片色占满了橙 11°~43°、绿 68°~174°、
+     * 青蓝 185°~249°，色环上再没有别的空档。实测把「离面片 ≥26°」当硬约束时，
+     * 只有 285°~345° 这一段有解，所以顶点与边界同族（差 24°），靠形态区分：
+     * 顶点是圆点、边界是折线，且两者极少同时打开。
+     *
+     * 线框没有固定色值，因为它覆盖面积最大、必须画在**任意**面片上都可读：
+     * 按面片亮度在近黑 / 近白之间二选一（与面片亮度差恒 > 0.35）。
+     * 这条规则同样与主题无关 —— 同一张面片在深浅两套下得到同一条线色。
+     *
+     * 背面色仍随主题（#6b7078 / #7a828c）：它是面片，不是标注，要贴着背景。 */
+    var MARK_WIRE = '#00e5ff';     /* 线框：荧光青（开线框时面片压暗 55%，线才跳得出来） */
+    var MARK_VERT = '#ff3df2';     /* 顶点：高亮品红，离面片 54° */
+    var MARK_BOUND = '#ff2d55';    /* 边界：高亮红，开放边 / 缺陷标记 */
+
     function applyDerivedColors(lay, hex, light)
     {
-        /* 四个通道各占一个「视觉维度」，不再靠同色相的明度分档：
+        /* 线框：固定纯黑，深浅主题、面片颜色都不影响。
          *
-         *   面片 = 槽位色（蓝 / 橙 / 绿三族）—— 负责标识 A / B / S
-         *   线框 = 中性反色（面片亮→近黑，面片暗→近白）—— 只负责"勾边"
-         *   顶点 = 面片色相 +180° 的高饱和强调色   —— 只负责"点"
-         *   边界 = 固定警示红                       —— 只负责"开放边/缺陷"
-         *
-         * 旧方案是「线框 = 主色 +30%、顶点 = 近白、边界 = 主色 −30%」，
-         * 三者全在同一个色相上，只差一两档明度。同时打开线框和顶点时
-         * 蓝底上出现浅蓝线 + 近白点，根本分不清谁是谁。
-         *
-         * 现在线框是中性色，天然不与任何槽位色相撞；顶点用互补色，
-         * 与面片色相距离 180°，即使线框和顶点同时开也不会混淆。 */
-        var lum = relLum(hex);
+         * 为什么是"黑"而不是某个高亮色：线框是唯一会铺满整个模型的通道，
+         * 必须压在任意槽位色上都看得见。实测对全部 36 个面片色取最小值 ——
+         *   固定纯黑    3.14   ← 固定色里的最优
+         *   固定近白    1.28
+         *   高亮青 #00e5ff  1.04（画在同族亮蓝面上等于消失）
+         *   高亮黄 #ffd400  1.01（画在橙色系面片上等于消失）
+         * 也就是说：任何**彩色**线框都必然在某族面片上失效，只有中性黑能通吃。
+         * 代价是浅色主题的暗面片上只有 3.1（以前按面片反色能做到 5.9），
+         * 换来"切主题线框不换色"。 */
+        var wire = MARK_WIRE;
 
-        /* 线框：亮面片压到近黑，暗面片提到近白 —— 与面片的明度差恒 > 0.4 */
-        var wire = (lum > 0.42) ? '#11151c' : '#eef2f8';
+        lay.wireColor = wire;
+        lay.wireColorRgb = global.MV.util.hexToRgb(wire);
 
-        /* 边界：固定洋红（"开放边 / 不封闭"的缺陷标记，不随图层变色） */
-        var bound = light ? '#b8125e' : '#ff2d95';
+        lay.vertColor = MARK_VERT;
+        lay.vertColorRgb = global.MV.util.hexToRgb(MARK_VERT);
 
-        /* 顶点：面片补色；若补色与边界撞车（青绿面的补色正是红/洋红），
-         * 再转 70°。实测青色面片补色落在 355°，与洋红 330° 只差 25°，
-         * 顶点和边界就分不清了 —— 这一步是必须的避让。 */
-        var hsl = rgb2hsl.apply(null, global.MV.util.hexToRgb(hex) || [0.5, 0.5, 0.5]);
-        var vh = hsl[0] + 0.5;
-        var bh = rgb2hsl.apply(null, global.MV.util.hexToRgb(bound))[0];
-
-        function hueGap(a, b)
-        {
-            var d = Math.abs(((a % 1) + 1) % 1 - ((b % 1) + 1) % 1);
-            return (d > 0.5 ? 1 - d : d) * 360;
-        }
-        if (hueGap(vh, bh) < 50) { vh += 70 / 360; }
-
-        var vert = hsl2hex(vh, 0.92, lum > 0.42 ? 0.58 : 0.66);
+        lay.boundaryColor = MARK_BOUND;
+        lay.boundaryColorRgb = global.MV.util.hexToRgb(MARK_BOUND);
 
         /* 背面色：中性灰，避免与正面色抢眼。
          * 原来还留着一个 `backColor: '#b03a30'`（红）而 rgb 是灰 —— hex 与 rgb 不一致，
          * 渲染只用 rgb 所以没暴露，但任何人读 hex 都会拿到错的值。这里统一。 */
         lay.backColor = light ? '#7a828c' : '#6b7078';
         lay.backColorRgb = global.MV.util.hexToRgb(lay.backColor);
-
-        lay.wireColor = wire;
-        lay.wireColorRgb = global.MV.util.hexToRgb(wire);
-
-        lay.boundaryColor = bound;
-        lay.boundaryColorRgb = global.MV.util.hexToRgb(bound);
-
-        /* 顶点色是「面片补色」，不再是近白/深灰 —— 那正是与线框撞车的来源 */
-        lay.vertColor = vert;
-        lay.vertColorRgb = global.MV.util.hexToRgb(lay.vertColor);
     }
 
     function App()
@@ -979,15 +923,16 @@
                 autoColor: true,
                 autoIdx: picked.idx,
 
-                /* 以下四项由 applyDerivedColors() 按主色 + 主题填 */
+                /* 以下几项由 applyDerivedColors() 填：线框按面片亮度，
+                 * 顶点 / 边界 / 法向是固定的标注色（深浅主题一致） */
                 backColor: '#6b7078',
                 backColorRgb: global.MV.util.hexToRgb('#6b7078'),
                 wireColor: hex,
                 wireColorRgb: global.MV.util.hexToRgb(hex),
-                vertColor: '#f2f3fa',
-                vertColorRgb: global.MV.util.hexToRgb('#f2f3fa'),
-                boundaryColor: hex,
-                boundaryColorRgb: global.MV.util.hexToRgb(hex),
+                vertColor: '#ff3df2',
+                vertColorRgb: global.MV.util.hexToRgb('#ff3df2'),
+                boundaryColor: '#ff2d55',
+                boundaryColorRgb: global.MV.util.hexToRgb('#ff2d55'),
                 opacity: 1,
                 pointSize: 3,
                 // 有标量场时默认用标量场（彩虹）着色，否则单色
@@ -2236,6 +2181,12 @@
          * 但**相机是共享的**，所以不能分别 fit —— 用并集一次框住：
          * 双窗先载 A 再载 B 时，第二次要把 A 的范围也算进来，
          * 否则相机只框着 B，A 直接从视图里消失。 */
+        /* 导入后自动适配「本次之前还是空的那几个视图」。
+         *
+         * 注意：这段必须保持完整的 if/else 结构。曾经为了"关闭自动适配"
+         * 把它压成 `(void)empty0; (void)empty1;` 两行占位，结果 app.js
+         * 解析失败（SyntaxError），MV.app 变成 undefined —— 页面能显示，
+         * 但所有交互失效，连主题都切不了。 */
         if (this.settings.syncCam || this.settings.singleView)
         {
             if (empty0 || (!this.settings.singleView && empty1))
@@ -2616,6 +2567,171 @@
         this._inFrame = true;
         try { this.renderFrameInner(); }
         finally { this._inFrame = false; }
+
+        /* 比例尺跟着视口走：相机移动、分栏拖动、窗口缩放都会经过这里 */
+        this.updateScaleHud();
+    };
+
+    /* 取 1 / 2 / 5 × 10^n 里最接近 v 的那个，用作"整"刻度值 */
+    function niceLength(v)
+    {
+        if (!(v > 0) || !isFinite(v)) { return 0; }
+        var e = Math.floor(Math.log(v) / Math.LN10);
+        var base = Math.pow(10, e);
+        var f = v / base;
+        var m = (f < 1.5) ? 1 : (f < 3.5) ? 2 : (f < 7.5) ? 5 : 10;
+        return m * base;
+    }
+
+    /* 刻度文字：避免出现 1.0000001 这类小数尾巴 */
+    function fmtScaleLen(v)
+    {
+        if (v >= 100) { return String(Math.round(v)); }
+        if (v >= 10) { return String(Math.round(v * 10) / 10); }
+        if (v >= 1) { return String(Math.round(v * 100) / 100); }
+        if (v >= 0.01) { return String(Math.round(v * 1000) / 1000); }
+        return v.toExponential(1);
+    }
+
+    /* 亮出「像素尺寸」，3 秒后淡出。
+     *
+     * 只在**视口尺寸真正变化**时调用（resize）。到期判断放在每帧的
+     * updateScaleHud 里做，用时间戳而不是 setTimeout：
+     *   - resize 会连续触发（拖分栏、窗口缩放），定时器会被反复重置；
+     *   - 页面在后台时 setTimeout 可能被节流，时间戳不受影响。
+     * 旋转 / 缩放不改变视口尺寸，因此不会打扰。 */
+    App.prototype.flashPixelSize = function ()
+    {
+        if (!this._hud) { return; }
+
+        var until = Date.now() + 3000;
+        for (var i = 0; i < this._hud.length; i++)
+        {
+            var h = this._hud[i];
+            if (!h || !h.px) { continue; }
+            h.pxUntil = until;
+            h.px.classList.remove('is-off');
+        }
+    };
+
+    /* 视口尺寸是否变了（边沿检测）。用它驱动"显示 3 秒"，而不是让 resize 去推：
+     * resize / ResizeObserver 在拖拽时会高频触发，每次推 3 秒等于永远不隐藏。 */
+    function sizeChanged(h, wCss, hCss)
+    {
+        var key = Math.round(wCss) + 'x' + Math.round(hCss);
+        if (h.lastSize === key) { return false; }
+        h.lastSize = key;
+        return true;
+    }
+
+    /* 视口右下角：比例尺（当前缩放下 86 CSS px 对应的世界长度取整）+ 视口像素尺寸。
+     * 双窗各一个、单窗只留左边那个；DOM 写入按值变化去重，避免每帧触发重排。 */
+    App.prototype.updateScaleHud = function ()
+    {
+        if (!this._hud)
+        {
+            this._hud = [
+                { box: document.getElementById('scale-hud-0'),
+                  bar: null, label: null, px: null, last: '' },
+                { box: document.getElementById('scale-hud-1'),
+                  bar: null, label: null, px: null, last: '' }
+            ];
+            for (var k = 0; k < 2; k++)
+            {
+                var b = this._hud[k].box;
+                if (!b) { continue; }
+                this._hud[k].bar = b.querySelector('.hud-bar');
+                this._hud[k].label = b.querySelector('.hud-label');
+                this._hud[k].px = document.getElementById('scale-px-' + k);
+            }
+
+            /* 首次建立时亮一次，让用户知道这里有尺寸信息 */
+            this.flashPixelSize();
+        }
+
+        var dpr = this.dpr || 1;
+
+        for (var i = 0; i < 2; i++)
+        {
+            var h = this._hud[i];
+            var v = this.views[i];
+            if (!h || !h.box || !v || !v.rect || !v.camera) { continue; }
+
+            var r = v.rect;
+            /* 单窗时视图 1 的 rect 是 1×1 的占位，直接按"不可见"处理 */
+            var show = (r.w > 8 && r.h > 8) && !(this.settings.singleView && i === 1);
+            if (!show)
+            {
+                if (h.last !== 'hidden')
+                {
+                    h.box.classList.add('hidden');
+                    if (h.px) { h.px.classList.add('hidden'); }
+                    h.last = 'hidden';
+                }
+                continue;
+            }
+            h.box.classList.remove('hidden');
+            var wCss = r.w / dpr;
+            var hCss = r.h / dpr;
+
+            if (h.px)
+            {
+                h.px.classList.remove('hidden');
+
+                /* 视口尺寸一变就把到期时间推后 3 秒并亮起（拖分栏时持续显示） */
+                if (sizeChanged(h, wCss, hCss))
+                {
+                    h.pxUntil = Date.now() + 3000;
+                    h.px.classList.remove('is-off');
+                }
+                /* 到期隐藏；尺寸不再变化时 3 秒后走到这里 */
+                else if (h.pxUntil && Date.now() > h.pxUntil)
+                {
+                    h.px.classList.add('is-off');
+                    h.pxUntil = 0;
+                }
+            }
+
+            /* 每 CSS 像素对应的世界长度：视口高 / (2·d·tan(fov/2))。
+             * 这是垂直于视线方向的比例，对透视相机足够准；
+             * 斜看时的透视缩短不参与计算，比例尺标注的是"屏幕尺度"。 */
+            var cam = v.camera;
+            var fov = cam.fov || 0.785;
+            var pxPerUnit = hCss / (2 * Math.max(1e-6, cam.distance) * Math.tan(fov * 0.5));
+
+            var targetPx = 86;
+            var nice = niceLength(targetPx / pxPerUnit);
+            var barPx = Math.max(8, Math.round(nice * pxPerUnit));
+
+            var labelTxt = fmtScaleLen(nice);
+            var pxTxt = Math.round(wCss) + ' × ' + Math.round(hCss) + ' px';
+
+            /* 边距 14 CSS px；rect 是设备像素，换算成 CSS 像素。
+             * 比例尺贴**右下**，像素尺寸贴**左下**。 */
+            var barLeft = Math.round((r.x + r.w) / dpr - 14);
+            var barTop = Math.round((r.y + r.h) / dpr - 14);
+            var pxLeft = Math.round(r.x / dpr + 14);
+            var pxTop = Math.round((r.y + r.h) / dpr - 14);
+
+            /* 位置也纳入去重：每帧写 left/top 会触发样式重算，静止时不该有开销 */
+            var key = barPx + '|' + labelTxt + '|' + pxTxt + '|' +
+                      barLeft + '|' + barTop + '|' + pxLeft + '|' + pxTop;
+
+            if (h.last !== key)
+            {
+                h.last = key;
+                h.bar.style.width = barPx + 'px';
+                h.label.textContent = labelTxt;
+                h.box.style.left = barLeft + 'px';
+                h.box.style.top = barTop + 'px';
+                if (h.px)
+                {
+                    h.px.textContent = pxTxt;
+                    h.px.style.left = pxLeft + 'px';
+                    h.px.style.top = pxTop + 'px';
+                }
+            }
+        }
     };
 
     App.prototype.renderFrameInner = function ()
@@ -2677,6 +2793,11 @@
         // 原先每帧读 clientWidth 会强制浏览器 flush 布局，144Hz 下每秒 144 次。
         // updateRects 是纯计算，保留每帧调用以覆盖单双窗切换。
         this.updateRects();
+
+        /* 比例尺与像素尺寸每帧都要跟上（相机移动、分栏拖动）。
+         * 而且"3 秒淡出"的到期判断也在这里 —— 画面静止时 renderFrame 不跑，
+         * 靠它触发就永远等不到淡出。 */
+        this.updateScaleHud();
 
         if (this.dirty)
         {

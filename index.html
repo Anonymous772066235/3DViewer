@@ -7,7 +7,14 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>3D Viewer</title>
-<link rel="stylesheet" href="css/style.css?v=1.0.3.7" />
+<!-- 图标：SVG 优先（矢量、跟随系统深/浅色），ICO 兜底。
+     缓存戳跟随版本号，避免浏览器长期用旧图标。 -->
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.3.8" media="(prefers-color-scheme: dark)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-light.svg?v=1.0.3.8" media="(prefers-color-scheme: light)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.3.8" />
+<link rel="shortcut icon" href="assets/icons/favicon.ico?v=1.0.3.8" sizes="16x16 32x32 48x48" />
+<link rel="apple-touch-icon" href="assets/icons/app-icon-dark-256.png?v=1.0.3.8" />
+<link rel="stylesheet" href="css/style.css?v=1.0.3.8" />
 <script>
 /* 主题必须在**首帧之前**生效。
  *
@@ -38,7 +45,9 @@
 
     <header id="topbar">
         <div class="brand">
-            <span class="logo">3DV</span>
+            <!-- 标记：点云 → 网格。深浅两套，按 html.theme-light 切换 -->
+            <img class="brand-mark mark-dark" src="assets/icons/app-icon-dark.svg" alt="3DV" width="22" height="22" />
+            <img class="brand-mark mark-light" src="assets/icons/app-icon-light.svg" alt="" width="22" height="22" />
             <span class="title">3D Viewer</span>
             <span class="sub" id="app-sub">3D data compare</span>
         </div>
@@ -509,6 +518,18 @@
             <div id="split-line"></div>
             <div id="drop-hint">拖拽 STL / OBJ / PLY / 点云文件到左屏（A）或右屏（B）</div>
 
+            <!-- 每个视口右下角的比例尺 + 像素尺寸；由 App.updateScaleHud() 按 rect 定位 -->
+            <div class="scale-hud" id="scale-hud-0">
+                <span class="hud-bar"></span>
+                <span class="hud-label"></span>
+            </div>
+            <div class="scale-px" id="scale-px-0"></div>
+            <div class="scale-hud" id="scale-hud-1">
+                <span class="hud-bar"></span>
+                <span class="hud-label"></span>
+            </div>
+            <div class="scale-px" id="scale-px-1"></div>
+
             <!-- ===== 裁剪编辑栏（进入裁剪模式后显示） ===== -->
             <div id="seg-bar" class="seg-bar hidden">
                 <span id="seg-count" class="seg-count">选区 0 块</span>
@@ -703,16 +724,16 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.3.7"></script>
-    <script src="js/io.js?v=1.0.3.7"></script>
-    <script src="js/algo.js?v=1.0.3.7"></script>
-    <script src="js/render.js?v=1.0.3.7"></script>
+    <script src="js/core.js?v=1.0.3.8"></script>
+    <script src="js/io.js?v=1.0.3.8"></script>
+    <script src="js/algo.js?v=1.0.3.8"></script>
+    <script src="js/render.js?v=1.0.3.8"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/plugins/registry.js?v=1.0.3.7"></script>
-    <script src="js/plugins/optimize.js?v=1.0.3.7"></script>
-    <script src="js/ui.js?v=1.0.3.7"></script>
-    <script src="js/keys.js?v=1.0.3.7"></script>
-    <script src="js/app.js?v=1.0.3.7"></script>
+    <script src="js/plugins/registry.js?v=1.0.3.8"></script>
+    <script src="js/plugins/optimize.js?v=1.0.3.8"></script>
+    <script src="js/ui.js?v=1.0.3.8"></script>
+    <script src="js/keys.js?v=1.0.3.8"></script>
+    <script src="js/app.js?v=1.0.3.8"></script>
 <!-- ===== 孔位优化 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

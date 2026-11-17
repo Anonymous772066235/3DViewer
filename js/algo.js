@@ -1351,12 +1351,11 @@ function pickCandidates(layer, eye, dir, tri)
 
             if (!l || l.id !== layerId) { continue; }
             if (!l.visible || !l.gpu) { continue; }
+            // [2026-11-17 用户要求] 拾取严格限定本视图槽位（ghost 叠层仅视觉参照，不可选；S 槽除外）
             if (v && v.slots && !(this.settings && this.settings.singleView) &&
-                !v.slots[l.slot])
+                !v.slots[l.slot] && l.slot !== 'S')
             {
-                // 叠层例外：ghost 开启时对面槽位在本视图里也是可见的
-                var asGhostL = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
-                if (!asGhostL) { continue; }
+                continue;
             }
 
             if (l.kind === 'mesh')
@@ -1565,14 +1564,14 @@ function pickCandidates(layer, eye, dir, tri)
              * 早先只判断 slots 会把这类叠层一并挡掉，表现为"明明看得到却拾取不到"。 */
             /* 单视图模式下渲染会把所有可见图层一起画（无视 slot），
              * 拾取必须跟着放开，否则 B 槽的图层"看得见却点不到"。 */
+            /* [2026-11-17 用户要求] **拾取严格限定在本视图槽位**：
+             * 双窗共享同一坐标系时，左窗（A+S）不得点到右窗（B+S）的数据。
+             * 因此取消原来"ghost 叠层也参与拾取"的例外——对面槽位即使以半透明画出来，
+             * 也只是**视觉参照**，不可选。S 槽（公共叠加层）两窗都可见，仍允许拾取。 */
             if (vPick && vPick.slots && !(this.settings && this.settings.singleView) &&
-                !vPick.slots[l.slot])
+                !vPick.slots[l.slot] && l.slot !== 'S')
             {
-                var asGhost = !!(this.settings && this.settings.ghost) && l.slot !== 'S';
-                if (!asGhost)
-                {
-                    continue;
-                }
+                continue;
             }
 
             if (l.kind === 'mesh')
