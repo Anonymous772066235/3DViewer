@@ -3379,6 +3379,12 @@ button.primary:disabled {
     cursor: not-allowed;
 }
 
+/* 插件按钮不是 .primary，单独给同样的不可用态 */
+#btn-optimize:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
 /* ==================================================================
  * 勾选项统一规范：文字靠左、勾选框靠右
  *

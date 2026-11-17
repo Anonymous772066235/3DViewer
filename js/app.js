@@ -905,7 +905,7 @@
             kind: data.kind,
             data: data,
             visible: true,
-            shownAt: Date.now(),      // 最近一次被启用/载入的时间，供“孔位优化”选择最新显示的网格
+            shownAt: Date.now(),      // 最近一次被启用/载入的时间，供扩展挑选当前显示的网格
             gpu: null
         };
 
@@ -1855,7 +1855,7 @@
         global.MV.ui.refreshUI();
         this.markDirty();
 
-        // 通知扩展（如孔位优化的自动触发）加载已完成
+        // 通知扩展：加载已完成
         try
         {
             global.dispatchEvent(new global.Event('mv:loaded'));
@@ -1868,7 +1868,7 @@
 
     /* 尽量补全本地文件在磁盘上的绝对路径：
        浏览器拿不到 File 的真实路径，若本机跑着 serve.py / bridge，
-       就按“文件名 + 大小”在 HoleOptimize/data 下反查（命中才填，静默失败） */
+       就按“文件名 + 大小”在本地数据目录下反查（命中才填，静默失败） */
     App.prototype.locateSource = function (layer)
     {
         /* 只在「还没有路径」时反查。URL 载入也走这里 —— 用 ?url= 打开
@@ -1995,7 +1995,7 @@
         for (var i = 0; i < slots.length; i++)
         {
             var layer = self.createLayer(baseName, slots[i], data, file.name + '|' + file.size);
-            // 记住原始文件：供“孔位优化”上传原始字节（bridge 服务使用）
+            // 记住原始文件：供本地扩展上传原始字节
             layer.sourceFile = file;
             layer.sourceUrl = file.sourceUrl || '';   // 来源地址（?url= 载入时有值）
 

@@ -1,7 +1,7 @@
 /* L2 IO 层 | io：数据进出
  * 允许依赖：core（MV.math）
  * 禁止依赖：render / GL
- * 导出：MV.loaders / MV.optimize / MV.memguard
+ * 导出：MV.loaders / MV.memguard
  * 说明：三段各自独立作用域（原本是三个文件，私有函数名有重名，不能平铺）
  */
 (function (global)

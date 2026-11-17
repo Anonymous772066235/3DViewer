@@ -4421,3 +4421,16 @@ setTheme(true)   浅色，正常
 
 **校验口径**：文档里出现的色值、快捷键、目录、命令行参数，全部以 `js/app.js` /
 `js/render.js` / `index.html` 当前实现为准；历史小节（描述当时版本行为）保留不改写。
+
+
+---
+
+## GitHub Pages 发布准备（2026-11-17，同版 v1.0.3.8）
+
+| 动作 | 内容 |
+| --- | --- |
+| 新增 | 空文件 `.nojekyll`：让 Pages 跳过 Jekyll 处理，静态文件原样发布 |
+| 降级 | `js/plugins/optimize.js` 检测 `*.github.io`，静态部署下直接禁用按钮；本地服务不可用时按钮置灰（`title` 提示启动方式），每 3 秒重试，服务启动后自动恢复 |
+| 文档 | `README.md` 顶部加入在线演示地址 <https://anonymous772066235.github.io/3DViewer/>，不列具体功能差异 |
+
+判断网址用 `location.hostname`（Pages 是 https、本地是 http，不能看协议）。

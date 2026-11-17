@@ -1,4 +1,4 @@
-/* 插件：孔位优化（调用 HoleOptimize_cli 优化当前网格，结果载入右侧）
+/* 插件：本地网格处理扩展（调用本机程序处理当前网格，结果载入右侧）
  * 依赖：core / io / ui 已加载；按钮与错误弹窗在 window load 时绑定
  * 关闭方式：注释掉 index.html 里本文件的 <script> 即可，主程序完全不受影响
  */
@@ -26,6 +26,12 @@
     // 同源优先：通过 serve.bat / serve.py 打开时（http），/optimize 与页面同源，
     // 只要页面能打开，优化服务一定在；file:// 打开时退回独立桥接服务 8790。
     var IS_HTTP = /^https?:$/i.test(global.location.protocol);
+
+    /* GitHub Pages 是纯静态托管：没有 /health 和 /optimize 这两个后端端点，
+     * 请求只会得到 404（而且 Pages 的 404 是 HTML，不是 JSON）。
+     * 用 hostname 判断而不是协议 —— Pages 是 https，本地 serve.bat 是 http。 */
+    var IS_PAGES = /\.github\.io$/i.test(global.location.hostname);
+
     var BASE = IS_HTTP ? '' : 'http://127.0.0.1:8790';
     var ENDPOINT = BASE + '/optimize';
     var HEALTH = BASE + '/health';
@@ -68,7 +74,44 @@
         }
     }
 
-    // 输入 = 当前显示的网格里“最新启用/载入”的那一个（不看选中项，避免误用已隐藏或旧图层）
+    /* ---- 按钮可用态：本地服务在线才亮，否则置灰 ----
+     * 页面打开时 serve.bat 可能还没起，所以每 3 秒重试一次；一旦服务可用自动恢复。
+     * Pages 是静态托管，永远不可能有本地服务，直接禁用且不再轮询。 */
+    var serviceOnline = false;
+    var btnBaseTitle = '';
+
+    function setButtonAvailable(online)
+    {
+        var btn = $id('btn-optimize');
+        if (!btn) { return; }
+        serviceOnline = online;
+        btn.disabled = !online;
+        btn.title = online ? btnBaseTitle : '本地服务未启动，双击 3DViewer\\serve.bat 后可用';
+    }
+
+    async function refreshAvailability()
+    {
+        if (IS_PAGES)
+        {
+            setButtonAvailable(false);
+            return false;
+        }
+
+        var online = false;
+        try
+        {
+            var h = await checkHealth();
+            online = !!h;                    // 服务在线即可；exe 缺失仍由 run() 给出具体提示
+        }
+        catch (e)
+        {
+            online = false;
+        }
+        setButtonAvailable(online);
+        return online;
+    }
+
+    // 输入 = 当前显示的网格里"最新启用/载入"的那一个（不看选中项，避免误用已隐藏或旧图层）
     // 优先非优化产物：避免连续点击时把上一次的 *_oh.obj 再优化成 *_oh_oh.obj
     function findMeshLayer()
     {
@@ -123,6 +166,18 @@
             return;
         }
 
+        /* 静态部署提前拦截：否则会 fetch 到 Pages 的 404，
+         * 然后弹出"serve.bat 控制台已关闭"这种与事实不符的提示。 */
+        if (IS_PAGES)
+        {
+            showError('静态部署不支持此功能',
+                '当前页面来自 GitHub Pages（纯静态托管），没有可调用的本机服务。\n\n' +
+                '该功能依赖本机程序，请用本地方式打开：\n' +
+                '    双击  3DViewer\\serve.bat\n\n' +
+                '其余功能在 Pages 上均可正常使用。');
+            return;
+        }
+
         var layer = findMeshLayer();
         if (!layer)
         {
@@ -149,7 +204,7 @@
             running = false;
             if (btn)
             {
-                btn.disabled = false;
+                btn.disabled = !serviceOnline;   // 服务不可用时保持置灰
                 btn.textContent = '孔位优化';
             }
         }
@@ -252,7 +307,7 @@
 
             await global.MV.app.addFiles([file], 'B');
 
-            // 标记为“优化产物”：下次点击优先选原始网格，避免 _oh -> _oh_oh
+            // 标记为"优化产物"：下次点击优先选原始网格，避免 _oh -> _oh_oh
             var layers = global.MV.app.layers;
             for (var li = layers.length - 1; li >= 0; li--)
             {
@@ -317,6 +372,16 @@
             // UI 上标注：这是插件功能（注释掉插件 script 时标记一起消失）
             btn.classList.add('is-plugin');
             btn.title = '［插件］' + btn.title;
+            btnBaseTitle = btn.title;
+
+            refreshAvailability();                          // 首次探测
+            if (!IS_PAGES)
+            {
+                global.setInterval(function ()
+                {
+                    if (!running) { refreshAvailability(); }
+                }, 3000);                                   // 服务后来启动也能恢复
+            }
         }
 
         var errClose = $id('err-close');

@@ -1133,7 +1133,7 @@
                     layer.visible = chk2.checked;
                     if (chk2.checked)
                     {
-                        layer.shownAt = Date.now();   // 记为“最新启用”，孔位优化优先用它
+                        layer.shownAt = Date.now();   // 记为“最新启用”，扩展优先用它
 
                         // 显存可能已被回收（如裁剪应用后释放），重新勾选时补上传
                         if (!layer.gpu && app.renderer && !layer._uploadFailed)

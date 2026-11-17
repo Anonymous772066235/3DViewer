@@ -4,7 +4,11 @@
 
 ![双窗并排对比：左侧优化前、右侧优化后](docs/images/dual-window.png)
 
-纯原生 JavaScript + WebGL2 实现，没有框架、没有打包步骤、没有 npm 依赖。双击 `serve.bat` 即可在浏览器中打开——**推荐用这个方式**，配准走独立线程、路径载入与孔位优化都可用；直接双击 `index.html` 也能看模型，但功能有缺口（见[两种打开方式](#两种打开方式推荐-servebat)）。
+纯原生 JavaScript + WebGL2 实现，没有框架、没有打包步骤、没有 npm 依赖。
+
+**在线演示**：<https://anonymous772066235.github.io/3DViewer/>（GitHub Pages 静态发布，查看 / 配准 / 测量 / 裁剪 / 导出均可使用）。
+
+本地使用：双击 `serve.bat` 即可打开——**推荐用这个方式**，配准走独立线程、路径载入与孔位优化都可用；直接双击 `index.html` 也能看模型，但功能有缺口（见[两种打开方式](#两种打开方式推荐-servebat)）。
 
 ---
 
