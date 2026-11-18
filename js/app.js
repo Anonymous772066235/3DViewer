@@ -1471,8 +1471,15 @@
 
     /* slotsOverride：用别的槽位集合来定 bbox。
      * 双窗共享同一个相机，各自 fit 会互相覆盖 —— 见 mergedSlots 的说明。 */
-    App.prototype.fitView = function (vi, fitEmpty, slotsOverride)
+    /* 适应视图白名单：只允许三个入口调用 fitView ——
+     *   1) 导入数据到空视图   2) 双击画布空白   3) 「适应」按钮 / F 键
+     * token 是模块私有的，其它代码拿不到；未授权调用一律静默返回，
+     * 从机制上杜绝"开关数据/切布局/切主题时偷偷适应"这类回归。 */
+    var FIT_TOKEN = {};
+
+    App.prototype.fitView = function (vi, fitEmpty, slotsOverride, token)
     {
+        if (token !== FIT_TOKEN) { return; }
         var v = this.views[vi];
         var useSlots = slotsOverride || v.slots;
 
@@ -1572,12 +1579,12 @@
          * （后执行的赢），所以并集只 fit 一次；关掉同步后各自独立，才分开 fit。 */
         if (this.settings.syncCam || this.settings.singleView)
         {
-            this.fitView(0, true, this.mergedSlots());
+            this.fitView(0, true, this.mergedSlots(), FIT_TOKEN);
             return;
         }
 
-        this.fitView(0, true);
-        this.fitView(1, true);
+        this.fitView(0, true, null, FIT_TOKEN);
+        this.fitView(1, true, null, FIT_TOKEN);
     };
 
     /* 单窗口 / 双窗口切换：单窗口时 A/B/S 全部图层在同一个视口渲染 */
@@ -1662,6 +1669,126 @@
         }, 16);
     };
 
+    /* ==========================================================================
+       视角清单（多个命名视角）
+       OrbitCamera 完整状态 = target(3) + distance + q(4)。
+       q 是单位四元数，直接存数组即可（无万向锁、不丢滚转）。
+       结构：{ active: <id>, list: [ { id, name, A:{...}, B:{...} }, ... ] }
+       ========================================================================== */
+    /* 视角清单只存在内存中：刷新页面即清空，不写 localStorage。
+     * 这是有意的设计 —— 视角是"当下这次查看"的状态，不是用户数据；
+     * 上次打开的视角在新会话里往往已经没有对应数据了，恢复它反而干扰。 */
+
+    App.prototype.captureView = function (vi)
+    {
+        var c = this.views[vi] && this.views[vi].camera;
+        if (!c) { return null; }
+        return {
+            target: [c.target[0], c.target[1], c.target[2]],
+            distance: c.distance,
+            q: [c.q[0], c.q[1], c.q[2], c.q[3]]
+        };
+    };
+
+    App.prototype.restoreView = function (vi, st)
+    {
+        var c = this.views[vi] && this.views[vi].camera;
+        if (!c || !st) { return false; }
+        if (st.target && st.target.length === 3) { c.target = st.target.slice(); }
+        if (st.distance > 0) { c.distance = st.distance; }
+        if (st.q && st.q.length === 4) { c.q = st.q.slice(); }
+        return true;
+    };
+
+    /* ---- 会话内清单（刷新即清空） ---- */
+    App.prototype.getViewList = function ()
+    {
+        if (!this._viewList) { this._viewList = { active: '', list: [] }; }
+        return this._viewList;
+    };
+
+    App.prototype.saveViewList = function (store)
+    {
+        this._viewList = store;
+        return store;
+    };
+
+    /* 新增当前视角（快捷键 Shift+V 与菜单共用） */
+    /* 自增序号：Date.now() 在同一毫秒内会给出相同值（同步连点两次就撞），
+     * 加上序号并对现有清单查重，保证 id 全局唯一。 */
+    var viewIdSeq = 0;
+
+    App.prototype.addCurrentView = function (name)
+    {
+        var store = this.getViewList();
+        var id;
+        do
+        {
+            id = 'v' + Date.now().toString(36) + '_' + (++viewIdSeq).toString(36);
+        }
+        while (store.list.some(function (x) { return x.id === id; }));
+        var item = {
+            id: id,
+            name: name || ('视角 ' + (store.list.length + 1)),
+            createdAt: Date.now(),                  // 保存时刻，菜单里显示
+            A: this.captureView(0),
+            B: this.captureView(1)
+        };
+        store.list.push(item);
+        store.active = id;
+        this.saveViewList(store);
+        if (global.MV.ui && global.MV.ui.refreshViewMenu) { global.MV.ui.refreshViewMenu(); }
+        return item;
+    };
+
+    /* 切换到某个命名视角 */
+    App.prototype.switchToView = function (id)
+    {
+        var store = this.getViewList();
+        var item = null;
+        for (var i = 0; i < store.list.length; i++)
+        {
+            if (store.list[i].id === id) { item = store.list[i]; break; }
+        }
+        if (!item) { return false; }
+        this.restoreView(0, item.A);
+        this.restoreView(1, item.B || item.A);
+        store.active = id;
+        this.saveViewList(store);
+        this.markDirty();
+        if (global.MV.ui && global.MV.ui.refreshViewMenu) { global.MV.ui.refreshViewMenu(); }
+        return true;
+    };
+
+    App.prototype.deleteView = function (id)
+    {
+        var store = this.getViewList();
+        var next = [];
+        for (var i = 0; i < store.list.length; i++)
+        {
+            if (store.list[i].id !== id) { next.push(store.list[i]); }
+        }
+        store.list = next;
+        if (store.active === id) { store.active = next.length ? next[0].id : ''; }
+        this.saveViewList(store);
+        if (global.MV.ui && global.MV.ui.refreshViewMenu) { global.MV.ui.refreshViewMenu(); }
+        return true;
+    };
+
+    /* 切布局时的临时保留：同样只在内存里，页面刷新即失效 */
+    App.prototype.saveViews = function ()
+    {
+        this._viewSession = { A: this.captureView(0), B: this.captureView(1) };
+        return this._viewSession;
+    };
+
+    App.prototype.restoreSavedViews = function ()
+    {
+        var st = this._viewSession;
+        if (!st) { return false; }
+        return this.restoreView(0, st.A) && this.restoreView(1, st.B);
+    };
+
     App.prototype.setSingleView = function (on)
     {
         on = !!on;
@@ -1669,25 +1796,30 @@
         {
             return;
         }
+        /* 切布局前记下当前视角，切完原样恢复 —— 不再无条件 fit。
+         * 只有「该视图此前没有任何数据」才由调用方（导入路径）另行 fit。 */
+        var beforeA = this.captureView(0);
+        var beforeB = this.captureView(1);
+
         this.settings.singleView = on;
 
         var Ctor = global.MV.math.OrbitCamera;
         if (on)
         {
-            // 进入单窗口：右视图相机独立出来，主相机自适应全部图层
+            // 进入单窗口：右视图相机独立出来，主相机保持原视角
             this.syncBeforeSingle = this.settings.syncCam;
             this.settings.syncCam = false;
             this.views[1].camera = new Ctor();
             this.views[1].camera.copyFrom(this.views[0].camera);
-            this.fitView(0, true);
+            this.restoreView(0, beforeA);
         }
         else
         {
-            // 回到双窗口：右视图继承当前视角，再各自自适应
+            // 回到双窗口：右视图用进入单窗前的 B 视角（没有则继承 A）
             this.views[1].camera = new Ctor();
             this.views[1].camera.copyFrom(this.views[0].camera);
-            this.fitView(0, false);
-            this.fitView(1, true);
+            this.restoreView(0, beforeA);
+            this.restoreView(1, beforeB || beforeA);
 
             // 进入单窗口前是同步状态的话，退出后恢复共享相机
             if (this.syncBeforeSingle)
@@ -1696,6 +1828,8 @@
                 this.settings.syncCam = true;
             }
         }
+
+        this.saveViews();
 
         if (!on)
         {
@@ -2191,13 +2325,13 @@
         {
             if (empty0 || (!this.settings.singleView && empty1))
             {
-                this.fitView(0, false, this.mergedSlots());
+                this.fitView(0, false, this.mergedSlots(), FIT_TOKEN);
             }
         }
         else
         {
-            if (empty0) { this.fitView(0, false); }
-            if (empty1) { this.fitView(1, false); }
+            if (empty0) { this.fitView(0, false, null, FIT_TOKEN); }
+            if (empty1) { this.fitView(1, false, null, FIT_TOKEN); }
         }
 
         document.getElementById('drop-hint').classList.add('hidden');
@@ -3042,7 +3176,7 @@
                     hit.pos[2].toFixed(2) + ')');
                 return;
             }
-            self.fitView(self.viewIndexAt(e.clientX), true);
+            self.fitView(self.viewIndexAt(e.clientX), true, null, FIT_TOKEN);
         });
     };
 

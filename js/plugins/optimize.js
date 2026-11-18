@@ -75,7 +75,7 @@
     }
 
     /* ---- 按钮可用态：本地服务在线才亮，否则置灰 ----
-     * 页面打开时 serve.bat 可能还没起，所以每 3 秒重试一次；一旦服务可用自动恢复。
+     * 页面打开时 serve.bat 可能还没起，所以每 10 秒重试一次；一旦服务可用自动恢复。
      * Pages 是静态托管，永远不可能有本地服务，直接禁用且不再轮询。 */
     var serviceOnline = false;
     var btnBaseTitle = '';
@@ -380,7 +380,7 @@
                 global.setInterval(function ()
                 {
                     if (!running) { refreshAvailability(); }
-                }, 3000);                                   // 服务后来启动也能恢复
+                }, 10000);                                  // 服务后来启动也能恢复；10s 间隔避免 /health 刷屏
             }
         }
 

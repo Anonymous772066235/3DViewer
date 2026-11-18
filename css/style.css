@@ -3722,3 +3722,81 @@ html.theme-light #statusbar.expanded {
 html.theme-light #sidebar .panel-tabs {
     background: var(--bg-soft);
 }
+
+/* 工具菜单内的「视角」子菜单：悬停/点击向右展开 */
+/* 视角清单：固定宽度、限高滚动，不随视角数量无限撑大 */
+#views-menu {
+    margin: 0;                     /* fixed 定位，不能吃 .menu 的 margin-top */
+    width: 262px;
+    height: auto;
+    max-width: 70vw;
+    max-height: 70vh;
+    min-width: 210px;
+    min-height: 150px;
+    overflow: auto;
+    resize: both;                 /* 原生右下角把手，用户可任意改尺寸 */
+    z-index: 60;
+}
+/* 标题栏当拖拽把手： cursor 提示 + hover 高亮，避免用户不知道能拖 */
+#views-menu > .menu-label {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 2;
+    cursor: move;
+    user-select: none;
+    border-bottom: 1px solid var(--line-soft);
+}
+#views-menu > .menu-label:hover { color: var(--accent); }
+#views-list { display: flex; flex-direction: column; gap: 2px; }
+#views-list .view-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+#views-list .view-item:hover { background: var(--bg-hover); }
+#views-list .view-item.active { background: var(--accent-soft); }
+#views-list .view-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-left: 4px;
+}
+#views-list .view-name {
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#views-list .view-item.active .view-name { color: var(--accent); font-weight: 600; }
+#views-list .view-param {
+    font: 10px/1.3 ui-monospace, Consolas, monospace;
+    color: var(--accent-lo);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: .9;
+}
+#views-list .view-time {
+    font-size: 10px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+}
+#views-list .view-item button {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 3px 6px;
+    font-size: 11px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+}
+#views-list .view-item button:hover { background: var(--bg-hover); border-color: var(--accent); }
+#views-list .view-item .view-del:hover { color: var(--danger); border-color: var(--danger); }
+#views-list .view-empty {
+    padding: 8px 10px;
+    color: var(--dim);
+    font-size: 11px;
+}

@@ -75,6 +75,15 @@
         { k: '1', g: '视图', label: '单窗', run: function (a) { a.setSingleView(true); } },
         { k: '2', g: '视图', label: '双窗', run: function (a) { a.setSingleView(false); } },
         { k: '0', g: '视图', label: '视角回正', run: function () { click('btn-reset-view'); } },
+        { k: 'Shift+v', g: '视图', label: '新增当前视角到清单',
+            run: function (a)
+            {
+                var item = a.addCurrentView();
+                if (global.MV.ui && global.MV.ui.setInfo)
+                {
+                    global.MV.ui.setInfo('已新增视角：' + item.name, true);
+                }
+            } },
         { k: '[', g: '视图', label: '分隔线左移 5%', run: function (a)
             { a.setSplitRatio(a.settings.splitRatio - 0.05); } },
         { k: ']', g: '视图', label: '分隔线右移 5%', run: function (a)

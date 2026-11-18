@@ -461,20 +461,9 @@
      *
      * 打开线框+顶点后绘制量变成 3 倍多，而这两样既不做剔除也不做 LOD。
      *
-     * 两条自动规则（?density=0 可关）：
-     *   1. 平均边长 < WIRE_MIN_PX 像素时不画线框 —— 线与线已经挤成一片色块，
-     *      画出来没有信息量（CAD 缩远自动隐藏边线就是这个道理）；
-     *   2. 平均边长 < 点径时不画顶点 —— 点互相重叠，同理。
-     *
-     * 另外顶点超过 VERT_CAP 时按步长抽稀，点径也设了上限。 */
-    var WIRE_MIN_PX = 2.0;         // 线框最小可见边长（像素）
-    var VERT_CAP = 100000;         // 顶点最多画多少个
+     * 线框 / 边界 / 顶点 / 法向一律**全量**绘制：不抽样、不剔除、不做 LOD。
+     * 唯一视觉上限是 VERT_MAX_PX（防止点径过大糊成一片）。 */
     var VERT_MAX_PX = 16;          // 点径上限（CSS 像素）
-
-    function densityCullOn()
-    {
-        return !(global.MV.config && global.MV.config.density === false);
-    }
 
     /* 顶点焊接总开关；实际是否焊接还要看格式（见 uploadLayer，只有 STL 参与）
      * false = 全局关闭，所有格式都不去重 */
@@ -973,6 +962,9 @@
             };
         }
 
+        /* 空闲时预建线框缓冲：首次点线框不再同步等待 */
+        this.schedulePrewire(layer);
+
         // 上传后检查 GL 错误：显存不足 / 驱动拒绝时不要静默失败成白屏
         var upErr = gl.getError();
         if (upErr !== gl.NO_ERROR)
@@ -1068,16 +1060,10 @@
     /* ---------------- 法向线段 ---------------- */
     Renderer.prototype.ensureNormals = function (layer, lengthScale)
     {
-        if (!layer.gpu || layer.data.kind !== 'mesh')
-        {
-            return;
-        }
+        if (!layer.gpu || layer.data.kind !== 'mesh') { return; }
         var g = layer.gpu;
         var key = String(lengthScale);
-        if (g.normalVao && g.normalKey === key)
-        {
-            return;
-        }
+        if (g.normalVao && g.normalKey === key) { return; }
         if (g.normalVao)
         {
             this.gl.deleteVertexArray(g.normalVao);
@@ -1086,98 +1072,38 @@
             g.normalBuffer = null;
         }
 
-        var gl = this.gl;
-        var pos = layer.data.positions;
-        var tri = Math.floor(pos.length / 9);
-        if (tri <= 0)
-        {
-            return;
-        }
+        /* 法向几何来自 ensureTopo 的 faces（每面 6 float：质心 + 单位法向）。
+         * 这里展开成 12 float 交错缓冲（两端各 xyz+rgb），颜色由单位法向现算。
+         * lengthScale 改变时只重算终点坐标，不重扫三角形。 */
+        var topo = this.ensureTopo(layer);
+        if (!topo || !topo.faceCount) { return; }
 
-        // 逐个面计算法向；默认不抽稀（maxFaces = Infinity），仅显式限制时才按步长抽样
-        var maxFaces = Number.POSITIVE_INFINITY;
-        var stride = Math.max(1, Math.ceil(tri / maxFaces));
-        var n = Math.floor((tri + stride - 1) / stride);
-        /* 每个法向 = 2 个顶点 × 6 个 float（xyz + rgb） */
+        var src = topo.faces;
+        var n = topo.faceCount;
         var out = new Float32Array(n * 12);
-
-        // 法向长度按平均边长缩放，使长度与面尺寸相关
-        var probe = Math.max(1, Math.floor(tri / 512));
-        var sumEdge = 0;
-        var cntEdge = 0;
-        for (var q = 0; q < tri; q += probe)
-        {
-            var oq = q * 9;
-            var ex = pos[oq + 3] - pos[oq];
-            var ey = pos[oq + 4] - pos[oq + 1];
-            var ez = pos[oq + 5] - pos[oq + 2];
-            var fx = pos[oq + 6] - pos[oq + 3];
-            var fy = pos[oq + 7] - pos[oq + 4];
-            var fz = pos[oq + 8] - pos[oq + 5];
-            var gx = pos[oq] - pos[oq + 6];
-            var gy = pos[oq + 1] - pos[oq + 7];
-            var gz = pos[oq + 2] - pos[oq + 8];
-            sumEdge += (Math.sqrt(ex * ex + ey * ey + ez * ez)
-                + Math.sqrt(fx * fx + fy * fy + fz * fz)
-                + Math.sqrt(gx * gx + gy * gy + gz * gz)) / 3;
-            cntEdge++;
-        }
-        var avgEdge = cntEdge > 0 ? sumEdge / cntEdge : 1;
-        if (!(avgEdge > 0))
-        {
-            avgEdge = 1;
-        }
+        var avgEdge = topo.avgEdge > 0 ? topo.avgEdge : 1;
         var len = avgEdge * 1.2 * lengthScale;
 
-        var w = 0;
-        for (var i = 0; i < tri; i += stride)
+        for (var f = 0; f < n; f++)
         {
-            var o = i * 9;
-            var x0 = pos[o], y0 = pos[o + 1], z0 = pos[o + 2];
-            var x1 = pos[o + 3], y1 = pos[o + 4], z1 = pos[o + 5];
-            var x2 = pos[o + 6], y2 = pos[o + 7], z2 = pos[o + 8];
-
-            var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
-            var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
-            var nx = ay * bz - az * by;
-            var ny = az * bx - ax * bz;
-            var nz = ax * by - ay * bx;
-            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (nl < 1e-12)
-            {
-                continue;
-            }
-            nx /= nl; ny /= nl; nz /= nl;
-
-            var cx = (x0 + x1 + x2) / 3;
-            var cy = (y0 + y1 + y2) / 3;
-            var cz = (z0 + z1 + z2) / 3;
-
-            /* 法向色 = 法线贴图的编码方式：rgb = n * 0.5 + 0.5。
-             * 带符号，所以 +Z 与 -Z 是两种颜色（+Z 偏浅蓝、-Z 偏暗蓝），
-             * 一眼就能看出朝向翻转 —— 这也是各家软件显示「网格法向」的通用配色。 */
+            var s0 = f * 6, d0 = f * 12;
+            var cx = src[s0], cy = src[s0 + 1], cz = src[s0 + 2];
+            var nx = src[s0 + 3], ny = src[s0 + 4], nz = src[s0 + 5];
             var nr = nx * 0.5 + 0.5, ng = ny * 0.5 + 0.5, nb = nz * 0.5 + 0.5;
-
-            out[w++] = cx;
-            out[w++] = cy;
-            out[w++] = cz;
-            out[w++] = nr;
-            out[w++] = ng;
-            out[w++] = nb;
-            out[w++] = cx + nx * len;
-            out[w++] = cy + ny * len;
-            out[w++] = cz + nz * len;
-            out[w++] = nr;
-            out[w++] = ng;
-            out[w++] = nb;
+            out[d0] = cx; out[d0 + 1] = cy; out[d0 + 2] = cz;
+            out[d0 + 3] = nr; out[d0 + 4] = ng; out[d0 + 5] = nb;
+            out[d0 + 6] = cx + nx * len;
+            out[d0 + 7] = cy + ny * len;
+            out[d0 + 8] = cz + nz * len;
+            out[d0 + 9] = nr; out[d0 + 10] = ng; out[d0 + 11] = nb;
         }
 
+        var gl = this.gl;
         var vao = gl.createVertexArray();
         gl.bindVertexArray(vao);
         var buf = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-        gl.bufferData(gl.ARRAY_BUFFER, out.subarray(0, w), gl.STATIC_DRAW);
-        /* 交错布局：xyz(12B) + rgb(12B)，与 NORMAL_VS 的 location 0/1 对应 */
+        gl.bufferData(gl.ARRAY_BUFFER, out, gl.STATIC_DRAW);
         var strideN = 6 * 4;
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, strideN, 0);
@@ -1187,7 +1113,7 @@
 
         g.normalVao = vao;
         g.normalBuffer = buf;
-        g.normalCount = Math.floor(w / 12);
+        g.normalCount = n;
         g.normalKey = key;
     };
 
@@ -1472,53 +1398,24 @@
                 gl.disable(gl.CULL_FACE);
             }
         }
-        /* 平均边长（像素）：三角面近似均匀时 edge ≈ 对角线 / √三角形数 */
         var g0 = layer.gpu;
-        var avgEdgePx = 1e9;
-        if (pxPerMm > 0 && g0 && g0.triCount > 0)
-        {
-            var bb0 = layer.data.bbox;
-            if (bb0 && bb0.min)
-            {
-                var dx0 = bb0.max[0] - bb0.min[0];
-                var dy0 = bb0.max[1] - bb0.min[1];
-                var dz0 = bb0.max[2] - bb0.min[2];
-                avgEdgePx = Math.sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0) * pxPerMm /
-                            Math.sqrt(g0.triCount);
-            }
-        }
 
         if (layer.showWire)
         {
-            if (densityCullOn() && avgEdgePx < WIRE_MIN_PX)
+            this.drawWire(layer, mvp);            // 全量，不做密度剔除
+            if (g0 && g0.wireCount)
             {
-                this.stats.wireSkipped = (this.stats.wireSkipped || 0) + 1;
-            }
-            else
-            {
-                this.drawWire(layer, mvp);
-                if (g0 && g0.wireCount)
-                {
-                    this.stats.wireLines = (this.stats.wireLines || 0) + g0.wireCount / 2;
-                }
+                this.stats.wireLines = (this.stats.wireLines || 0) + g0.wireCount / 2;
             }
         }
         // 边界线不在这里画：由 renderFrame 在本视图末尾统一绘制（避免被面片绘制状态影响）
         if (layer.showVerts)
         {
-            var ptPx = (layer.pointSize || 3) * (ctx.dpr || 1) * ctx.settings.pointScale;
-            if (densityCullOn() && avgEdgePx < ptPx * 1.1)
+            this.drawVerts(layer, mvp, ctx, alpha);   // 全量，不做密度剔除
+            if (g0)
             {
-                this.stats.vertSkipped = (this.stats.vertSkipped || 0) + 1;
-            }
-            else
-            {
-                this.drawVerts(layer, mvp, ctx, alpha);
-                if (g0)
-                {
-                    this.stats.vertPoints = (this.stats.vertPoints || 0) +
-                        (g0.vertDrawCount || g0.vertCount || 0);
-                }
+                this.stats.vertPoints = (this.stats.vertPoints || 0) +
+                    (g0.vertDrawCount || g0.vertCount || 0);
             }
         }
         if (layer.showNormals)
@@ -1528,51 +1425,197 @@
         }
     };
 
+    /* ==========================================================================
+       网格拓扑（半边信息）：一次遍历同时产出
+         · edges    ：所有唯一边（线框）
+         · boundary ：只被一个面使用的边（开放边 / 缺陷）
+         · faces    ：面法向与质心（法向显示）
+         · avgEdge  ：平均边长（法向线长度）
+       改前四个 ensure* 各自重扫一遍三角形：线框用 Set、边界用字符串 key 重新焊接、
+       法向又单独扫一遍算叉积和边长。这里合并为一次遍历，并复用载入时 analyzeMesh
+       已算好的 data.remap 做焊接 id（零哈希、零字符串）。
+       ========================================================================== */
+    Renderer.prototype.ensureTopo = function (layer)
+    {
+        var g = layer.gpu, d = layer.data;
+        if (!g || !d || d.kind !== 'mesh' || !g.triCount || g.topo) { return g && g.topo; }
+
+        var pos = d.positions;
+        var tri = g.triCount;
+        var remap = (d.remap && d.remap.length >= tri * 3) ? d.remap : null;
+        var LIM = 16777216;                       // 2^24，焊接 id 上限（4096 万顶点足够）
+
+        /* 边表用 Map：按实际出现的边增长，不再一次预分配 tri*6 的巨型数组。
+         * 之前用开放寻址表对 200 万面要 96MB 键 + 48MB 值，载入后自动跑会卡死主线程。
+         * 同一个焊接 id 对 (u,v) 只存一次，键是数值 u*LIM+v（无字符串拼接）。 */
+        var edgeMap = new Map();                  // key -> 边序号
+
+        /* 边端点先用普通数组累积（稀疏增长），最后压紧成 TypedArray。 */
+        var eU = [];                              // 焊接端点（仅用于调试/去重）
+        var eA = [];                              // 原始顶点索引（写进 GPU 缓冲）
+        var eB = [];
+        var eUse = [];                            // 使用次数
+        var ne = 0;
+
+        /* 面法向：每面 6 float（质心 xyz + 单位法向 xyz），颜色现算；全量不抽稀。 */
+        var faces = new Float32Array(tri * 6);
+        var nf = 0;
+        var sumEdge = 0, cntEdge = 0;
+        var probe = Math.max(1, Math.floor(tri / 512));
+
+        function addEdge(va, vb, ua, ub)
+        {
+            if (ua === ub) { return; }
+            var key = ua < ub ? ua * LIM + ub : ub * LIM + ua;
+            var idx = edgeMap.get(key);
+            if (idx === undefined)
+            {
+                edgeMap.set(key, ne);
+                eU.push(ua);
+                eA.push(va); eB.push(vb);
+                eUse.push(1);
+                ne++;
+                return;
+            }
+            if (eUse[idx] < 255) { eUse[idx]++; }
+        }
+
+        for (var i = 0; i < tri; i++)
+        {
+            var o = i * 9;
+            var x0 = pos[o], y0 = pos[o + 1], z0 = pos[o + 2];
+            var x1 = pos[o + 3], y1 = pos[o + 4], z1 = pos[o + 5];
+            var x2 = pos[o + 6], y2 = pos[o + 7], z2 = pos[o + 8];
+
+            var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
+            var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
+            var nx = ay * bz - az * by;
+            var ny = az * bx - ax * bz;
+            var nz = ax * by - ay * bx;
+            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl >= 1e-12)
+            {
+                nx /= nl; ny /= nl; nz /= nl;
+                var q = nf * 6;
+                faces[q] = (x0 + x1 + x2) / 3;
+                faces[q + 1] = (y0 + y1 + y2) / 3;
+                faces[q + 2] = (z0 + z1 + z2) / 3;
+                faces[q + 3] = nx; faces[q + 4] = ny; faces[q + 5] = nz;
+                nf++;
+            }
+
+            if ((i % probe) === 0)
+            {
+                sumEdge += (Math.sqrt(ax * ax + ay * ay + az * az) +
+                            Math.sqrt(bx * bx + by * by + bz * bz) +
+                            Math.sqrt((x2 - x1) * (x2 - x1) +
+                                      (y2 - y1) * (y2 - y1) +
+                                      (z2 - z1) * (z2 - z1))) / 3;
+                cntEdge++;
+            }
+
+            var v0 = i * 3, v1 = v0 + 1, v2 = v0 + 2;
+            var u0 = remap ? remap[v0] : v0;
+            var u1 = remap ? remap[v1] : v1;
+            var u2 = remap ? remap[v2] : v2;
+            addEdge(v0, v1, u0, u1);
+            addEdge(v1, v2, u1, u2);
+            addEdge(v2, v0, u2, u0);
+        }
+
+        /* 压紧成最终缓冲：线框 = 所有边；边界 = 使用次数为 1 的边 */
+        var edges = new Uint32Array(ne * 2);
+        var bCount = 0;
+        for (var k = 0; k < ne; k++)
+        {
+            edges[k * 2] = eA[k];
+            edges[k * 2 + 1] = eB[k];
+            if (eUse[k] === 1) { bCount++; }
+        }
+        var boundary = new Uint32Array(bCount * 2);
+        var bw = 0;
+        for (var k2 = 0; k2 < ne; k2++)
+        {
+            if (eUse[k2] === 1)
+            {
+                boundary[bw++] = eA[k2];
+                boundary[bw++] = eB[k2];
+            }
+        }
+        eU.length = eA.length = eB.length = eUse.length = 0;   // 释放临时数组
+
+        g.topo = {
+            edges: edges,
+            boundary: boundary,
+            faces: faces.subarray(0, nf * 6),
+            faceCount: nf,
+            edgeCount: ne,
+            boundaryEdges: bCount,
+            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
+        };
+        return g.topo;
+    };
+
+    /* 空闲预构建线框缓冲。
+     *
+     * 首次点开线框要遍历全部三角形做边去重（20 万面约几十 ms，500 万面可达数秒），
+     * 同步做在渲染帧里就会明显卡一下。改为图层上传后错峰预建：
+     *   - 只处理网格、顶点数不超过 PREWIRE_MAX_TRI（超大网格仍按需构建，避免占内存）；
+     *   - 用 setTimeout 让出主线程，并串行排队，避免多图层同时建导致卡顿叠加；
+     *   - 用户先点了线框也没关系：ensureWire 会同步建好，队列随后发现已有缓冲直接跳过。 */
+    var PREWIRE_MAX_TRI = 50000;
+    var prewireQueue = [];
+    var prewireBusy = false;
+    var prewireRenderer = null;
+
+    function pumpPrewire()
+    {
+        if (prewireBusy || !prewireQueue.length) { return; }
+        prewireBusy = true;
+        var layer = prewireQueue.shift();
+        var renderer = prewireRenderer;
+        global.setTimeout(function ()
+        {
+            try
+            {
+                var g = layer && layer.gpu;
+                if (renderer && g && g.triCount && !g.wireVao)
+                {
+                    renderer.ensureWire(layer);
+                }
+            }
+            catch (e) { /* 预构建失败不影响正常使用 */ }
+            finally
+            {
+                prewireBusy = false;
+                if (prewireQueue.length) { global.setTimeout(pumpPrewire, 16); }
+            }
+        }, 0);
+    }
+
+    Renderer.prototype.schedulePrewire = function (layer)
+    {
+        var g = layer && layer.gpu;
+        if (!g || layer.kind !== 'mesh' || !g.triCount ||
+            g.triCount > PREWIRE_MAX_TRI || g.wireVao)
+        {
+            return;
+        }
+        if (prewireQueue.indexOf(layer) >= 0) { return; }
+        prewireRenderer = this;
+        prewireQueue.push(layer);
+        global.setTimeout(pumpPrewire, 300);   // 让首帧先看得到模型
+    };
+
     /* 线框：为每个三角形生成 3 条边索引（全部面，不做抽稀） */
     Renderer.prototype.ensureWire = function (layer)
     {
         var gl = this.gl;
         var g = layer.gpu;
-        if (!g || !g.triCount || g.wireVao)
-        {
-            return;
-        }
+        if (!g || !g.triCount || g.wireVao) { return; }
 
-        var tri = g.triCount;
-        var buf = new Uint32Array(tri * 6);
-        var src = g.srcIndex;          // 索引化后的三角形顶点（去重后编号）
-        var LIM = 67108864;            // 2^26：边键 a*LIM+b 不会溢出
-        var seen = new Set();          // 共享边只画一次（相邻两个面各有一条，原先重复绘制）
-        var w = 0;
-
-        function addEdge(p, q)
-        {
-            var key = p < q ? p * LIM + q : q * LIM + p;
-            if (seen.has(key))
-            {
-                return;
-            }
-            seen.add(key);
-            buf[w++] = p;
-            buf[w++] = q;
-        }
-
-        for (var i = 0; i < tri; i++)
-        {
-            var b = i * 3;
-            var a0 = src ? src[b] : b;
-            var a1 = src ? src[b + 1] : b + 1;
-            var a2 = src ? src[b + 2] : b + 2;
-            if (a0 === a1 || a1 === a2 || a2 === a0)
-            {
-                continue;              // 退化三角形不产生边
-            }
-            addEdge(a0, a1);
-            addEdge(a1, a2);
-            addEdge(a2, a0);
-        }
-
-        var idx = buf.subarray(0, w);
+        var topo = this.ensureTopo(layer);
+        if (!topo || !topo.edgeCount) { return; }
 
         var vao = gl.createVertexArray();
         gl.bindVertexArray(vao);
@@ -1581,12 +1624,12 @@
         gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
         var ebo = gl.createBuffer();
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topo.edges, gl.STATIC_DRAW);
         gl.bindVertexArray(null);
 
         g.wireVao = vao;
         g.wireBuffer = ebo;
-        g.wireCount = w;                  // 唯一端的索引数（= 唯一边数 × 2）
+        g.wireCount = topo.edgeCount * 2;
     };
 
     Renderer.prototype.drawWire = function (layer, mvp)
@@ -1631,107 +1674,20 @@
     {
         var gl = this.gl;
         var g = layer.gpu;
-        if (!g || !g.triCount || g.boundaryVao || g.boundaryDone)
-        {
-            return;
-        }
+        if (!g || !g.triCount || g.boundaryVao || g.boundaryDone) { return; }
         g.boundaryDone = true;
 
-        var pos = layer.data.positions;
-        var tri = g.triCount;
-        var bb = layer.data.bbox;
-        var rad = 1;
-        if (bb && bb.min && bb.max)
-        {
-            rad = Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1],
-                bb.max[2] - bb.min[2]) || 1;
-        }
-        var q = Math.max(rad * 1e-6, 1e-9);
-
-        // 1) 位置去重：量化坐标 -> 代表顶点序号
-        var vmap = new Map();
-        var vi = new Uint32Array(tri * 3);
-        for (var v = 0; v < tri * 3; v++)
-        {
-            var o = v * 3;
-            var key = Math.round(pos[o] / q) + ',' +
-                Math.round(pos[o + 1] / q) + ',' +
-                Math.round(pos[o + 2] / q);
-            var id = vmap.get(key);
-            if (id === undefined)
-            {
-                id = v;
-                vmap.set(key, id);
-            }
-            vi[v] = id;
-        }
-
-        // 2) 统计每条边被几个三角形使用
-        //    LIM 必须大于"顶点序号最大值"，否则 a*LIM+b 会溢出串键（大网格曾因此误判）
-        var edgeUse = new Map();
-        var LIM = 67108864;   // 2^26，可容纳 6700 万顶点，乘积 2^26*5e6 仍在安全整数内
-        for (var t = 0; t < tri; t++)
-        {
-            var a = vi[t * 3];
-            var b = vi[t * 3 + 1];
-            var c = vi[t * 3 + 2];
-
-            // 退化三角形（含重复顶点）不产生有效边
-            if (a === b || b === c || c === a)
-            {
-                continue;
-            }
-
-            var e0 = a < b ? a * LIM + b : b * LIM + a;
-            var e1 = b < c ? b * LIM + c : c * LIM + b;
-            var e2 = c < a ? c * LIM + a : a * LIM + c;
-            edgeUse.set(e0, (edgeUse.get(e0) || 0) + 1);
-            edgeUse.set(e1, (edgeUse.get(e1) || 0) + 1);
-            edgeUse.set(e2, (edgeUse.get(e2) || 0) + 1);
-        }
-
-        // 3) 只出现一次的边 = 边界边
-        var segs = [];
-        edgeUse.forEach(function (cnt, k)
-        {
-            if (cnt === 1)
-            {
-                segs.push(k);
-            }
-        });
-
+        var topo = this.ensureTopo(layer);
         var notifyStat = function ()
         {
-            try
-            {
-                renderHooks.refreshProps();   // 刷新"统计"里的边界边数（由 app 注入）
-            }
-            catch (e)
-            {
-                /* ignore */
-            }
+            try { renderHooks.refreshProps(); } catch (e) { /* ignore */ }
         };
 
-        if (segs.length === 0)
+        if (!topo || !topo.boundaryEdges)
         {
             g.boundaryEdges = 0;
             notifyStat();
-            return;   // 封闭模型，无边界
-        }
-
-        // 直接复用网格的顶点缓冲，只额外建一个"边界边"索引缓冲（与线框同一套机制）
-        var out = new Uint32Array(segs.length * 2);
-        var w = 0;
-        // 索引化后 posBuffer 存的是去重顶点；边界边序号基于原始 positions，
-        // 必须用 srcIndex 映射一次，否则边界线会连到错误的顶点上
-        var vmap2 = g.indexed ? g.srcIndex : null;
-        for (var s = 0; s < segs.length; s++)
-        {
-            var kk = segs[s];
-            var ia = Math.floor(kk / LIM);
-            var ib = kk - ia * LIM;
-            out[w++] = vmap2 ? vmap2[ia] : ia;
-            out[w++] = vmap2 ? vmap2[ib] : ib;
+            return;
         }
 
         var vao = gl.createVertexArray();
@@ -1741,13 +1697,13 @@
         gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
         var ebo = gl.createBuffer();
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, out, gl.STATIC_DRAW);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topo.boundary, gl.STATIC_DRAW);
         gl.bindVertexArray(null);
 
         g.boundaryVao = vao;
         g.boundaryBuffer = ebo;
-        g.boundaryCount = segs.length * 2;   // 索引数
-        g.boundaryEdges = segs.length;
+        g.boundaryCount = topo.boundaryEdges * 2;
+        g.boundaryEdges = topo.boundaryEdges;
         notifyStat();
     };
 
@@ -1945,16 +1901,12 @@
             return;
         }
 
-        // 索引化后 posBuffer 里已是去重顶点，直接 0..vertCount-1
+        // 全量顶点：posBuffer 里已是去重顶点，直接 0..vertCount-1
         var total = g.vertCount || (g.triCount * 3);
-
-        /* 超过上限按步长抽稀：顶点标记只用来"看密度"，没必要全画 */
-        var stride = (VERT_CAP > 0 && total > VERT_CAP) ? Math.ceil(total / VERT_CAP) : 1;
-        var n = Math.floor(total / stride);
-        var idx = new Uint32Array(n);
-        for (var i = 0; i < n; i++)
+        var idx = new Uint32Array(total);
+        for (var i = 0; i < total; i++)
         {
-            idx[i] = i * stride;
+            idx[i] = i;
         }
 
         var vao = gl.createVertexArray();
@@ -1969,9 +1921,7 @@
 
         g.vertVao = vao;
         g.vertBuffer = ibo;
-        /* vertCount 保留"真实顶点数"（属性面板、调试串在用），
-         * 绘制数量单独记，避免统计与显示混为一谈。 */
-        g.vertDrawCount = n;
+        g.vertDrawCount = total;
     };
 
     Renderer.prototype.drawVerts = function (layer, mvp, ctx, alpha)

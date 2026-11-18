@@ -6474,6 +6474,229 @@
             setInfo('视图已按当前数据铺满');
         });
 
+        /* 四元数 → yaw/pitch（度）：OrbitCamera.setOrientation 用 back 向量定义朝向，
+         * q 把本地 -Z 转到 back，所以 back = q · (0,0,-1)。 */
+        function viewAngles(q)
+        {
+            if (!q || q.length !== 4) { return null; }
+            /* 与 core.js 的 OrbitCamera.yaw/pitch 完全一致：
+             * q = fromBasis(right, up, back)，即 q 把本地 +Z 转到 back；
+             * yaw = atan2(back.y, back.x)，pitch = asin(back.z)。 */
+            var x = q[0], y = q[1], z = q[2], w = q[3];
+            var tx = 2 * (y * 1 - z * 0);
+            var ty = 2 * (z * 0 - x * 1);
+            var tz = 2 * (x * 0 - y * 0);
+            var bx = 0 + w * tx + (y * tz - z * ty);
+            var by = 0 + w * ty + (z * tx - x * tz);
+            var bz = 1 + w * tz + (x * ty - y * tx);
+            var yaw = Math.atan2(by, bx) * 180 / Math.PI;
+            var pitch = Math.asin(Math.max(-1, Math.min(1, bz))) * 180 / Math.PI;
+            return { yaw: yaw, pitch: pitch };
+        }
+
+        function fmtViewParam(st)
+        {
+            if (!st || !st.target || !(st.distance > 0)) { return '（无相机参数）'; }
+            var t = st.target;
+            var a = viewAngles(st.q);
+            var f = function (v) { return (Math.round(v * 10) / 10).toFixed(1); };
+            var s = '(' + f(t[0]) + ',' + f(t[1]) + ',' + f(t[2]) + ')  d' + f(st.distance);
+            if (a) { s += '  ' + f(a.yaw) + '°/' + f(a.pitch) + '°'; }
+            return s;
+        }
+
+        /* ---- 视角清单：动态重建菜单项 ---- */
+        function refreshViewMenu()
+        {
+            var box = $('views-list');
+            if (!box) { return; }
+            box.innerHTML = '';
+            var store = app.getViewList();
+            if (!store.list.length)
+            {
+                var em = document.createElement('div');
+                em.className = 'view-empty';
+                em.textContent = '（还没有保存视角）';
+                box.appendChild(em);
+                return;
+            }
+            store.list.forEach(function (item)
+            {
+                var row = document.createElement('div');
+                row.className = 'view-item' + (item.id === store.active ? ' active' : '');
+
+                /* 左侧：名称 + 保存时间（两行，避免菜单横向变宽） */
+                var meta = document.createElement('div');
+                meta.className = 'view-meta';
+                var nm = document.createElement('div');
+                nm.className = 'view-name';
+                nm.textContent = (item.id === store.active ? '● ' : '') + item.name;
+                nm.title = item.name;
+                var tm = document.createElement('div');
+                tm.className = 'view-time';
+                if (item.createdAt)
+                {
+                    var dt = new Date(item.createdAt);
+                    var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+                    tm.textContent = dt.getFullYear() + '-' + pad(dt.getMonth() + 1) + '-' +
+                        pad(dt.getDate()) + ' ' + pad(dt.getHours()) + ':' + pad(dt.getMinutes());
+                }
+                else
+                {
+                    tm.textContent = '（旧版视角）';
+                }
+                var pm = document.createElement('div');
+                pm.className = 'view-param';
+                pm.textContent = fmtViewParam(item.A);
+                pm.title = 'A 视角：目标 / 距离 / 方位角、俯仰角';
+                meta.appendChild(nm);
+                meta.appendChild(pm);
+                meta.appendChild(tm);
+
+                /* 右侧两个按钮：应用 / 删除 */
+                var go = document.createElement('button');
+                go.className = 'view-apply';
+                go.textContent = '应用';
+                go.title = '应用视角「' + item.name + '」';
+                go.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    app.switchToView(item.id);
+                    setInfo('已应用视角：' + item.name, true);
+                });
+
+                var del = document.createElement('button');
+                del.className = 'view-del';
+                del.textContent = '删除';
+                del.title = '删除视角「' + item.name + '」';
+                del.addEventListener('click', function (ev)
+                {
+                    ev.stopPropagation();
+                    app.deleteView(item.id);
+                    setInfo('已删除视角：' + item.name, true);
+                });
+
+                row.appendChild(meta);
+                row.appendChild(go);
+                row.appendChild(del);
+                box.appendChild(row);
+            });
+        }
+        global.MV.ui.refreshViewMenu = refreshViewMenu;
+
+        /* 视角清单是独立浮层：点开/关闭自己处理，不能冒泡到 tools-menu，
+         * 否则父菜单的 click 处理器会立刻 hideTopMenus() 把它关掉。 */
+        var viewMenuBtn = $('btn-views');
+        var viewMenu = $('views-menu');
+        var viewMenuPos = null;          // 本次会话内记住拖动后的位置；null = 尚未拖动
+        if (viewMenuBtn && viewMenu)
+        {
+            viewMenu.style.position = 'fixed';
+            viewMenu.style.margin = '0';     /* .menu 的 margin-top:6px 会叠加到 fixed 定位上 */
+            viewMenu.style.zIndex = '60';
+
+            viewMenuBtn.addEventListener('click', function (ev)
+            {
+                ev.stopPropagation();
+                var willOpen = viewMenu.classList.contains('hidden');
+                /* 先收起所有菜单（包括自己），再按 willOpen 决定是否重开 ——
+                 * 这样再点一次按钮必然关闭，不受其它 click 处理器干扰。 */
+                document.body.click();
+                viewMenu.classList.add('hidden');
+                if (!willOpen) { return; }
+
+                refreshViewMenu();
+                /* 先显示再量尺寸：浮层高度随清单内容变化，居中要用真实尺寸。 */
+                viewMenu.classList.remove('hidden');
+
+                var vr = null;
+                var area = $('view-area');
+                if (area && area.getBoundingClientRect) { vr = area.getBoundingClientRect(); }
+                var wW = global.innerWidth || 1200;
+                var wH = global.innerHeight || 800;
+                /* getBoundingClientRect 会强制同步布局：清单刚增删一项时
+                 * offsetHeight 可能还是上一帧的值，导致居中偏几个像素。 */
+                var mr0 = viewMenu.getBoundingClientRect();
+                var mw = mr0.width || viewMenu.offsetWidth || 262;
+                var mh = mr0.height || viewMenu.offsetHeight || 240;
+
+                var left, top;
+                if (viewMenuPos)
+                {
+                    left = viewMenuPos.left;
+                    top = viewMenuPos.top;
+                }
+                else if (vr && vr.width > 0 && vr.height > 0)
+                {
+                    /* 默认在三维视图区正中 */
+                    left = vr.left + (vr.width - mw) / 2;
+                    top = vr.top + (vr.height - mh) / 2;
+                }
+                else
+                {
+                    left = (wW - mw) / 2;
+                    top = (wH - mh) / 2;
+                }
+                /* 防止视口变小后浮层跑到屏幕外 */
+                left = Math.max(4, Math.min(left, wW - mw - 4));
+                top = Math.max(4, Math.min(top, wH - mh - 4));
+                viewMenu.style.left = Math.round(left) + 'px';
+                viewMenu.style.top = Math.round(top) + 'px';
+                viewMenuBtn.classList.add('active');
+            });
+            viewMenu.addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+            /* ---- 标题栏拖拽移动（位置只在本次会话内记住） ---- */
+            var dragHandle = viewMenu.querySelector('.menu-label');
+            var dragState = null;
+            if (dragHandle)
+            {
+                dragHandle.addEventListener('pointerdown', function (ev)
+                {
+                    if (ev.button !== 0) { return; }
+                    ev.stopPropagation();
+                    var r = viewMenu.getBoundingClientRect();
+                    dragState = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+                    dragHandle.setPointerCapture(ev.pointerId);
+                    ev.preventDefault();
+                });
+                dragHandle.addEventListener('pointermove', function (ev)
+                {
+                    if (!dragState) { return; }
+                    ev.stopPropagation();
+                    var x = Math.max(0, Math.min(ev.clientX - dragState.dx,
+                        (global.innerWidth || 1200) - 80));
+                    var y = Math.max(0, Math.min(ev.clientY - dragState.dy,
+                        (global.innerHeight || 800) - 40));
+                    viewMenu.style.left = x + 'px';
+                    viewMenu.style.top = y + 'px';
+                });
+                dragHandle.addEventListener('pointerup', function (ev)
+                {
+                    dragState = null;
+                    viewMenuPos = {
+                        left: parseInt(viewMenu.style.left, 10) || 0,
+                        top: parseInt(viewMenu.style.top, 10) || 0
+                    };
+                    try { dragHandle.releasePointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+                });
+            }
+
+            /* 点页面其它地方关闭 */
+            document.addEventListener('click', function ()
+            {
+                viewMenu.classList.add('hidden');
+                viewMenuBtn.classList.remove('active');
+            });
+        }
+
+        $('btn-view-add').addEventListener('click', function ()
+        {
+            var item = app.addCurrentView();
+            setInfo('已新增视角：' + item.name + '（Shift+V 可快速新增）', true);
+        });
+        refreshViewMenu();
+
         $('modal-ok').addEventListener('click', function ()
         {
             var cb = confirmCb;

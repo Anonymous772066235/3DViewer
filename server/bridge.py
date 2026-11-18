@@ -106,7 +106,23 @@ MESH_EXT = ('.stl', '.obj')
 
 # ---------------- 日志（控制台 + bridge.log） ----------------
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bridge.log')
+LOG_MAX_BYTES = 1024 * 1024          # 1 MB：超过就轮转
+LOG_KEEP = 2                         # 只保留 .1 一份备份
 LAST_ERROR = {'time': '', 'message': ''}
+
+
+def _rotate_log_if_needed():
+    """超过 1 MB 就轮转：bridge.log -> bridge.log.1（只留一份）。
+    /health 每几秒一次，没有轮转时日志无限增长（实测 220 MB / 380 万行）。"""
+    try:
+        if not os.path.isfile(LOG_PATH) or os.path.getsize(LOG_PATH) < LOG_MAX_BYTES:
+            return
+        bak = LOG_PATH + '.1'
+        if os.path.isfile(bak):
+            os.remove(bak)
+        os.replace(LOG_PATH, bak)
+    except Exception:
+        pass
 
 
 def log(msg):
@@ -116,6 +132,7 @@ def log(msg):
     except Exception:
         pass
     try:
+        _rotate_log_if_needed()
         with io.open(LOG_PATH, 'a', encoding='utf-8') as fh:
             fh.write(line + '\n')
     except Exception:
@@ -414,6 +431,9 @@ class Handler(BaseHTTPRequestHandler):
             msg = urllib.parse.unquote(msg)
         except Exception:
             pass
+        # /health 每几秒一次，成功请求不写盘 —— 这是日志暴涨的主因
+        if ' 200 ' in msg or ' 304 ' in msg:
+            return
         log('[http] ' + msg)
 
 
