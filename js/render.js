@@ -1,7 +1,7 @@
-/* L4 渲染层 | render：WebGL 与视角器
- * 允许依赖：core
- * 禁止依赖：DOM 面板（除 own canvas）/ MV.app 状态
- * 导出：MV.Renderer（类）、MV.render.installAppMethods（视角器 App 方法）
+/* [L4·渲染] render.js — WebGL 管线 / 拓扑 / 视角器
+ * 依赖：core
+ * 禁止：DOM 面板（除 own canvas）/ MV.app 状态
+ * 导出：MV.Renderer / MV.render.installAppMethods
  */
 (function (global)
 {
@@ -743,36 +743,37 @@
 
         if (d.kind === 'mesh')
         {
-            // 索引化：顶点去重后上传 + 索引缓冲（显存约降 50%，顶点着色器调用大减）
-            // STL 是散乱三角面（没有共享顶点信息），去重收益最大，也最安全；
-            // OBJ / PLY 自带拓扑或顶点属性，保持原始顶点独立，避免误合并
+            // 索引化：优先用导入预处理 Worker 的现成结果（零重算）
             var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
+            var ix, sc, badIdx;
 
-            // STL 焊接复用 createLayer 时 analyzeMesh 已算好的去重结果，零重算
-            var ix;
-            if (doWeld && d.uniqVerts && d.remap)
+            if (d.preVerts && d.preIdx && d.preChunks && d.preOrderedIdx)
             {
-                ix = { verts: d.uniqVerts, idx: d.remap, vcount: d.vertCount };
+                ix = { verts: d.preVerts, idx: d.preIdx, vcount: d.preVcount };
+                sc = { idx: d.preOrderedIdx, chunks: d.preChunks };
+                badIdx = d.preBadIdx || 0;
             }
             else
             {
-                ix = buildIndexed(d.positions, doWeld);
-            }
-
-            // 树上「点数量」已由 createLayer 的 analyzeMesh 算好；这里仅在极端路径下兜底
-            if (d.vertCount === undefined)
-            {
-                d.vertCount = doWeld ? ix.vcount : Math.floor(d.positions.length / 3);
-            }
-
-            // 空间分块：按质心分格 + 重排索引（同格三角形连续，AABB 更紧凑）
-            var sc = buildSpaceChunks(ix, d.count);
-
-            // 自检：索引值域越界会让三角形塌到顶点 0（画面破碎但 err=0、面数也对）
-            var badIdx = 0;
-            for (var bi = 0; bi < sc.idx.length; bi++)
-            {
-                if (sc.idx[bi] >= ix.vcount) { badIdx++; }
+                // 回退：同步路径（Worker 不可用 / 小网格）
+                if (doWeld && d.uniqVerts && d.remap)
+                {
+                    ix = { verts: d.uniqVerts, idx: d.remap, vcount: d.vertCount };
+                }
+                else
+                {
+                    ix = buildIndexed(d.positions, doWeld);
+                }
+                if (d.vertCount === undefined)
+                {
+                    d.vertCount = doWeld ? ix.vcount : Math.floor(d.positions.length / 3);
+                }
+                sc = buildSpaceChunks(ix, d.count);
+                badIdx = 0;
+                for (var bi = 0; bi < sc.idx.length; bi++)
+                {
+                    if (sc.idx[bi] >= ix.vcount) { badIdx++; }
+                }
             }
             if (badIdx > 0)
             {
@@ -816,6 +817,7 @@
                 normalBuffer: null,
                 normalCount: 0
             };
+            this.schedulePrewire(layer);           // 网格：空闲时用 Worker 预建拓扑
         }
         else
         {
@@ -961,9 +963,6 @@
                 count: d.count
             };
         }
-
-        /* 空闲时预建线框缓冲：首次点线框不再同步等待 */
-        this.schedulePrewire(layer);
 
         // 上传后检查 GL 错误：显存不足 / 驱动拒绝时不要静默失败成白屏
         var upErr = gl.getError();
@@ -1556,39 +1555,103 @@
         return g.topo;
     };
 
-    /* 空闲预构建线框缓冲。
+    /* 空闲预构建：把拓扑计算搬进 Worker，主线程只做 GPU 上传。
      *
-     * 首次点开线框要遍历全部三角形做边去重（20 万面约几十 ms，500 万面可达数秒），
-     * 同步做在渲染帧里就会明显卡一下。改为图层上传后错峰预建：
-     *   - 只处理网格、顶点数不超过 PREWIRE_MAX_TRI（超大网格仍按需构建，避免占内存）；
-     *   - 用 setTimeout 让出主线程，并串行排队，避免多图层同时建导致卡顿叠加；
-     *   - 用户先点了线框也没关系：ensureWire 会同步建好，队列随后发现已有缓冲直接跳过。 */
-    var PREWIRE_MAX_TRI = 50000;
+     * 改前这套逻辑在 main thread 的 setTimeout(0) 里跑，20 万面几十 ms、
+     * 500 万面可达数秒 —— 载入后主线程照样冻结。现在：
+     *   - 主线程把 positions / remap 的**副本** transfer 给 Worker（零拷贝传输）；
+     *   - Worker 算完把 edges / boundary / faces transfer 回来；
+     *   - 主线程收到结果只调用 ensureWire/ensureBoundary/ensureNormals 建 VAO。
+     * 多个图层的请求由同一个 Worker 串行处理，不会并发抢主线程。
+     * file:// 下 Worker 可能因 origin=null 创建失败 → 自动退回原来的同步路径。 */
+    var PREWIRE_MAX_TRI = 5000000;
     var prewireQueue = [];
-    var prewireBusy = false;
     var prewireRenderer = null;
+    var topoWorker = null;
+    var topoReqId = 0;
+    var topoPending = Object.create(null);       // id -> layer
 
-    function pumpPrewire()
+    function versionOfWorker()
     {
-        if (prewireBusy || !prewireQueue.length) { return; }
-        prewireBusy = true;
+        var v = (global.MV.config && global.MV.config.version) || '';
+        return v ? ('?v=' + v) : '';
+    }
+
+    function ensureTopoWorker()
+    {
+        if (topoWorker || !global.Worker) { return topoWorker; }
+        try
+        {
+            topoWorker = new global.Worker('js/worker_topo.js' + versionOfWorker());
+            topoWorker.onmessage = function (ev)
+            {
+                var m = ev.data;
+                var layer = topoPending[m.id];
+                delete topoPending[m.id];
+                if (!layer || !layer.gpu) { return; }
+                var g = layer.gpu;
+                g.topo = {
+                    edges: m.edges, boundary: m.boundary, faces: m.faces,
+                    faceCount: m.faceCount, edgeCount: m.edgeCount,
+                    boundaryEdges: m.boundaryEdges, avgEdge: m.avgEdge
+                };
+                /* 若这些覆盖层已经打开，补建 GPU 缓冲（不重算拓扑） */
+                var R = prewireRenderer;
+                if (R)
+                {
+                    if (layer.showWire) { R.ensureWire(layer); }
+                    if (layer.showBoundary) { R.ensureBoundary(layer); }
+                    if (layer.showNormals) { R.ensureNormals(layer, layer.normalLen || 1); }
+                    R.markDirty && R.markDirty();
+                }
+            };
+            topoWorker.onerror = function (e)
+            {
+                /* 不永久锁死：下一次调用仍可重试（比如资源加载竞态） */
+                if (global.console && global.console.warn)
+                {
+                    global.console.warn('[topo worker] 加载失败，回退主线程：' +
+                        ((e && e.message) || ''));
+                }
+                try { topoWorker.terminate(); } catch (x) { /* ignore */ }
+                topoWorker = null;
+                /* 把未完成的图层退回同步队列 */
+                for (var k in topoPending)
+                {
+                    if (prewireQueue.indexOf(topoPending[k]) < 0)
+                    {
+                        prewireQueue.push(topoPending[k]);
+                    }
+                }
+                topoPending = Object.create(null);
+                global.setTimeout(pumpPrewireSync, 0);
+            };
+        }
+        catch (e)
+        {
+            topoWorker = null;
+        }
+        return topoWorker;
+    }
+
+    function pumpPrewireSync()
+    {
+        if (!prewireQueue.length) { return; }
         var layer = prewireQueue.shift();
-        var renderer = prewireRenderer;
+        var R = prewireRenderer;
         global.setTimeout(function ()
         {
             try
             {
-                var g = layer && layer.gpu;
-                if (renderer && g && g.triCount && !g.wireVao)
+                if (R && layer.gpu && layer.gpu.triCount && !layer.gpu.topo)
                 {
-                    renderer.ensureWire(layer);
+                    R.ensureWire(layer);            // 同步回退：仍走 ensureTopo
                 }
             }
-            catch (e) { /* 预构建失败不影响正常使用 */ }
+            catch (e) { /* ignore */ }
             finally
             {
-                prewireBusy = false;
-                if (prewireQueue.length) { global.setTimeout(pumpPrewire, 16); }
+                if (prewireQueue.length) { global.setTimeout(pumpPrewireSync, 16); }
             }
         }, 0);
     }
@@ -1597,14 +1660,44 @@
     {
         var g = layer && layer.gpu;
         if (!g || layer.kind !== 'mesh' || !g.triCount ||
-            g.triCount > PREWIRE_MAX_TRI || g.wireVao)
+            g.triCount > PREWIRE_MAX_TRI || g.topo)
         {
             return;
         }
         if (prewireQueue.indexOf(layer) >= 0) { return; }
         prewireRenderer = this;
-        prewireQueue.push(layer);
-        global.setTimeout(pumpPrewire, 300);   // 让首帧先看得到模型
+        prewireQueue.push(layer);      // 仅同步回退路径用；Worker 路径随后立即 shift
+
+        var W = ensureTopoWorker();
+        if (W)
+        {
+            var d = layer.data;
+            var id = ++topoReqId;
+            topoPending[id] = layer;
+            /* 必须是副本：transfer 会让主线程的 positions 失效（渲染还要用） */
+            var posCopy = new Float32Array(d.positions);
+            var remapCopy = (d.remap && d.remap.length >= g.triCount * 3)
+                ? new Uint32Array(d.remap) : null;
+            var transfer = [posCopy.buffer];
+            if (remapCopy) { transfer.push(remapCopy.buffer); }
+            try
+            {
+                W.postMessage({
+                    id: id, positions: posCopy, remap: remapCopy, triCount: g.triCount
+                }, transfer);
+                prewireQueue.shift();               // 已交给 Worker
+            }
+            catch (e)
+            {
+                delete topoPending[id];
+                prewireQueue.shift();
+                global.setTimeout(pumpPrewireSync, 0);
+            }
+        }
+        else
+        {
+            global.setTimeout(pumpPrewireSync, 0);
+        }
     };
 
     /* 线框：为每个三角形生成 3 条边索引（全部面，不做抽稀） */

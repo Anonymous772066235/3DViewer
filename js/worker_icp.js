@@ -1,29 +1,7 @@
-/* ICP / 候选验证 计算线程（Web Worker）
- *
- * 为什么单开线程：
- *   ICP 单轮实测 ~215ms、收尾轮再跑 20 轮；候选验证一次 score 4000 点 × 8 轮。
- *   全放主线程就是一串 200ms 级（首次含 JIT 达 900ms）的帧冻结，
- *   表现为"配准期间拖不动视角"。
- *   搬到 worker 后主线程只负责收进度、写一个预览 uniform，配准期间可保持 60fps。
- *
- * 4PCS 粗配准**没有**搬：pairLimit 降到 8000 后单轮只要 75ms，
- * 分散在 30 帧里无感，搬过去反而要多一次大数组传输。
- *
- * 协议（主线程 → worker）
- *   { id, cmd:'init',        fixed:{pos, nrm} }                  建 KD 并缓存（一次）
- *   { id, cmd:'solve',       moving:{pos,nrm}, opts:{...} }      跑到收敛，每轮回报 step
- *   { id, cmd:'verifyInit',  moving:{pos,nrm}, opts:{...} }      建候选验证器
- *   { id, cmd:'score',       mats:[4x4, ...] }                   逐个残差验证
- *   { id, cmd:'screen',      mats:[4x4, ...] }                   逐个命中率粗筛
- *   { id, cmd:'cancel' }
- * 协议（worker → 主线程）
- *   { id, type:'ready',  ms }                                    建树耗时
- *   { id, type:'step',   iters, rms, used, done }
- *   { id, type:'done',   mat, iters, rms, used, hasNormals }
- *   { id, type:'mats',   list:[{rms,used} | {hit,med}] }
- *   { id, type:'cancelled' } / { id, type:'error', message }
+/* [W·后台] worker_icp.js — 配准迭代 / 候选验证
+ * 协议：{cmd:'init'|'solve'|'verifyInit'|'score'|'cancel', ...}
+ * 依赖：core.js / algo.js（importScripts）
  */
-
 /* core.js / algo.js 的 IIFE 都用 (window) 收尾，而 Worker 里没有 window ——
  * 把 self 挂成 window 让它们能解析（两层文件顶层都没有 document 引用）。 */
 self.window = self;
@@ -82,12 +60,26 @@ function ensureKd()
     return kdFixed;
 }
 
+/* 网格样本的法向在 Worker 内部算（主线程只传 positions/remap/vertCount），
+ * 避免主线程每次配准都跑一遍 O(面数) 的 computeVertexNormals。
+ * 点云样本自带 normals（或从 positions 直接来），不需要重算。 */
+function normalsOf(sample)
+{
+    if (!sample) { return null; }
+    if (sample.nrm) { return sample.nrm; }
+    if (sample.kind !== 'mesh' || !sample.positions) { return null; }
+    var fn = self.MV.icp && self.MV.icp.computeVertexNormals;
+    if (!fn) { return null; }
+    var r = fn(sample.positions, sample.remap || null, sample.vertCount || null);
+    return r.normals;
+}
+
 function doInit(msg)
 {
     var t = Date.now();
 
     fixedPos = msg.fixed.pos;
-    fixedNrm = msg.fixed.nrm || null;
+    fixedNrm = normalsOf(msg.fixed);
     kdFixed = null;
 
     var kd = ensureKd();
@@ -111,7 +103,7 @@ function doSolve(msg)
     opts.kd = kd;                 /* 复用缓存的全量 KD，避免每轮重建 */
 
     activeSolver = self.MV.icp.createSolver(
-        msg.moving.pos, msg.moving.nrm || null, fixedPos, fixedNrm, opts);
+        msg.moving.pos, normalsOf(msg.moving), fixedPos, fixedNrm, opts);
 
     if (!activeSolver)
     {
@@ -178,7 +170,7 @@ function doVerifyInit(msg)
     if (!fixedPos) { post({ type: 'error', message: '尚未 init 固定点集' }); return; }
 
     verifier = self.MV.icp.createVerifier(
-        msg.moving.pos, msg.moving.nrm || null, fixedPos, fixedNrm, msg.opts || {});
+        msg.moving.pos, normalsOf(msg.moving), fixedPos, fixedNrm, msg.opts || {});
 
     if (!verifier) { post({ type: 'error', message: '验证器创建失败' }); return; }
 

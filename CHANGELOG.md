@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.3.9` |
+| 当前版本 | `1.0.4.0` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-17 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -3731,7 +3731,7 @@ Web Worker —— 项目走 `serve.bat` 的本地 HTTP 服务，Worker 不受同
 
 ### 做法
 
-新增 `js/icp_worker.js`：
+新增 `js/worker_icp.js`：
 
 ```
 主线程                          Worker
@@ -4850,3 +4850,280 @@ token 不符直接 `return`。只有三处持有 token：
 适应按钮                    相机变化  OK 授权入口仍可用
 页面无 JS 语法错误                    OK
 ```
+
+
+### 首次开线框仍卡顿：预构建阈值过低（同版）
+
+用户反馈双击 HTML 打开后首次点线框仍卡。根因：上一轮止血把预构建上限压到
+**5 万面**，而样例 `bun_zipper.ply` 是 **69,451 面**，直接被排除在预构建之外 ——
+点线框时 `ensureWire → ensureTopo` 在主线程同步遍历全部三角形。
+
+改法：
+
+- `PREWIRE_MAX_TRI` 5 万 → **500 万**（覆盖常见扫描件）；
+- 预构建延迟 300ms → **0**（上传后立刻排队，仍用 `setTimeout(0)` 让出首帧）；
+- 拓扑数据按需才真正用到，提前算好换来"点开关零等待"。
+
+**验证**：
+
+```
+bun_zipper  69,451 面  载入后 topo/wireVao 均已就绪，点线框首帧 0ms  OK
+big.obj    200,000 面  同上，298,800 条边                          OK
+```
+
+
+### 拓扑预构建搬进 Web Worker（同版）
+
+**改前**：`ensureTopo`（遍历全部三角形生成边表/边界/面法向）在 main thread 的
+`setTimeout(0)` 里跑。20 万面几十 ms、500 万面数秒，载入后主线程照样冻结。
+
+**改后**：新增 `js/worker_topo.js`，计算全搬进 Worker：
+
+| 步骤 | 线程 |
+| --- | --- |
+| positions / remap 复制后 **transfer** 给 Worker（零拷贝传输） | 主线程 → Worker |
+| 遍历三角形：边去重、边界统计、面法向 | **Worker** |
+| edges / boundary / faces **transfer** 回来 | Worker → 主线程 |
+| `gl.bufferData` 建 VAO（WebGL 必须在主线程） | 主线程 |
+
+主线程在 Worker 计算期间完全空闲，界面保持流畅。
+
+**健壮性**：
+
+- Worker 创建失败（`file://` origin=null / 老浏览器）→ 自动退回原同步路径；
+- `onerror` 不永久锁死：未完成图层退回同步队列，下次仍可重试；
+- `postMessage` 抛错同样回退；
+- 修了一个既有 bug：`schedulePrewire` 原先误放在 `uploadLayer` 的**点云分支**，
+  网格图层从未触发预构建 —— 移到网格分支。
+
+**验证**：
+
+```
+bun_zipper 69,451 面：Worker 100ms 返回，边 104,288 / 边界 223 / 面 69,451  OK
+点线框 → 首帧 0ms，直接用 Worker 结果建 VAO                              OK
+无 Worker 环境：页面交互正常、无 JS 错误                                  OK
+```
+
+
+---
+
+## 架构评估：主线程昂贵计算梳理（2026-11-19）
+
+目标：渲染线程只管渲染，昂贵计算搬进 Worker，充分利用多核 + GPU。
+
+### 一、当前主线程上的昂贵计算清单
+
+| 计算 | 所在 | 触发时机 | 规模 | 性质 |
+| --- | --- | --- | --- | --- |
+| `analyzeMesh` | `render.js:474` | 载入时（`app.js:885`） | O(顶点) | 焊接去重 + bbox |
+| `buildIndexed` | `render.js:561` | `uploadLayer` | O(三角形) | 索引化 + 焊接 |
+| `buildSpaceChunks` | `render.js:334` | `uploadLayer` | O(三角形) | 分块索引 |
+| 索引越界自检 | `render.js:790` | `uploadLayer` | O(索引) | 校验 |
+| `computeVertexNormals` | `algo.js:2006` | 每次 ICP 采样 | O(顶点) | 面法向累加 |
+| `ensurePickGrid` | `algo.js:1138` | 首次拾取大模型 | O(三角形) | KD 风格网格 |
+| `extractVertices` | `app.js:750` | 载入后 / 右键拷点云 | O(顶点) | 展开唯一顶点 |
+| `ensureTopo` | `render.js:1438` | **已在 Worker** | O(三角形) | 边/边界/面法向 |
+| 所有 gl.* 上传 | `render.js` | `uploadLayer` | 数据拷贝 | **必须主线程** |
+
+### 二、哪些该搬、哪些不该搬
+
+**适合 Worker（纯 CPU 数据变换，无 DOM / 无 WebGL）**：
+
+1. `analyzeMesh + buildIndexed + buildSpaceChunks + 索引自检` —— 可合并成一次
+   **"导入预处理"Worker**，与 IO 解析一起做，主线程只拿结果 `gl.bufferData`。
+   收益最大：这是载入卡顿的主因（500 万面索引化常达数秒）。
+2. `extractVertices` —— 纯数组展开，随预处理一起产出。
+3. `computeVertexNormals` —— 可在 ICP Worker（`worker_icp.js`）内部直接做，
+   不必回主线程（当前 `ui.js:146/150` 主线程调用两次）。
+4. `ensurePickGrid` —— 纯空间索引构建，可在首次拾取前空闲时后台建。
+
+**必须留在主线程**：
+
+- 所有 `gl.bufferData` / `gl.drawElements` / VAO 创建 —— WebGL 上下文不能跨线程；
+- DOM 更新（属性面板、场景树、日志）；
+- 相机矩阵计算（每帧、轻量，搬线程反而因同步开销变慢）。
+
+### 三、关键约束与风险
+
+1. **buffer 转移是双刃剑**：transfer 零拷贝，但转移后主线程原 buffer 失效。
+   当前 `topo_worker` 用"复制再 transfer"规避（复制本身 O(n) 但比锁死主线程好）；
+   更优解是用 **SharedArrayBuffer**，但需 COOP/COEP 响应头，GitHub Pages
+   无法自定义，因此当前方案是可行上限。
+2. **Worker 数量**：已有 `icp_worker` + 新增 `topo_worker`。若再为导入预处理
+   单开一个，需控制并发（避免同时跑 3 个 Worker 占满 CPU 反而拖慢渲染）。
+   建议做成**单实例多任务队列**（一个通用 Worker，按 cmd 分派）。
+3. **数据依赖链**：`analyzeMesh → buildIndexed → buildSpaceChunks → ensureTopo`
+   是串行的，合并进一个 Worker 一次遍历完成收益最高；拆成多个 Worker 反而
+   要多轮数据传输。
+4. **法向"计算与显示"分离**：显示阶段的法向长度缩放（`ensureNormals` 中
+   `avgEdge * 1.2 * lengthScale`）是 O(面数) 的数组填充，可留在主线程（纯
+   TypedArray 写入，20 万面 <5ms），或也在 Worker 里按 lengthScale 缓存多份。
+
+### 四、建议的推进顺序
+
+1. **合并 Worker**：把 `topo_worker` 扩成通用 Worker，接收 `cmd: 'preprocess'`
+   一次完成 analyze/index/chunk/topo/vertices（最高收益）；
+2. **ICP 法向内部化**：把 `computeVertexNormals` 调用移进 `icp_worker`；
+3. **拾取网格后台化**：首次拾取前空闲构建 `ensurePickGrid`；
+4. **渲染纯净化**：主线程只保留 WebGL 调用 + 相机 + DOM，所有数据变换走 Worker。
+
+### 五、结论
+
+当前已完成第 4 步中与线框/边界/法向相关的部分（topo Worker）。
+其余三项是**明确的优化空间**，但不是 bug —— 当前功能正确，只是大网格载入/拾取
+时主线程会有可感知的停顿。建议按上述顺序逐步推进，每步单独验证。
+
+
+### 导入预处理搬进 Worker（架构评估第 1 步，同版）
+
+新增 `js/worker_pre.js`，把载入时的串行依赖链一次做完：
+
+```
+analyzeMesh → buildIndexed → buildSpaceChunks → 索引越界自检
+```
+
+**接入点**：`loadOne()` 里 `loadFile()` 之后 `createLayer()` 之前 `await preprocessMesh(data)`。
+结果挂到 `data.preVerts / preIdx / preChunks / preOrderedIdx / preBadIdx` 等字段；
+`createLayer` 看到 `uniqVerts` 已存在就跳过同步分析，`uploadLayer` 看到 `preVerts`
+也跳过同步 index/chunk/自检。**两处原有同步代码都保留作回退**（小网格 <1000 面
+或 Worker 不可用时）。
+
+**为什么收益最大**：这是载入卡顿的主因，500 万面索引化常达数秒；现在主线程在
+这段期间完全空闲，只等 Worker 回来做 `gl.bufferData`。
+
+**验证**：
+
+```
+bun_zipper 69,451 面：
+  preVerts=625,059  preIdx=208,353  preChunks=23  remap=208,353
+  idxOk=true  badIdx=0  triCount=69,451  vertCount=208,353   OK
+截图：左窗网格 / 右窗 ghost / HUD 均正常
+```
+
+
+### ICP 顶点法向计算搬进 Worker（架构评估第 2 步，同版）
+
+`icpSample()` 原先每次配准都在主线程跑两次 `computeVertexNormals`（O(面数)）。
+现在网格样本只传 `positions / remap / vertCount`，**法向由 `worker_icp.js`
+内部的 `normalsOf()` 计算**（该文件已 `importScripts('algo.js')`，直接可用）。
+
+改动：
+
+- `worker_icp.js`：新增 `normalsOf(sample)`；`doInit` / `doSolve` / `doVerifyInit`
+  三处都通过它取法向；
+- `ui.js icpSample()`：网格分支返回 `{kind:'mesh', pos, positions, remap, vertCount, nrm:null}`；
+- **关键修正**：临时复位（`inv(pose)·P_cur`）原来只改 `moving.pos`，
+  现在同步 `positions` 指向同一份复位数据 —— 否则 Worker 会用**未复位**的顶点
+  算法向，与 `pos` 不匹配；
+- 同步兜底路径（`createSolver` 主线程调用）在 `nrm` 缺失时临时计算，保证
+  Worker 不可用时功能不退化。
+
+**验证**：
+
+```
+Worker init（网格样本 nrm=null，带 positions/remap）→ type=ready  OK
+页面无 JS 语法错误                                              OK
+```
+
+> 完整的双模型 ICP E2E 在本次无头环境下未跑通（URL 双载入参数在 iframe 中
+> 未生成图层），留待正常浏览器复验。
+
+
+### 拾取网格后台构建（架构评估第 3 步，同版）
+
+`ensurePickGrid` 原先在**首次拾取大模型**时同步构建（O(三角形×覆盖格)），
+第一次点选会卡。现在载入后即用**独立一次性 Worker** 后台构建：
+
+- `worker_pre.js` 加 `cmd:'pickgrid'` 命令，复用其 buildPickGrid 实现；
+- `app.schedulePickGrid(layer)` 在 `layers.push` 后调用，发完即 `terminate`；
+- `algo.ensurePickGrid` 优先取 `layer._pickGridPending`（Worker 结果），零重算；
+- Worker 不可用 / 面数 <4000 / 构建失败 → 全部回退到原同步路径。
+
+参数与 `algo.js` 常量对齐：`N=8`、`PICK_GRID_MIN_TRIS=4000`。
+
+**验证**：手工给 Worker 发 pickgrid 命令（bun_zipper 69,451 面）→
+返回 `grid.tri=69451`、230 个有效格子，**Worker 实现正确**。
+自动调度在无头环境下未观察到结果（多个 Worker + 虚拟时钟限制），
+但回退路径完好，最坏情况等价于改动前行为。
+
+
+### Review 修正与文档对齐（2026-11-19，同版）
+
+对本次 Worker 化改动做完整 review，修正：
+
+- `ui.js`：同步兜底块（Worker 不可用时主线程算法向）缩进错误；
+- `app.js`：删除 `schedulePickGrid` 上两段矛盾注释（"复用 Worker" vs "独立 Worker"，
+  实际采用后者）；删除未使用的 `self2`；把 `if (!data)` 判空移到预处理之前；
+- `render.js`：预构建注释与实现对齐（Worker 模式下 `prewireQueue` 立即 shift，
+  串行由 Worker 自身保证，不是主线程队列）。
+
+核对主线程 `ensureTopo` 与 `worker_topo.js` 的产出字段、LIM/avgEdge 公式完全一致；
+浏览器加载两主题均无 JS 错误。
+
+README / GUIDE 同步补充三个 Worker 的分工表、目录树与 `file://` 降级说明。
+
+
+### js 目录按依赖层次重组（同版）
+
+原先 10 个文件平铺在 `js/` 根目录，职责不清。现按依赖层次分类：
+
+```
+js/
+├── app.js          应用入口（根）
+├── lib/            core.js（数学）、io.js（格式解析）
+├── engine/         algo.js（几何算法）、render.js（WebGL 渲染）
+├── ui/             ui.js、keys.js
+├── workers/        icp / topo / preprocess 三个 Worker
+└── plugins/        registry.js、optimize.js
+```
+
+- 用 `git mv` 移动已跟踪文件，保留历史；新 Worker 用普通 move；
+- `index.html` 9 处 script 路径同步更新；
+- 主线程 3 处 `new Worker` 路径更新；
+- `worker_icp.js` 的 `importScripts` 改为 `../lib/core.js` / `../engine/algo.js`
+  （相对 worker 自身 URL，Pages 子路径下同样有效）。
+
+验证：6 个核心模块全部加载；三个 Worker 均创建成功并返回结果
+（`icp_worker` 返回 `ready`，证明 importScripts 相对路径正确）。
+
+
+### 文件组织：平铺 + 分类标签 + 合并碎文件（同版）
+
+撤销上一轮子目录方案（lib/ engine/ ui/ workers/ plugins/），改为：
+
+1. **全部平铺到 `js/`**，每个文件头第一行统一分类标签：
+   `[L1·基础] core` → `[L2·IO] io` → `[L3·算法] algo` → `[L4·渲染] render`
+   → `[L5·界面] ui` → `[L6·编排] app` → `[W·后台]` 三个 Worker → `[P·插件] optimize`；
+   标签下写明依赖 / 禁止依赖 / 导出，依赖方向一眼可见。
+2. **合并 `keys.js` → `app.js`**：键表本来就是 app 的交互层碎块，26 个键全部保留，
+   `MV.keys` 导出与 `MV.keys.init()` 调用不变。
+3. **合并 `registry.js` → `optimize.js`**：注册表只服务唯一插件，`MV.plugins`
+   导出与 `register()` 调用不变。
+4. 三个 Worker **保持独立**（ICP 长任务不与拓扑/预处理互相阻塞）。
+
+验证：6 模块加载、26 键、插件列表、三个 Worker 返回全部 OK；
+快捷键 `?` 实测生效。
+
+
+### Worker 命名规范（同版）
+
+三个后台线程统一为 `worker_` 前缀 + 短标识（标识 ≤3 字母）：
+
+```
+icp.wk.js        → worker_icp.js       配准
+topo.wk.js       → worker_topo.js      拓扑
+preprocess.wk.js → worker_pre.js       导入预处理 / 拾取索引
+```
+
+同步更新主线程 4 处 `new Worker` 路径、README / GUIDE / 文件头注释。
+验证：6 模块加载、三个 Worker 均创建并返回（icp 返回 `ready`）。
+
+
+### 文档同步（2026-11-19，同版）
+
+按最终代码结构校正 README / GUIDE：
+
+- README：三个 Worker 路径对齐；线程职责改用 `worker_icp / worker_topo / worker_pre` 新名；目录树对齐；
+- GUIDE：删除不存在的 `js/gizmo.js` 行；`io.js` 描述去掉内部功能名；分层契约方向修正为
+  `app → {ui, algo, render, io} → core`；「新建平级文件/目录」改为「新建平级文件 + 分类标签」；
+  Worker 表补充 `worker_` 前缀与独立线程说明。

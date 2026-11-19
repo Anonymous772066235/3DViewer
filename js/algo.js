@@ -1,7 +1,7 @@
-/* L3 算法层 | algo：纯计算
- * 允许依赖：core（MV.math）
- * 禁止依赖：GL / MV.app 状态（App 方法通过 installAppMethods 注入）
- * 内容：① 三维裁剪（框选/多边形 → 棱柱半空间）② 拾取与测量（射线求交）
+/* [L3·算法] algo.js — 裁剪 / 拾取 / ICP / Super4PCS
+ * 依赖：core（MV.math）
+ * 禁止：GL / MV.app 状态（App 方法经 installAppMethods 注入）
+ * 导出：MV.algo / MV.icp / MV.kdtree
  */
 (function (global)
 {
@@ -1139,6 +1139,13 @@ function ensurePickGrid(layer, tri)
 {
     if (layer._pickGrid && layer._pickGrid.tri === tri)
     {
+        return layer._pickGrid;
+    }
+    /* Worker 已在后台建好：直接取用，零重算 */
+    if (layer._pickGridPending && layer._pickGridPending.tri === tri)
+    {
+        layer._pickGrid = layer._pickGridPending;
+        layer._pickGridPending = null;
         return layer._pickGrid;
     }
 

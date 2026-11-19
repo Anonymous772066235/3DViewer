@@ -1,11 +1,7 @@
-/* 3DViewer · 纯工具函数
- *
- * 这里的函数不接触 DOM、不读 App 状态、也不调用 ui.js 里的其它函数，
- * 只做数值计算与字符串格式化 —— 所以可以独立成文件、独立测试。
- *
- * 挂到 MV.util 暴露（不用 MV.ui.util：ui.js 会整个覆盖 MV.ui）；
- * ui.js 在顶部解构成本地变量，
- * 原来所有调用点都不需要改动。
+/* [L5·界面] ui.js — 场景树 / 属性面板 / 数据对齐 / 日志 / 纯工具
+ * 依赖：core / io / algo / render
+ * 禁止：直接操作 GL（经 Renderer）
+ * 导出：MV.ui / MV.util
  */
 (function (global)
 {
@@ -140,15 +136,21 @@
             };
         }
 
-        // 网格：优先用去重顶点 + 顶点法向
+        /* 网格：只传几何，法向由 ICP Worker 内部计算（normalsOf）。
+         * 主线程不再跑 O(面数) 的 computeVertexNormals。 */
         if (d.uniqVerts && d.remap && d.vertCount)
         {
-            var n1 = global.MV.icp.computeVertexNormals(d.positions, d.remap, d.vertCount);
-            return { pos: d.uniqVerts, nrm: n1.normals, count: d.vertCount };
+            return {
+                kind: 'mesh', pos: d.uniqVerts,
+                positions: d.positions, remap: d.remap, vertCount: d.vertCount,
+                nrm: null, count: d.vertCount
+            };
         }
-
-        var n2 = global.MV.icp.computeVertexNormals(d.positions, null, null);
-        return { pos: d.positions, nrm: n2.normals, count: n2.count };
+        return {
+            kind: 'mesh', pos: d.positions,
+            positions: d.positions, remap: null, vertCount: null,
+            nrm: null, count: d.count || Math.floor(d.positions.length / 3)
+        };
     }
 
     function jacobiLargestEigenVec(Nin)
@@ -4064,7 +4066,7 @@
      * 此前 ICP 单轮 ~215ms、收尾轮再 20 轮，全在主线程就是一串 200ms 级冻结
      * （实测最大帧间隔 933ms）。搬过去之后这些计算不再占主线程。
      *
-     * 详见 js/icp_worker.js。Worker 不可用（老浏览器 / 创建失败）时自动退回
+     * 详见 js/worker_icp.js。Worker 不可用（老浏览器 / 创建失败）时自动退回
      * 原来的 tick 主线程推进 —— 两条路径的收敛判据与烘焙逻辑完全一致。
      */
     var icpWorkerInst = null;
@@ -4109,7 +4111,7 @@
         try
         {
             var v = scriptVersionTag();
-            icpWorkerInst = new global.Worker('js/icp_worker.js' + (v ? ('?v=' + v) : ''));
+            icpWorkerInst = new global.Worker('js/worker_icp.js' + (v ? ('?v=' + v) : ''));
 
             /* 脚本加载失败 / Worker 内未捕获异常。
              * 没有这一层，importScripts 被 MIME 拒绝时是「静默失效」：
@@ -4284,15 +4286,21 @@
          * 复位后，每次运行的求解输入完全一致 —— 4PCS 的初值与当前位姿无关，
          * 于是重复点击「运行 ICP」得到零增量。 */
         var invPose = mat4Invert(srcPose);
+        var mPos = xformPosCopy(moving.pos, invPose);
         moving = {
-            pos: xformPosCopy(moving.pos, invPose),
-            nrm: moving.nrm ? xformDirCopy(moving.nrm, invPose) : null,
-            count: moving.count
+            kind: moving.kind, pos: mPos,
+            positions: mPos,                  // Worker 的 normalsOf 用这份算面法向
+            remap: moving.remap || null,
+            vertCount: moving.vertCount || null,
+            nrm: null, count: moving.count
         };
+        var fPos = new Float32Array(fixed.pos);
         fixed = {
-            pos: new Float32Array(fixed.pos),
-            nrm: fixed.nrm ? new Float32Array(fixed.nrm) : null,
-            count: fixed.count
+            kind: fixed.kind, pos: fPos,
+            positions: fPos,
+            remap: fixed.remap || null,
+            vertCount: fixed.vertCount || null,
+            nrm: null, count: fixed.count
         };
 
         var maxIter = clampInt($('icp-iter').value, 1, 50, 50);
@@ -4489,7 +4497,20 @@
             }
             opts.kd = fullKd;
 
-            return global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm, opts);
+            /* 同步兜底路径：主线程这里仍需法向（Worker 路径由 normalsOf 负责）。 */
+            var mNrm = moving.nrm;
+            var fNrm = fixed.nrm;
+            if (!mNrm && moving.positions && global.MV.icp.computeVertexNormals)
+            {
+                mNrm = global.MV.icp.computeVertexNormals(
+                    moving.positions, moving.remap || null, moving.vertCount || null).normals;
+            }
+            if (!fNrm && fixed.positions && global.MV.icp.computeVertexNormals)
+            {
+                fNrm = global.MV.icp.computeVertexNormals(
+                    fixed.positions, fixed.remap || null, fixed.vertCount || null).normals;
+            }
+            return global.MV.icp.createSolver(moving.pos, mNrm, fixed.pos, fNrm, opts);
         }
 
         /* 启动主 ICP —— **唯一入口**，两个调用点（未勾 4PCS 的初始化、stepVerify 收尾）

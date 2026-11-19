@@ -1,6 +1,6 @@
-/* L1 基础层 | core：数学与相机
- * 允许依赖：无
- * 禁止依赖：DOM / GL / MV.ui / MV.app
+/* [L1·基础] core.js — 数学 / 相机 / KD 树
+ * 依赖：无
+ * 禁止：DOM / GL / MV.ui / MV.app
  * 导出：MV.math（Vec3 / Mat4 / Quat / BBox / OrbitCamera）
  */
 (function (global)

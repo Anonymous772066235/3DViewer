@@ -130,6 +130,20 @@ POINTS(text) · 点 38,000 · 标量 2 列 · 法向
 现在 `pointerup` 时若判定为「没拖动过的单击」（`moved < 5`），就做一次 `rayPick`，
 命中谁就把谁设为当前图层。只在单击时做，旋转视角不触发 raycast。
 
+**三个后台线程的分工**
+
+除配准线程外，还有两个 Worker 把主线程上的 O(面数) 计算搬走：
+
+| Worker | 承担 | 产出 |
+| --- | --- | --- |
+| `worker_topo.js` | 一次三角形遍历 | 边表（线框）、边界边、面法向、平均边长 |
+| `worker_pre.js` | 导入时串行依赖链 | 顶点焊接 / 索引化 / 空间分块 / 拾取网格 |
+| `worker_icp.js` | 配准迭代 + 法向 | 变换矩阵、收敛进度 |
+
+三者统一 `worker_` 前缀命名（`worker_icp` / `worker_topo` / `worker_pre`），保持独立线程，
+避免配准长任务阻塞拓扑与预处理。主线程只保留 WebGL 上传（`gl.bufferData`）、相机与 DOM。
+`file://` 下三者均静默回退同步路径，功能不变、只是变慢。
+
 **主线程路径的时间切片（没有 Worker 时的兜底）**
 
 `file://` 打开页面时 Worker 用不了（实测 `SecurityError: ... cannot be accessed
@@ -158,7 +172,7 @@ if (r.partial) { nextIteration(tick, 0); return; }   // 让出主线程，续下
 
 **配准走 Worker 后的三个坑**
 
-ICP 迭代搬进 `js/icp_worker.js` 后，主线程最大帧间隔从数百毫秒降到 **17 ms**。
+ICP 迭代搬进 `js/worker_icp.js` 后，主线程最大帧间隔从数百毫秒降到 **17 ms**。
 但接得不对时是**静默失效**（主线程很流畅、一个进度都不回报），排查顺序如下：
 
 1. **启动时机必须在「运行态就绪」之后**
@@ -1173,7 +1187,7 @@ ICP 一个错误起点。
 
 ### 3.9 快捷键
 
-键位表在 `js/keys.js`，**帮助面板（`?`）按同一张表自动生成**，不存在文档与实现脱节。
+键位表在 `js/app.js`，**帮助面板（`?`）按同一张表自动生成**，不存在文档与实现脱节。
 
 | 分组 | 键 | 动作 |
 | --- | --- | --- |
@@ -1454,26 +1468,25 @@ ICP 一个错误起点。
 | 路径 | 该放什么 | 不该放什么 |
 | --- | --- | --- |
 | `js/core.js` | **L1 基础**：Vec3 / Mat4 / Quat / BBox / OrbitCamera | DOM、GL、业务状态 |
-| `js/io.js` | **L2 IO**：格式解析（STL/OBJ/PLY/点云）+ 孔位优化调用 + 载入前规模估算 | 渲染、界面布局 |
+| `js/io.js` | **L2 IO**：格式解析（STL/OBJ/PLY/OFF/glTF/点云）+ 载入前规模估算 | 渲染、界面布局 |
 | `js/algo.js` | **L3 算法**：三维裁剪、拾取与测量（**零 DOM / 零 GL**，交互入口以 `MV.algo.*` 导出，由 app 绑定按钮与键盘） | GL、DOM、`MV.ui`（全部经 `hooks` 注入） |
 | `js/render.js` | **L4 渲染**：WebGL 管线 + 视角器 | 图层管理、业务规则 |
-| `js/gizmo.js` | **L4.5 视角器**：削角六面体 26 面、X/Y/Z 方向箭头、点击切换视角 | render 的 GL 状态、图层数据 |
 | `js/ui.js` | **L5 界面**：场景树 / 属性面板 / 视图设置 / 弹窗 / 全局拖放 | GL 细节、算法实现 |
 | `js/app.js` | **L6 编排**：状态、图层、视图调度、输入分派、渲染循环、URL 参数（`MV.config`） | 具体算法与 DOM 细节 |
 | `server/` | 本地服务（静态 + `/optimize`）、独立桥接、端到端自测 | 任何前端代码 |
-| `js/plugins/` | **插件**：`registry.js`（注册表）+ 各插件（当前 `optimize.js` 孔位优化） | 主程序逻辑（插件只通过 `MV.*` 与 app 交互） |
+| `js/optimize.js` | **插件**：扩展入口（含注册表），当前仅一个插件 | 主程序逻辑（插件只通过 `MV.*` 与 app 交互） |
 
-**分层契约**：`ui → app → {algo, render, io}`，`{algo, render, io} → core`。下层**不得**直接调 `MV.ui`——通过 `bindHooks()` 注入的 `notify / refreshProps / renderPickBar` 通知，`App.prototype` 方法经 `installAppMethods()` 注入。
+**分层契约**：`app → {ui, algo, render, io} → core`。下层**不得**直接调 `MV.ui`——通过 `bindHooks()` 注入的 `notify / refreshProps / renderPickBar` 通知，`App.prototype` 方法经 `installAppMethods()` 注入。
 
-**根目录白名单**：`index.html`、`README.md`、`CHANGELOG.md`、`LICENSE`、`.gitignore`、`serve.bat`、`css/`、`js/`、`server/`（`js/plugins/` 在 `js/` 内）。
+**根目录白名单**：`index.html`、`README.md`、`CHANGELOG.md`、`LICENSE`、`.gitignore`、`serve.bat`、`css/`、`js/`、`server/`。
 
-**插件开关**：注释掉 `index.html` 里 `js/plugins/*.js` 的 `<script>` 即关闭该插件，主程序不依赖任何插件。
+**插件开关**：注释掉 `index.html` 里 `js/optimize.js` 的 `<script>` 即关闭该插件，主程序不依赖任何插件。
 
 ### 8.2 落位判断（新增功能三步）
 
 1. 问「它属于哪一类」：**I/O 解析 / 渲染 / 编辑算法 / 界面 / 编排**；
 2. 能放进现有某一层 → 放进去；
-3. 放不进（如“布尔运算”“点云配准”）→ **新建平级文件/目录**，禁止继续塞进 `app.js`。
+3. 放不进（如“布尔运算”“点云配准”）→ **新建平级文件**，文件头写 `[Lx·类]` 分类标签，禁止继续塞进 `app.js`。
 
 ### 8.3 规模阈值（量化）
 
@@ -1489,8 +1502,8 @@ ICP 一个错误起点。
 
 | 约定 | 说明 |
 | --- | --- |
-| 文件名 | 小写 + 语义（`segment` ✅ / `utils2` ❌） |
-| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → gizmo → plugins/* → ui → app` |
+| 文件名 | 小写 + 语义；后台线程用 `worker_` 前缀（`worker_icp` ✅ / `utils2` ❌）；文件头写 `[Lx·类]` 标签 |
+| 全局命名空间 | 每文件 IIFE 暴露 `MV.<层>`；加载顺序 `core → io → algo → render → optimize → ui → app`（详见 `index.html`） |
 | 入口唯一 | 对外只暴露 `serve.bat`；`server/start_bridge.bat` 仅作 `file://` 兜底 |
 | 不使用 ESM / 构建工具 | 保证 `file://` 双击可用（ESM 会被 CORS 拦截），保持零依赖零构建 |
 | URL 参数 | 统一在 `app.init()` 解析成 `MV.config`，其它模块只读配置 |
