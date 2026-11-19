@@ -9,12 +9,12 @@
 <title>3D Viewer</title>
 <!-- 图标：SVG 优先（矢量、跟随系统深/浅色），ICO 兜底。
      缓存戳跟随版本号，避免浏览器长期用旧图标。 -->
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.4.0" media="(prefers-color-scheme: dark)" />
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-light.svg?v=1.0.4.0" media="(prefers-color-scheme: light)" />
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.4.0" />
-<link rel="shortcut icon" href="assets/icons/favicon.ico?v=1.0.4.0" sizes="16x16 32x32 48x48" />
-<link rel="apple-touch-icon" href="assets/icons/app-icon-dark-256.png?v=1.0.4.0" />
-<link rel="stylesheet" href="css/style.css?v=1.0.4.0" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.4.1" media="(prefers-color-scheme: dark)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-light.svg?v=1.0.4.1" media="(prefers-color-scheme: light)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.4.1" />
+<link rel="shortcut icon" href="assets/icons/favicon.ico?v=1.0.4.1" sizes="16x16 32x32 48x48" />
+<link rel="apple-touch-icon" href="assets/icons/app-icon-dark-256.png?v=1.0.4.1" />
+<link rel="stylesheet" href="css/style.css?v=1.0.4.1" />
 <script>
 /* 主题必须在**首帧之前**生效。
  *
@@ -497,7 +497,7 @@
             </div>
 
                         <div class="xform-icp-params">
-                <label class="param"><span>迭代</span><input id="icp-iter" type="text" value="50" title="最大迭代次数（上限 50）"></label>
+                <label class="param"><span>迭代</span><input id="icp-iter" type="text" value="50" title="最大迭代次数，默认 50，可设 1-200"></label>
                 <label class="param"><span>采样%</span><input id="icp-sample" type="text" value="100" title="随机下采样百分比，100 = 全量"></label>
                 <label class="param"><span>角度°</span><input id="icp-angle" type="text" value="30" title="法向夹角超过该值的对应点丢弃"></label>
                 <label class="param"><span>距离</span><input id="icp-maxdist" type="text" value="10" title="对应点距离上限，超过则丢弃；0 = 自动"></label>
@@ -733,14 +733,14 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.4.0"></script>
-    <script src="js/io.js?v=1.0.4.0"></script>
-    <script src="js/algo.js?v=1.0.4.0"></script>
-    <script src="js/render.js?v=1.0.4.0"></script>
+    <script src="js/core.js?v=1.0.4.1"></script>
+    <script src="js/io.js?v=1.0.4.1"></script>
+    <script src="js/algo.js?v=1.0.4.1"></script>
+    <script src="js/render.js?v=1.0.4.1"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/optimize.js?v=1.0.4.0"></script>
-    <script src="js/ui.js?v=1.0.4.0"></script>
-    <script src="js/app.js?v=1.0.4.0"></script>
+    <script src="js/optimize.js?v=1.0.4.1"></script>
+    <script src="js/ui.js?v=1.0.4.1"></script>
+    <script src="js/app.js?v=1.0.4.1"></script>
 <!-- ===== 本地扩展 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

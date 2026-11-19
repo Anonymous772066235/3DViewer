@@ -4303,7 +4303,9 @@
             nrm: null, count: fixed.count
         };
 
-        var maxIter = clampInt($('icp-iter').value, 1, 50, 50);
+        var maxIter = clampInt($('icp-iter').value, 1, 200, 50);
+        /* 把实际生效值写回输入框：输入超出范围时被钳制，界面显示的就是真实值 */
+        if ($('icp-iter').value !== String(maxIter)) { $('icp-iter').value = maxIter; }
         var samplePct = clampInt($('icp-sample').value, 1, 100, 100);
         var sampleRatio = samplePct / 100;
         var angleDeg = parseFloat($('icp-angle').value);
