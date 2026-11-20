@@ -1,8 +1,12 @@
-/* [L2·IO] io.js — 格式解析 / 载入预检
+/* [L2·IO] worker_io.js — 导入解析 / 规模预检 / 导出（双环境内核）
  * 依赖：core（MV.math）
- * 禁止：render / GL
- * 导出：MV.loaders / MV.memguard
- * 说明：三段各自独立作用域（原为三个文件，私有函数重名）
+ * 禁止：render / GL / DOM
+ * 导出：MV.loaders / MV.memguard / MV.exporters / MV.ioBindHooks
+ *
+ * 一份代码两处加载：
+ *   主线程  index.html <script src="js/worker_io.js">   （file:// 回退路径）
+ *   Worker  new Worker('js/worker_io.js')  （http(s) 主路径；解析+预处理+拓扑+拾取索引）
+ * 交互（列确认弹窗 / hooks 注入）留在 ui.js + app.js，内核只做计算。
  */
 (function (global)
 {
@@ -143,7 +147,7 @@
                 carry = '';
             }
 
-            onLines(lines);
+            if (onLines(lines) === false) { return; }
             pos = end;
 
             if (onProgress)
@@ -1463,124 +1467,143 @@
     async function parseOFF(file, opts, onProgress)
     {
         var o = opts || {};
-        var text = await readText(file);
-        var lines = text.split(/\r?\n/);
-        var li = 0;
+        var dec = new TextDecoder('utf-8');
 
-        function nextDataLine()
+        /* 流式解析：OFF 大文件可达数百 MB / 数百万行。
+         * 改前 readAsText 一次性读入整文件再 split('\n') 成约 1000 万行字符串，
+         * 内存 3-4 GB、载入极卡。现在用 forEachLine 按 4MB 块流式读，
+         * 顶点直接写进预分配 TypedArray，面逐行三角化进 F32Accum。 */
+        var headBuf = await readSlice(file, 0, Math.min(file.size, 4096));
+        var headText = dec.decode(headBuf);
+        var lines0 = headText.split(/\r?\n/);
+        var hi = 0;
+        function nextHeadLine()
         {
-            while (li < lines.length)
+            while (hi < lines0.length)
             {
-                var l = lines[li++];
-                var t = l ? l.trim() : '';
+                var t = (lines0[hi++] || '').trim();
                 if (t && t.charAt(0) !== '#') { return t; }
             }
             return '';
         }
-
-        var head = nextDataLine();
+        var head = nextHeadLine();
         var m = /^(C?OFF)\b(.*)$/i.exec(head);
         if (!m) { throw new Error('不是有效的 OFF 文件：首行应为 OFF 或 COFF'); }
-
         var withColor = /^C/i.test(m[1]);
-        var counts = (m[2] || '').trim() || nextDataLine();
+
+        var counts = (m[2] || '').trim() || nextHeadLine();
         var c = counts.split(/\s+/);
         var nv = parseInt(c[0], 10) || 0;
         var nf = parseInt(c[1], 10) || 0;
         if (!nv) { throw new Error('OFF 文件里没有顶点'); }
 
-        if (onProgress) { await onProgress(0.2, 'OFF 顶点 ' + nv); }
+        /* 头部实际消耗的字节数：找到计数行结束的位置，从那里开始流式读 */
+        var reHead = /(?:^|\r?\n)[^\r\n]*\r?\n[^\r\n]*\r?\n/;
+        var hm = reHead.exec(headText);
+        var startOffset = hm ? hm[0].length : headText.length;
+        /* 若计数行与 OFF 在同一行（headText 第一行已含两行信息），需重算 */
+        if (m[2] && m[2].trim())
+        {
+            var firstNl = headText.indexOf('\n');
+            startOffset = firstNl >= 0 ? firstNl + 1 : headText.length;
+        }
 
         var pos = new Float32Array(nv * 3);
         var col = withColor ? new Float32Array(nv * 3) : null;
-
-        for (var v = 0; v < nv; v++)
-        {
-            var p = nextDataLine().split(/\s+/);
-            pos[v * 3] = +p[0];
-            pos[v * 3 + 1] = +p[1];
-            pos[v * 3 + 2] = +p[2];
-
-            if (col)
-            {
-                var r = +p[3], g = +p[4], b = +p[5];
-                /* 有的导出写 0-255，有的写 0-1 */
-                if (r > 1 || g > 1 || b > 1) { r /= 255; g /= 255; b /= 255; }
-                col[v * 3] = r; col[v * 3 + 1] = g; col[v * 3 + 2] = b;
-            }
-        }
-
         var maxTri = o.maxTriangles || DEFAULT_MAX_TRIANGLES;
 
-        /* 面可以是任意边形，三角化后的顶点数无法预先算出，
-         * 所以用动态累加器而不是按 nf*9 预分配（四边形按 9 算会越界） */
-        var posAcc = new F32Accum(4096);
-        var colAcc = col ? new F32Accum(4096) : null;
+        /* 面顶点是索引，展开后每条三角形 9 float；按 nf 预分配避免反复扩容。
+         * 若 nf 异常大（头声明不可信）则退回动态累加。 */
+        /* OFF 面行本身是顶点索引，直接保留！不再展开成角点坐标 ——
+         * 既省 2/3 内存，又让下游跳过 analyzeMesh 的 O(9N) 焊接哈希。 */
+        var idxAcc = new I32Accum(Math.min(nf, 1 << 24) * 3);
+        var colAcc = col ? new F32Accum(Math.min(nf, 1 << 24) * 9) : null;
+        var viCount = 0;                             // 已读顶点行
+        var fiCount = 0;                             // 已读面行
         var tri = 0;
         var full = false;
+        var numBuf = new Float64Array(64);           // scanNumbers 复用的输出缓冲
 
-        for (var f = 0; f < nf && !full; f++)
+        function onLine(line)
         {
-            var q = nextDataLine().split(/\s+/);
-            var n = parseInt(q[0], 10) || 0;
-            if (n < 3) { continue; }
+            var t = line.charCodeAt(0) === 35 ? '' : line;   // '#' 注释
+            if (!t) { return; }
 
-            for (var k = 1; k + 2 <= n; k++)
+            if (viCount < nv)
             {
-                if (tri >= maxTri) { full = true; break; }
-
-                var ids = [parseInt(q[k], 10), parseInt(q[k + 1], 10), parseInt(q[k + 2], 10)];
-                var bad = false;
-                for (var e = 0; e < 3; e++)
+                scanNumbers(t, numBuf);
+                var k = viCount * 3;
+                pos[k] = numBuf[0] || 0; pos[k + 1] = numBuf[1] || 0; pos[k + 2] = numBuf[2] || 0;
+                if (col)
                 {
-                    if (!(ids[e] >= 0 && ids[e] < nv)) { bad = true; }
+                    var r = numBuf[3] || 0, g = numBuf[4] || 0, b = numBuf[5] || 0;
+                    if (r > 1 || g > 1 || b > 1) { r /= 255; g /= 255; b /= 255; }
+                    col[k] = r; col[k + 1] = g; col[k + 2] = b;
                 }
-                if (bad) { continue; }
+                viCount++;
+                return;
+            }
 
-                for (var m = 0; m < 3; m++)
+            if (fiCount < nf && !full)
+            {
+                fiCount++;
+                var nq = scanNumbers(t, numBuf);
+                var q = numBuf;
+                var n = q[0] | 0;
+                if (n < 3) { return; }
+                for (var j = 0; j + 2 < n; j++)
                 {
-                    var vi = ids[m];
-                    posAcc.push3(pos[vi * 3], pos[vi * 3 + 1], pos[vi * 3 + 2]);
-                    if (colAcc) { colAcc.push3(col[vi * 3], col[vi * 3 + 1], col[vi * 3 + 2]); }
+                    if (tri >= maxTri) { full = true; break; }
+                    var a = q[1 + j] | 0, b2 = q[2 + j] | 0, d2 = q[3 + j] | 0;
+                    if (!(a >= 0 && a < nv && b2 >= 0 && b2 < nv && d2 >= 0 && d2 < nv))
+                    {
+                        continue;
+                    }
+                    idxAcc.push(a); idxAcc.push(b2); idxAcc.push(d2);
+                    tri++;
                 }
-                tri++;
             }
         }
 
-        /* nf = 0（只有顶点）是合法的"点云 OFF"，不是错误。
-         * COFF 的顶点色一并带上，此时不用展开成角点色。 */
+        function onLines(lines)
+        {
+            for (var i = 0; i < lines.length; i++)
+            {
+                onLine(lines[i].replace(/\r$/, '').trim());
+                if (full) { return false; }           // 达到 maxTri，立即停止读文件
+            }
+            if (onProgress)
+            {
+                var frac = (viCount + fiCount) / Math.max(1, nv + nf);
+                onProgress(0.1 + 0.85 * Math.min(1, frac));
+            }
+        }
+
+        await forEachLine(file, onLines, null, startOffset);
+
         if (!tri)
         {
             if (nv > 0)
             {
                 return {
-                    kind: 'points',
-                    positions: pos,
-                    count: nv,
-                    colors: col,
-                    tags: null,
+                    kind: 'points', positions: pos, count: nv, colors: col, tags: null,
                     bbox: bboxAccum(pos, nv),
                     format: withColor ? 'COFF' : 'OFF',
-                    truncated: false,
-                    totalSource: nv,
-                    note: ''
+                    truncated: false, totalSource: nv, note: ''
                 };
             }
             throw new Error('OFF 文件里没有面片');
         }
 
-        var outPos = posAcc.result();
+        var outIdx = idxAcc.result();
         var res = {
-            kind: 'mesh',
-            positions: outPos,
-            count: tri,
-            bbox: bboxAccum(outPos, tri * 3),
+            kind: 'mesh', positions: pos, indices: outIdx, indexed: true,
+            vertCount: nv, count: tri,
+            bbox: bboxAccum(pos, nv),
             format: withColor ? 'COFF' : 'OFF',
-            truncated: full,
-            totalSource: nf,
+            truncated: full, totalSource: nf,
             note: full ? ('仅载入前 ' + tri + ' 个三角形') : ''
         };
-        if (colAcc) { res.colors = colAcc.result(); }
         return res;
     }
 
@@ -2896,4 +2919,412 @@
         };
     })();
 
-})(window);
+})(typeof self !== 'undefined' ? self : window);
+
+
+/* ==================== Worker 专属：预处理 / 拾取网格 / 消息协议 ====================
+ * 仅当在 Worker 中运行时注册（主线程加载 worker_io.js 时不执行）。
+ * 由 worker_icp.js 同一手法保证 core.js 的 window IIFE 可用。
+ */
+if (typeof importScripts === 'function')
+{
+    self.window = self;
+    var __QS = location.search || '';
+    importScripts('core.js' + __QS);
+
+    /* 拓扑计算：一次三角形遍历同时产出边表 / 边界边 / 面法向 / 平均边长。
+     * 原 worker_topo.js 的算法内联于此 —— parse 完成后数据就在手边，
+     * 直接算完一起回传，省一次 transfer + 一次消息往返。 */
+    function computeTopo(pos, remap, tri)
+    {
+        var LIM = 16777216;
+        var edgeMap = new Map();
+        var eA = [], eB = [], eUse = [];
+        var ne = 0;
+        var faces = new Float32Array(tri * 6);
+        var nf = 0;
+        var sumEdge = 0, cntEdge = 0;
+        var probe = Math.max(1, Math.floor(tri / 512));
+
+        function addEdge(va, vb, ua, ub)
+        {
+            if (ua === ub) { return; }
+            var key = ua < ub ? ua * LIM + ub : ub * LIM + ua;
+            var idx = edgeMap.get(key);
+            if (idx === undefined)
+            {
+                edgeMap.set(key, ne);
+                eA.push(va); eB.push(vb); eUse.push(1);
+                ne++;
+                return;
+            }
+            if (eUse[idx] < 255) { eUse[idx]++; }
+        }
+
+        for (var i = 0; i < tri; i++)
+        {
+            var o = i * 9;
+            var x0 = pos[o], y0 = pos[o + 1], z0 = pos[o + 2];
+            var x1 = pos[o + 3], y1 = pos[o + 4], z1 = pos[o + 5];
+            var x2 = pos[o + 6], y2 = pos[o + 7], z2 = pos[o + 8];
+            var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
+            var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
+            var nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl >= 1e-12)
+            {
+                nx /= nl; ny /= nl; nz /= nl;
+                var q = nf * 6;
+                faces[q] = (x0 + x1 + x2) / 3;
+                faces[q + 1] = (y0 + y1 + y2) / 3;
+                faces[q + 2] = (z0 + z1 + z2) / 3;
+                faces[q + 3] = nx; faces[q + 4] = ny; faces[q + 5] = nz;
+                nf++;
+            }
+            if ((i % probe) === 0)
+            {
+                var ex = x2 - x1, ey = y2 - y1, ez = z2 - z1;
+                sumEdge += (Math.sqrt(ax * ax + ay * ay + az * az) +
+                            Math.sqrt(bx * bx + by * by + bz * bz) +
+                            Math.sqrt(ex * ex + ey * ey + ez * ez)) / 3;
+                cntEdge++;
+            }
+            var v0 = i * 3, v1 = v0 + 1, v2 = v0 + 2;
+            var u0 = remap ? remap[v0] : v0;
+            var u1 = remap ? remap[v1] : v1;
+            var u2 = remap ? remap[v2] : v2;
+            addEdge(v0, v1, u0, u1);
+            addEdge(v1, v2, u1, u2);
+            addEdge(v2, v0, u2, u0);
+        }
+
+        var edges = new Uint32Array(ne * 2);
+        var bCount = 0;
+        for (var k = 0; k < ne; k++)
+        {
+            edges[k * 2] = eA[k]; edges[k * 2 + 1] = eB[k];
+            if (eUse[k] === 1) { bCount++; }
+        }
+        var boundary = new Uint32Array(bCount * 2);
+        var bw = 0;
+        for (var k2 = 0; k2 < ne; k2++)
+        {
+            if (eUse[k2] === 1)
+            {
+                boundary[bw++] = eA[k2]; boundary[bw++] = eB[k2];
+            }
+        }
+        eA.length = eB.length = eUse.length = 0;
+        edgeMap.clear();
+        return {
+            edges: edges, boundary: boundary,
+            faces: faces.slice(0, nf * 6),
+            faceCount: nf, edgeCount: ne, boundaryEdges: bCount,
+            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
+        };
+    }
+
+    (function ()
+    {
+        'use strict';
+
+        function analyzeMesh(positions)
+        {
+            var n = positions.length;
+            var tri = Math.floor(n / 9);
+            if (!tri) { return { vertCount: 0, bbox: null, uniqVerts: null, remap: null }; }
+
+            var Q = 1e4;
+            var seen = new Map();
+            var uniq = new Float32Array(tri * 9);
+            var remap = new Uint32Array(tri * 3);
+            var m = 0;
+            var mnx = Infinity, mny = Infinity, mnz = Infinity;
+            var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+
+            for (var i = 0; i < tri * 9; i += 3)
+            {
+                var vi = i / 3;
+                var x = positions[i], y = positions[i + 1], z = positions[i + 2];
+                if (x < mnx) { mnx = x; }
+                if (y < mny) { mny = y; }
+                if (z < mnz) { mnz = z; }
+                if (x > mxx) { mxx = x; }
+                if (y > mxy) { mxy = y; }
+                if (z > mxz) { mxz = z; }
+
+                var kx = Math.round(x * Q), ky = Math.round(y * Q), kz = Math.round(z * Q);
+                var key = (kx * 73856093) ^ (ky * 19349663) ^ (kz * 83492791);
+                var hit = false, hitId = -1;
+                var bucket = seen.get(key);
+                if (bucket)
+                {
+                    for (var b = 0; b < bucket.length; b++)
+                    {
+                        var u = bucket[b];
+                        if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                        {
+                            hit = true; hitId = u;
+                            break;
+                        }
+                    }
+                    if (!hit) { bucket.push(m); }
+                }
+                else { seen.set(key, [m]); }
+
+                if (!hit)
+                {
+                    uniq[m * 3] = x; uniq[m * 3 + 1] = y; uniq[m * 3 + 2] = z;
+                    remap[vi] = m;
+                    m++;
+                }
+                else { remap[vi] = hitId; }
+            }
+            return {
+                vertCount: m,
+                bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] },
+                uniqVerts: uniq.slice(0, m * 3),
+                remap: remap
+            };
+        }
+
+        function buildIndexed(positions, weld, an)
+        {
+            var tri = Math.floor(positions.length / 9);
+            if (!weld)
+            {
+                var flat = new Float32Array(tri * 9);
+                flat.set(positions.subarray(0, tri * 9));
+                var eidx = new Uint32Array(tri * 3);
+                for (var ei = 0; ei < tri * 3; ei++) { eidx[ei] = ei; }
+                return { verts: flat, idx: eidx, vcount: tri * 3 };
+            }
+            return { verts: an.uniqVerts, idx: an.remap, vcount: an.vertCount };
+        }
+
+        function buildSpaceChunks(ix, tri)
+        {
+            var N = Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3));
+            var mnx = Infinity, mny = Infinity, mnz = Infinity;
+            var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+            var i;
+            for (i = 0; i < ix.vcount; i++)
+            {
+                var vx = ix.verts[i * 3], vy = ix.verts[i * 3 + 1], vz = ix.verts[i * 3 + 2];
+                if (vx < mnx) { mnx = vx; } if (vx > mxx) { mxx = vx; }
+                if (vy < mny) { mny = vy; } if (vy > mxy) { mxy = vy; }
+                if (vz < mnz) { mnz = vz; } if (vz > mxz) { mxz = vz; }
+            }
+            var sx = ((mxx - mnx) / N) || 1;
+            var sy = ((mxy - mny) / N) || 1;
+            var sz = ((mxz - mnz) / N) || 1;
+            var grid = new Array(N * N * N);
+
+            for (var t = 0; t < tri; t++)
+            {
+                var a0 = ix.idx[t * 3] * 3, a1 = ix.idx[t * 3 + 1] * 3, a2 = ix.idx[t * 3 + 2] * 3;
+                var cx = (ix.verts[a0] + ix.verts[a1] + ix.verts[a2]) / 3;
+                var cy = (ix.verts[a0 + 1] + ix.verts[a1 + 1] + ix.verts[a2 + 1]) / 3;
+                var cz = (ix.verts[a0 + 2] + ix.verts[a1 + 2] + ix.verts[a2 + 2]) / 3;
+                var gi = Math.min(N - 1, Math.max(0, Math.floor((cx - mnx) / sx)));
+                var gj = Math.min(N - 1, Math.max(0, Math.floor((cy - mny) / sy)));
+                var gk = Math.min(N - 1, Math.max(0, Math.floor((cz - mnz) / sz)));
+                var key = (gi * N + gj) * N + gk;
+                if (!grid[key]) { grid[key] = []; }
+                grid[key].push(t);
+            }
+
+            var newIdx = new Uint32Array(tri * 3);
+            var chunks = [];
+            var w = 0;
+            for (var ck = 0; ck < grid.length; ck++)
+            {
+                var list = grid[ck];
+                if (!list) { continue; }
+                var start = w;
+                var cmnx = Infinity, cmny = Infinity, cmnz = Infinity;
+                var cmxx = -Infinity, cmxy = -Infinity, cmxz = -Infinity;
+                for (var q = 0; q < list.length; q++)
+                {
+                    var o2 = list[q] * 3;
+                    for (var k = 0; k < 3; k++)
+                    {
+                        var id = ix.idx[o2 + k];
+                        newIdx[w++] = id;
+                        var vo = id * 3;
+                        var qx = ix.verts[vo], qy = ix.verts[vo + 1], qz = ix.verts[vo + 2];
+                        if (qx < cmnx) { cmnx = qx; } if (qx > cmxx) { cmxx = qx; }
+                        if (qy < cmny) { cmny = qy; } if (qy > cmxy) { cmxy = qy; }
+                        if (qz < cmnz) { cmnz = qz; } if (qz > cmxz) { cmxz = qz; }
+                    }
+                }
+                chunks.push({
+                    count: w - start, offset: start * 4,
+                    mnx: cmnx, mny: cmny, mnz: cmnz,
+                    mxx: cmxx, mxy: cmxy, mxz: cmxz
+                });
+            }
+            return { idx: newIdx, chunks: chunks, n: N };
+        }
+
+        /* 拾取空间网格：三角形 AABB 覆盖的格子登记三角形编号。
+         * 与 ensurePickGrid 的实现一致；只在 PICK_GRID_MIN_TRIS 以上才值得建。 */
+        function buildPickGrid(positions, tri, N)
+        {
+            var mnx = Infinity, mny = Infinity, mnz = Infinity;
+            var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+            for (var i = 0; i < tri * 9; i += 3)
+            {
+                var x = positions[i], y = positions[i + 1], z = positions[i + 2];
+                if (x < mnx) { mnx = x; } if (x > mxx) { mxx = x; }
+                if (y < mny) { mny = y; } if (y > mxy) { mxy = y; }
+                if (z < mnz) { mnz = z; } if (z > mxz) { mxz = z; }
+            }
+            var sx = ((mxx - mnx) / N) || 1;
+            var sy = ((mxy - mny) / N) || 1;
+            var sz = ((mxz - mnz) / N) || 1;
+            var cells = new Array(N * N * N);
+            for (var t = 0; t < tri; t++)
+            {
+                var o = t * 9;
+                var tx0 = Math.min(positions[o], positions[o + 3], positions[o + 6]);
+                var tx1 = Math.max(positions[o], positions[o + 3], positions[o + 6]);
+                var ty0 = Math.min(positions[o + 1], positions[o + 4], positions[o + 7]);
+                var ty1 = Math.max(positions[o + 1], positions[o + 4], positions[o + 7]);
+                var tz0 = Math.min(positions[o + 2], positions[o + 5], positions[o + 8]);
+                var tz1 = Math.max(positions[o + 2], positions[o + 5], positions[o + 8]);
+                var i0 = Math.min(N - 1, Math.max(0, Math.floor((tx0 - mnx) / sx)));
+                var i1 = Math.min(N - 1, Math.max(0, Math.floor((tx1 - mnx) / sx)));
+                var j0 = Math.min(N - 1, Math.max(0, Math.floor((ty0 - mny) / sy)));
+                var j1 = Math.min(N - 1, Math.max(0, Math.floor((ty1 - mny) / sy)));
+                var k0 = Math.min(N - 1, Math.max(0, Math.floor((tz0 - mnz) / sz)));
+                var k1 = Math.min(N - 1, Math.max(0, Math.floor((tz1 - mnz) / sz)));
+                for (var ci = i0; ci <= i1; ci++)
+                {
+                    for (var cj = j0; cj <= j1; cj++)
+                    {
+                        for (var ck = k0; ck <= k1; ck++)
+                        {
+                            var key = (ci * N + cj) * N + ck;
+                            if (!cells[key]) { cells[key] = []; }
+                            cells[key].push(t);
+                        }
+                    }
+                }
+            }
+            return { tri: tri, N: N, mnx: mnx, mny: mny, mnz: mnz,
+                     sx: sx, sy: sy, sz: sz, cells: cells };
+        }
+
+        self.onmessage = async function (ev)
+        {
+            var m = ev.data;
+
+            /* 完整导入：解析 + 预处理一次做完，结果一次性 transfer 回主线程 */
+            if (m.cmd === 'parse')
+            {
+                try
+                {
+                    var opts = m.opts || {};
+                    var data = await self.MV.loaders.loadFile(m.file, opts,
+                        function (frac, text)
+                        {
+                            self.postMessage({ id: m.id, cmd: 'progress',
+                                frac: frac, text: text });
+                        },
+                        null);                       // 列确认走 needConfirm 两阶段
+
+                    if (!data) { self.postMessage({ id: m.id, cmd: 'cancelled' }); return; }
+
+                    /* 点云（无面片）不需要预处理，直接回传 */
+                    if (data.kind !== 'mesh')
+                    {
+                        self.postMessage({ id: m.id, cmd: 'parsed', data: data });
+                        return;
+                    }
+
+                    /* 网格：在 Worker 内接着做预处理，省一次主线程往返 */
+                    var pos = data.positions;
+                    var tri = Math.floor(pos.length / 9);
+                    var an = analyzeMesh(pos);
+                    var ix = buildIndexed(pos, !!m.weld, an);
+                    var sc = buildSpaceChunks(ix, tri);
+                    var maxId = ix.vcount - 1;
+                    var badIdx = 0;
+                    for (var bi = 0; bi < sc.idx.length; bi++)
+                    {
+                        if (sc.idx[bi] > maxId) { badIdx++; }
+                    }
+                    data.vertCount = an.vertCount;
+                    data.bbox = an.bbox;
+                    data.preVerts = ix.verts;
+                    data.preIdx = ix.idx;
+                    data.preVcount = ix.vcount;
+                    data.preChunks = sc.chunks;
+                    data.preOrderedIdx = sc.idx;
+                    data.preIdxOk = badIdx === 0;
+                    data.preBadIdx = badIdx;
+
+                    /* 拓扑一并算好：导入完成时线框/边界/法向数据已就绪，零等待。
+                     * pos 随后被 transfer，但 VAO 用 GPU 缓冲 + 索引，不依赖 CPU 侧 positions。 */
+                    data.topo = computeTopo(pos, an.remap, tri);
+
+                    var transfers = [pos.buffer, an.uniqVerts.buffer, an.remap.buffer,
+                        ix.verts.buffer, ix.idx.buffer, sc.idx.buffer,
+                        data.topo.edges.buffer, data.topo.boundary.buffer, data.topo.faces.buffer];
+                    self.postMessage({ id: m.id, cmd: 'parsed', data: data }, transfers);
+                }
+                catch (e)
+                {
+                    self.postMessage({ id: m.id, cmd: 'error', message: String(e && e.message || e) });
+                }
+                return;
+            }
+
+            /* 拓扑重算兜底（正常 parse 已产出 data.topo） */
+            if (m.cmd === 'topo')
+            {
+                var tp = computeTopo(m.positions, m.remap, m.triCount | 0);
+                self.postMessage({ id: m.id, cmd: 'topo', topo: tp },
+                    [tp.edges.buffer, tp.boundary.buffer, tp.faces.buffer]);
+                return;
+            }
+
+            /* 拾取网格命令：与导入预处理共用同一 Worker，不额外开线程 */
+            if (m.cmd === 'pickgrid')
+            {
+                var pg = buildPickGrid(m.positions, m.triCount, m.N);
+                self.postMessage({ id: m.id, cmd: 'pickgrid', grid: pg });
+                return;
+            }
+
+            var pos = m.positions;
+            var tri = Math.floor(pos.length / 9);
+            var weld = !!m.weld;
+
+            var an = analyzeMesh(pos);
+            var ix = buildIndexed(pos, weld, an);
+            var sc = buildSpaceChunks(ix, tri);
+
+            /* 索引越界自检 */
+            var maxId = ix.vcount - 1;
+            var badIdx = 0;
+            for (var i = 0; i < sc.idx.length; i++)
+            {
+                if (sc.idx[i] > maxId) { badIdx++; }
+            }
+
+            self.postMessage({
+                id: m.id,
+                uniqVerts: an.uniqVerts, remap: an.remap,
+                vertCount: an.vertCount, bbox: an.bbox,
+                verts: ix.verts, idx: ix.idx, vcount: ix.vcount,
+                chunks: sc.chunks, orderedIdx: sc.idx,
+                idxOk: badIdx === 0, badIdx: badIdx
+            }, [
+                an.uniqVerts.buffer, an.remap.buffer,
+                ix.verts.buffer, ix.idx.buffer, sc.idx.buffer
+            ]);
+        };
+    })();
+}

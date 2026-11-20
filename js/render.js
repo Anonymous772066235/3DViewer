@@ -747,10 +747,17 @@
             var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
             var ix, sc, badIdx;
 
-            if (d.preVerts && d.preIdx && d.preChunks && d.preOrderedIdx)
+            if (d.preVerts && d.preIdx && d.preOrderedIdx)
             {
                 ix = { verts: d.preVerts, idx: d.preIdx, vcount: d.preVcount };
                 sc = { idx: d.preOrderedIdx, chunks: d.preChunks };
+                if (!sc.chunks)
+                {
+                    /* indexed 快路径：单块绘制，跳过 O(索引数) 的分块重排 */
+                    sc.chunks = [{ count: d.count * 3, offset: 0,
+                        mnx: d.bbox.min[0], mny: d.bbox.min[1], mnz: d.bbox.min[2],
+                        mxx: d.bbox.max[0], mxy: d.bbox.max[1], mxz: d.bbox.max[2] }];
+                }
                 badIdx = d.preBadIdx || 0;
             }
             else
@@ -1439,6 +1446,14 @@
         var g = layer.gpu, d = layer.data;
         if (!g || !d || d.kind !== 'mesh' || !g.triCount || g.topo) { return g && g.topo; }
 
+        /* Worker 导入时已算好拓扑（edges/boundary/faces…），直接取用，零重算。
+         * file:// 回退路径没有 data.topo → 落到下面的主线程同步计算。 */
+        if (d.topo)
+        {
+            g.topo = d.topo;
+            return g.topo;
+        }
+
         var pos = d.positions;
         var tri = g.triCount;
         var remap = (d.remap && d.remap.length >= tri * 3) ? d.remap : null;
@@ -1555,85 +1570,10 @@
         return g.topo;
     };
 
-    /* 空闲预构建：把拓扑计算搬进 Worker，主线程只做 GPU 上传。
-     *
-     * 改前这套逻辑在 main thread 的 setTimeout(0) 里跑，20 万面几十 ms、
-     * 500 万面可达数秒 —— 载入后主线程照样冻结。现在：
-     *   - 主线程把 positions / remap 的**副本** transfer 给 Worker（零拷贝传输）；
-     *   - Worker 算完把 edges / boundary / faces transfer 回来；
-     *   - 主线程收到结果只调用 ensureWire/ensureBoundary/ensureNormals 建 VAO。
-     * 多个图层的请求由同一个 Worker 串行处理，不会并发抢主线程。
-     * file:// 下 Worker 可能因 origin=null 创建失败 → 自动退回原来的同步路径。 */
-    var PREWIRE_MAX_TRI = 5000000;
-    var prewireQueue = [];
-    var prewireRenderer = null;
-    var topoWorker = null;
-    var topoReqId = 0;
-    var topoPending = Object.create(null);       // id -> layer
-
-    function versionOfWorker()
-    {
-        var v = (global.MV.config && global.MV.config.version) || '';
-        return v ? ('?v=' + v) : '';
-    }
-
-    function ensureTopoWorker()
-    {
-        if (topoWorker || !global.Worker) { return topoWorker; }
-        try
-        {
-            topoWorker = new global.Worker('js/worker_topo.js' + versionOfWorker());
-            topoWorker.onmessage = function (ev)
-            {
-                var m = ev.data;
-                var layer = topoPending[m.id];
-                delete topoPending[m.id];
-                if (!layer || !layer.gpu) { return; }
-                var g = layer.gpu;
-                g.topo = {
-                    edges: m.edges, boundary: m.boundary, faces: m.faces,
-                    faceCount: m.faceCount, edgeCount: m.edgeCount,
-                    boundaryEdges: m.boundaryEdges, avgEdge: m.avgEdge
-                };
-                /* 若这些覆盖层已经打开，补建 GPU 缓冲（不重算拓扑） */
-                var R = prewireRenderer;
-                if (R)
-                {
-                    if (layer.showWire) { R.ensureWire(layer); }
-                    if (layer.showBoundary) { R.ensureBoundary(layer); }
-                    if (layer.showNormals) { R.ensureNormals(layer, layer.normalLen || 1); }
-                    R.markDirty && R.markDirty();
-                }
-            };
-            topoWorker.onerror = function (e)
-            {
-                /* 不永久锁死：下一次调用仍可重试（比如资源加载竞态） */
-                if (global.console && global.console.warn)
-                {
-                    global.console.warn('[topo worker] 加载失败，回退主线程：' +
-                        ((e && e.message) || ''));
-                }
-                try { topoWorker.terminate(); } catch (x) { /* ignore */ }
-                topoWorker = null;
-                /* 把未完成的图层退回同步队列 */
-                for (var k in topoPending)
-                {
-                    if (prewireQueue.indexOf(topoPending[k]) < 0)
-                    {
-                        prewireQueue.push(topoPending[k]);
-                    }
-                }
-                topoPending = Object.create(null);
-                global.setTimeout(pumpPrewireSync, 0);
-            };
-        }
-        catch (e)
-        {
-            topoWorker = null;
-        }
-        return topoWorker;
-    }
-
+    /* 拓扑已由 worker_io.js 在导入时算好并挂在 data.topo 上，
+     * ensureTopo() 直接取用即可 —— 不再需要独立的 topo Worker 与预构建队列。
+     * file:// 回退路径下 data.topo 不存在，ensureTopo() 会在主线程同步计算，
+     * 为超大网格提供分帧兜底：载入后让出首帧再算，避免阻塞渲染。 */
     function pumpPrewireSync()
     {
         if (!prewireQueue.length) { return; }
@@ -1645,7 +1585,7 @@
             {
                 if (R && layer.gpu && layer.gpu.triCount && !layer.gpu.topo)
                 {
-                    R.ensureWire(layer);            // 同步回退：仍走 ensureTopo
+                    R.ensureWire(layer);            // 同步兜底（file:// 大网格）
                 }
             }
             catch (e) { /* ignore */ }
@@ -1656,6 +1596,10 @@
         }, 0);
     }
 
+    var prewireQueue = [];
+    var prewireRenderer = null;
+    var PREWIRE_MAX_TRI = 5000000;
+
     Renderer.prototype.schedulePrewire = function (layer)
     {
         var g = layer && layer.gpu;
@@ -1664,40 +1608,12 @@
         {
             return;
         }
+        /* http(s) 下 Worker 已产出 data.topo，无需预构建；只有 file:// 回退才排队。 */
+        if (layer.data && layer.data.topo) { return; }
         if (prewireQueue.indexOf(layer) >= 0) { return; }
         prewireRenderer = this;
-        prewireQueue.push(layer);      // 仅同步回退路径用；Worker 路径随后立即 shift
-
-        var W = ensureTopoWorker();
-        if (W)
-        {
-            var d = layer.data;
-            var id = ++topoReqId;
-            topoPending[id] = layer;
-            /* 必须是副本：transfer 会让主线程的 positions 失效（渲染还要用） */
-            var posCopy = new Float32Array(d.positions);
-            var remapCopy = (d.remap && d.remap.length >= g.triCount * 3)
-                ? new Uint32Array(d.remap) : null;
-            var transfer = [posCopy.buffer];
-            if (remapCopy) { transfer.push(remapCopy.buffer); }
-            try
-            {
-                W.postMessage({
-                    id: id, positions: posCopy, remap: remapCopy, triCount: g.triCount
-                }, transfer);
-                prewireQueue.shift();               // 已交给 Worker
-            }
-            catch (e)
-            {
-                delete topoPending[id];
-                prewireQueue.shift();
-                global.setTimeout(pumpPrewireSync, 0);
-            }
-        }
-        else
-        {
-            global.setTimeout(pumpPrewireSync, 0);
-        }
+        prewireQueue.push(layer);
+        global.setTimeout(pumpPrewireSync, 0);
     };
 
     /* 线框：为每个三角形生成 3 条边索引（全部面，不做抽稀） */

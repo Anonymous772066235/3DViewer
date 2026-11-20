@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.4.1` |
+| 当前版本 | `1.0.4.2` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-17 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -5141,3 +5141,118 @@ preprocess.wk.js → worker_pre.js       导入预处理 / 拾取索引
 - `title` 改为"最大迭代次数，默认 50，可设 1-200"。
 
 验证：默认 50 / 输入 100 → 100 / 输入 500 → 钳到 200 / 非法输入 → 回落 50。
+
+
+### OFF 大文件导入修复（同版）
+
+用 `data/0.4-mesh_src-1.off`（250 MB / 314 万顶点 / 621 万面）实测发现两个问题：
+
+**1. 崩溃 / 极卡（已修）**：`parseOFF` 用 `readAsText` 一次性读入 250 MB，
+再 `split('\n')` 成约 930 万行字符串 → 3–4 GB 内存 → 页面无响应。
+改为**流式解析**：复用 `forEachLine`（4 MB 分块），顶点直接写入预分配
+`Float32Array(nv*3)`，面逐行三角化进 `I32Accum`。并给 `forEachLine` 加了
+"回调返回 false 即提前停止"，`maxtri` 截断时立即停止读文件。
+
+**2. 保留索引、跳过焊接（已修）**：OFF 面行本身就是顶点索引（`3 a b c`），
+原实现展开成角点坐标，下游 `analyzeMesh` 又对 942 万个顶点槽做哈希去重。
+改为产出 `{positions, indices, indexed:true}`，`preprocessMesh` 识别后直接复用，
+跳过焊接哈希与分块重排（单块绘制），省掉最大的 CPU 瓶颈。
+
+**验证**：
+
+```
+合成 OFF（4 顶点 2 面）  indexed=true，indices=0,1,2,0,1,3        OK
+真实文件 maxtri=1000     tri=1000，positions=314万顶点表，截断提示 OK
+真实文件 maxtri=20000    画面正常（场景树 20k 面 / 3.12M 点）      OK
+全量 621 万面            不再 OOM；但完整处理仍需数分钟（数据量决定）
+```
+
+> 说明：全量慢是 250 MB / 621 万面的固有成本（解析 + GPU 上传 + 绘制），
+> 不是逻辑错误。需要快速预览时用 `?maxtri=20000` 等参数限幅。
+
+
+### 导入解析也搬进 Worker（同版）
+
+原先「文件解析」仍在主线程（`loadFile` 的 `async` 只是异步 I/O，解析循环同步执行），
+只有解析**之后**的预处理在 Worker。现在把两者合并到 `worker_pre.js`：
+
+```
+loadOne() → parseInWorker() → worker_pre.js
+                                ├─ cmd:'parse'  loadFile（STL/PLY/OBJ/OFF/glTF/PCD/点云）
+                                └─ 紧接着 preprocess（焊接/索引/分块/自检）
+                              ← 一次 postMessage 返回 data + pre* 结果
+```
+
+- `worker_pre.js` 加 `importScripts('core.js','io.js')` + `self.window = self`
+  （与 `worker_icp.js` 同手法，`io.js` 的 IIFE 用 `window` 收尾）；
+- 解析层几乎无 DOM 依赖：`MV.math` / `FileReader` / `TextDecoder` / `atob` 在 Worker 均可用；
+- `onProgress` 经 `cmd:'progress'` 回传主线程显示；列确认（`confirmColumns`）仍走主线程回退路径；
+- **`file://` 下 Worker 创建失败 → 自动回退主线程 `loadFile` + `preprocessMesh`**，功能不变；
+- 主线程现在只做：发 File、显示进度、`gl.bufferData` 上传（WebGL 硬限制）。
+
+验证：
+
+```
+PLY bun_zipper 69,451 面   Worker 解析+预处理，tri/preIdx/bbox 一致    OK
+OFF 250MB maxtri=2000      Worker 解析完成，tri=2000                  OK
+STL / OBJ 小文件           Worker 解析无 JS 错误                      OK
+```
+
+
+### io.js 改名为 worker_io.js：双环境内核（同版）
+
+`io.js` 整体改名为 `worker_io.js`，成为**一份代码、两处加载**的纯计算内核：
+
+```
+主线程  index.html <script src="js/worker_io.js">    → file:// 回退路径
+Worker  worker_pre.js importScripts('worker_io.js')  → http(s) 主路径
+```
+
+- 结尾 IIFE 改为 `})(typeof self !== 'undefined' ? self : window)`，
+  主线程与 Worker 都能加载；
+- `worker_pre.js` 保留 `self.window = self`（`core.js` 的 IIFE 仍以 `window` 收尾）；
+- 交互部分**本就不在内核**：列确认弹窗在 `ui.js`（`showColumnDialog` / `autoColumnPlan`），
+  hooks 注入在 `app.js`（`MV.ioBindHooks(uiHooks)`），内核只做计算。
+
+收益：解析 / 预检 / 导出 / 预处理全部由同一份内核提供，主线程与 Worker 行为完全一致，
+`file://` 下自动回退主线程也能用同一套代码。
+
+验证：主线程 `loaders/memguard/exporters` 全在、`fmtBytes(1024)="1.00 KB"`；
+主线程解析 OFF 2 面 OK；Worker 解析 OFF 2 面 + preIdx OK；真实 PLY 截图正常。
+
+
+### worker_pre.js 合并进 worker_io.js（同版）
+
+`worker_pre.js` 的预处理（焊接 / 索引 / 分块 / 自检）、拾取网格与消息协议整体
+合并进 `worker_io.js` 文件末尾，用 `if (typeof importScripts === 'function')` 守卫：
+主线程加载时不注册 Worker 协议，Worker 加载时 `importScripts('core.js')` 后注册。
+
+- 线程数不变（`worker_icp` / `worker_topo` / `worker_io` 三个独立 Worker）；
+- 主线程 `new Worker` 路径两处改为 `js/worker_io.js`；
+- `worker_pre.js` 删除。
+
+验证：主线程 `loaders/memguard/exporters` 全在；Worker parse 命令返回
+`tri=2 / preIdx` 正确；页面无语法错误。
+
+
+### 拓扑计算并入 worker_io.js（同版）
+
+`worker_topo.js` 删除，算法（`computeTopo`：一次三角形遍历产出边表 / 边界边 /
+面法向 / 平均边长）内联进 `worker_io.js`，在 `cmd:'parse'` 里紧接着 preprocess
+直接算好，作为 `data.topo` 与解析结果**一次 transfer 回主线程**。
+
+收益：省掉「主线程 copy positions/remap → transfer 给 topo Worker → 再回传」的
+整条链路，以及 `schedulePrewire` 的 Worker 实例与调度队列。主线程拿到 data 时
+拓扑已就绪，点线框 / 边界 / 法向全部零等待。
+
+- `render.js`：`ensureTopo()` 优先取 `data.topo`；`schedulePrewire()` 检测到
+  `data.topo` 直接跳过；`file://` 回退路径保留主线程同步计算与分帧兜底。
+- 保留 `cmd:'topo'` 作为重算兜底。
+- 线程数 3 → 2（`worker_icp` / `worker_io`）。
+
+
+### 文档同步（线程数 3→2）
+
+`worker_pre.js` / `worker_topo.js` 并入 `worker_io.js` 后，后台线程由三个减为两个
+（`worker_icp` + `worker_io`）。README 功能表、线程职责说明、GUIDE 后台线程分工段
+同步修正数量表述与职责描述。

@@ -1206,10 +1206,23 @@
         try
         {
             var v = (global.MV.config && global.MV.config.version) || '';
-            preprocessWorker = new global.Worker('js/worker_pre.js' + (v ? '?v=' + v : ''));
+            preprocessWorker = new global.Worker('js/worker_io.js' + (v ? '?v=' + v : ''));
             preprocessWorker.onmessage = function (ev)
             {
                 var m = ev.data;
+                /* parse 命令的进度 / 结果走独立 pending 表 */
+                if (m && m.cmd && parsePending[m.id])
+                {
+                    var pp = parsePending[m.id];
+                    if (m.cmd === 'progress')
+                    {
+                        if (pp.onProgress) { pp.onProgress(m.frac, m.text); }
+                        return;
+                    }
+                    delete parsePending[m.id];
+                    pp.done(m);
+                    return;
+                }
                 var resolve = preprocessPending[m.id];
                 delete preprocessPending[m.id];
                 if (!resolve) { return; }
@@ -1240,6 +1253,41 @@
         return preprocessWorker;
     }
 
+    var parsePending = Object.create(null);
+
+    /* 完整导入（解析 + 预处理）在 Worker 内一次完成。
+     * 主线程只负责：发 File、显示进度、收结果。
+     * file:// 下 Worker 不可用 → 回退原来的 MV.loaders.loadFile。 */
+    App.prototype.parseInWorker = function (file, opts, onProgress)
+    {
+        var W = getPreprocessWorker && getPreprocessWorker();
+        if (!W) { return Promise.resolve(null); }   // 回退标记
+
+        return new Promise(function (resolve)
+        {
+            var id = 'parse_' + (++preprocessReqId);
+            parsePending[id] = { done: resolve, onProgress: onProgress };
+            var v = (global.MV.config && global.MV.config.version) || '';
+            var weld = !!(opts && opts.format && String(opts.format).indexOf('STL') === 0);
+            try
+            {
+                W.postMessage({
+                    id: id, cmd: 'parse', file: file, opts: opts, weld: weld
+                });
+            }
+            catch (e)
+            {
+                delete parsePending[id];
+                resolve(null);
+            }
+        }).then(function (m)
+        {
+            if (!m || m.cmd === 'cancelled') { return null; }
+            if (m.cmd === 'error') { throw new Error(m.message || '解析失败'); }
+            return m.data || null;
+        });
+    };
+
     App.prototype.preprocessMesh = function (data)
     {
         if (!data || data.kind !== 'mesh' || !data.positions ||
@@ -1249,6 +1297,30 @@
         }
         var tri = Math.floor(data.positions.length / 9);
         if (!tri || tri < 1000) { return Promise.resolve(false); }   // 小网格不值得开 Worker
+
+        /* 索引化格式（OFF 等）：顶点/索引已由解析器给出，跳过 O(9N) 焊接哈希 */
+        if (data.indexed && data.indices && data.vertCount)
+        {
+            /* 超大网格跳过 buildSpaceChunks：它不是正确性要求，只是渲染优化；
+             * 对 600 万面做分块重排要额外几分钟，直接用单个 chunk 绘制。 */
+            return Promise.resolve({
+                vertCount: data.vertCount, bbox: data.bbox,
+                uniqVerts: data.positions, remap: data.indices,
+                verts: data.positions, idx: data.indices, vcount: data.vertCount,
+                chunks: null, orderedIdx: data.indices,
+                idxOk: true, badIdx: 0
+            }).then(function (r)
+            {
+                data.vertCount = r.vertCount;
+                data.preVerts = r.verts;
+                data.preIdx = r.idx;
+                data.preVcount = r.vcount;
+                data.preOrderedIdx = r.orderedIdx;
+                data.preIdxOk = true;
+                data.preBadIdx = 0;
+                return true;
+            });
+        }
 
         var W = getPreprocessWorker();
         if (!W) { return Promise.resolve(false); }
@@ -1303,7 +1375,7 @@
         try
         {
             var v = (global.MV.config && global.MV.config.version) || '';
-            var W = new global.Worker('js/worker_pre.js' + (v ? '?v=' + v : ''));
+            var W = new global.Worker('js/worker_io.js' + (v ? '?v=' + v : ''));
             W.onmessage = function (ev)
             {
                 var m = ev.data;
@@ -2535,31 +2607,38 @@
         global.MV.ui.setProgress(true, '读取 ' + file.name, 0);
 
         var tParse = UI.nowMs();
-        var data = await global.MV.loaders.loadFile(file,
-            {
-                maxTriangles: (limitOpts && limitOpts.maxTriangles) ||
-                    this.urlMaxTri || global.MV.loaders.DEFAULT_MAX_TRIANGLES,
-                maxPoints: (limitOpts && limitOpts.maxPoints) ||
-                    this.urlMaxPts || global.MV.loaders.DEFAULT_MAX_POINTS
-            },
-            async function (frac, text)
-            {
-                if (self._abortLoad)
+        var parseOpts = {
+            maxTriangles: (limitOpts && limitOpts.maxTriangles) ||
+                this.urlMaxTri || global.MV.loaders.DEFAULT_MAX_TRIANGLES,
+            maxPoints: (limitOpts && limitOpts.maxPoints) ||
+                this.urlMaxPts || global.MV.loaders.DEFAULT_MAX_POINTS
+        };
+        var onParseProgress = function (frac, text)
+        {
+            global.MV.ui.setProgress(true, (text || '读取中') + ' · ' + file.name, frac);
+        };
+
+        /* 解析 + 预处理都在 Worker 内完成；file:// 下回退主线程 */
+        var data = await self.parseInWorker(file, parseOpts, onParseProgress);
+        var parsedInWorker = !!data;
+        if (!data)
+        {
+            data = await global.MV.loaders.loadFile(file, parseOpts,
+                async function (frac, text)
                 {
-                    throw new Error('__abort__');
-                }
-                global.MV.ui.setProgress(true, (text || '读取中') + ' · ' + file.name, frac);
-                await new Promise(function (r) { setTimeout(r, 0); });
-            },
-            function (info)
-            {
-                // 列数 > 3 时弹窗确认每列含义（前三列固定 XYZ）
-                if (self.noConfirmColumns)
+                    if (self._abortLoad) { throw new Error('__abort__'); }
+                    onParseProgress(frac, text);
+                    await new Promise(function (r) { setTimeout(r, 0); });
+                },
+                function (info)
                 {
-                    return global.MV.ui.autoColumnPlan(info);
-                }
-                return global.MV.ui.showColumnDialog(info);
-            });
+                    if (self.noConfirmColumns)
+                    {
+                        return global.MV.ui.autoColumnPlan(info);
+                    }
+                    return global.MV.ui.showColumnDialog(info);
+                });
+        }
 
         var parseMs = UI.nowMs() - tParse;
 
@@ -2571,8 +2650,8 @@
             return;
         }
 
-        /* 导入预处理（焊接 / 索引 / 分块 / 自检）搬进 Worker，主线程不阻塞 */
-        if (data.kind === 'mesh')
+        /* Worker 解析时已顺带完成预处理；仅主线程回退路径才需要补做 */
+        if (!parsedInWorker && data.kind === 'mesh')
         {
             var tPre = UI.nowMs();
             await self.preprocessMesh(data);

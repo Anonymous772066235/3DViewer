@@ -112,7 +112,7 @@ python server/serve.py
 |---|---|---|---|
 | 载入、渲染、视角、拾取、测量、裁剪、导出 | ✅ | ✅ | ✅ |
 | 数据对齐（N-N / ICP / 4PCS） | ✅ 独立线程 | ✅ 独立线程 | ⚠️ 回退主线程，约 34 ms 一顿 |
-| 导入预处理 / 拓扑 / 拾取索引 | ✅ 三个后台线程 | ✅ 三个后台线程 | ⚠️ 回退主线程，大网格载入/首点会卡 |
+| 导入解析 / 预处理 / 拓扑 / 拾取索引 | ✅ 后台线程 | ✅ 后台线程 | ⚠️ 回退主线程，大网格载入/首点会卡 |
 | 属性面板显示文件绝对路径 | ❌ 只能显示文件名 | ✅ 走 `/locate` | ⚠️ 需额外启动本地服务 |
 | `?url=` 载入仓库内相对路径 | ✅ | ✅ 任意本地路径 | ❌ 浏览器禁止 `fetch` 本地文件 |
 | 「载入历史」按路径重开 | ⚠️ 文件句柄类可用 | ✅ | ❌ 条目还在，但点不开 |
@@ -122,8 +122,7 @@ python server/serve.py
 
 ```
 new Worker('js/worker_icp.js')    // 配准
-new Worker('js/worker_topo.js')   // 线框 / 边界 / 法向拓扑
-new Worker('js/worker_pre.js')    // 导入预处理与拾取索引
+new Worker('js/worker_io.js')     // 解析 + 预处理 + 拾取索引
   → SecurityError: Script at 'file:///…' cannot be accessed from origin 'null'
 fetch('js/core.js')
   → TypeError: Failed to fetch
@@ -132,8 +131,8 @@ fetch('js/core.js')
 浏览器只在 `http(s)` 源下允许创建 `Worker`，也禁止 `file://` 页面 `fetch` 本地文件。
 `file://` 下界面看起来完全正常（状态栏"就绪"、模型正常渲染），失败都是**静默降级**：
 Worker 创建失败会被捕获并回退主线程，所以只是变慢、不报错——容易被误判成"配准怎么有点卡"。
-三个后台线程分别承担：配准（`worker_icp`）、边 / 边界 / 法向拓扑（`worker_topo`）、
-导入预处理与拾取索引（`worker_pre`）；`file://` 下全部回退同步路径。
+两个后台线程分别承担：配准（`worker_icp`）、导入解析 / 预处理 / 拓扑 / 拾取索引（`worker_io`，与主线程共用内核）；
+`file://` 下二者均回退同步路径。
 
 > **在线版开箱即用**：把链接发给别人就能看模型、做配准、测量和导出（需要数据自行拖入）。
 > **本地完整能力**用 `serve.bat`：多出 `/file` 路径载入、`/locate` 路径反查，不需要额外启动任何东西。
@@ -301,14 +300,12 @@ PLY / OBJ / OFF / glTF **可以只有顶点、没有面**：按点云载入，�
 ├── css/style.css         深浅两套主题变量
 ├── js/                    平铺 + 文件头分类标签（[L1]…[P]）
 │   ├── core.js            [L1·基础]   数学 / 相机 / KD 树
-│   ├── io.js              [L2·IO]     格式解析 / 载入预检
+│   ├── worker_io.js       [L2·IO]     解析 / 预检 / 导出（主线程+Worker 共用）
 │   ├── algo.js            [L3·算法]   裁剪 / 拾取 / ICP / 4PCS
 │   ├── render.js          [L4·渲染]   WebGL / 拓扑 / 视角器
 │   ├── ui.js              [L5·界面]   面板 / 场景树 / 工具
 │   ├── app.js             [L6·编排]   状态 / 加载 / 快捷键（含原 keys.js）
 │   ├── worker_icp.js      [W·后台]    配准计算
-│   ├── worker_topo.js     [W·后台]    拓扑（边/边界/法向）
-│   ├── worker_pre.js      [W·后台]    导入预处理 + 拾取索引
 │   └── optimize.js        [P·插件]    扩展入口（含原 registry.js）
 ```
 
