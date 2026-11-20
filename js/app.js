@@ -1268,6 +1268,8 @@
             var id = 'parse_' + (++preprocessReqId);
             parsePending[id] = { done: resolve, onProgress: onProgress };
             var v = (global.MV.config && global.MV.config.version) || '';
+            /* 只有 STL 是非索引格式（三角形直接存 3 个顶点坐标），需要焊接；
+            * OBJ/PLY/OFF/glTF 解析器都保留顶点索引（indexed），不经过这里。 */
             var weld = !!(opts && opts.format && String(opts.format).indexOf('STL') === 0);
             try
             {
@@ -1298,16 +1300,15 @@
         var tri = Math.floor(data.positions.length / 9);
         if (!tri || tri < 1000) { return Promise.resolve(false); }   // 小网格不值得开 Worker
 
-        /* 索引化格式（OFF 等）：顶点/索引已由解析器给出，跳过 O(9N) 焊接哈希 */
+        /* 索引化格式（OFF 等）：顶点表+索引已表达拓扑，保留原样不焊接 */
         if (data.indexed && data.indices && data.vertCount)
         {
-            /* 超大网格跳过 buildSpaceChunks：它不是正确性要求，只是渲染优化；
-             * 对 600 万面做分块重排要额外几分钟，直接用单个 chunk 绘制。 */
             return Promise.resolve({
                 vertCount: data.vertCount, bbox: data.bbox,
                 uniqVerts: data.positions, remap: data.indices,
                 verts: data.positions, idx: data.indices, vcount: data.vertCount,
-                chunks: null, orderedIdx: data.indices,
+                chunks: null,                    // 单块绘制（file:// 回退路径）
+                orderedIdx: data.indices,
                 idxOk: true, badIdx: 0
             }).then(function (r)
             {
@@ -1335,7 +1336,7 @@
             {
                 W.postMessage({
                     id: id, positions: copy,
-                    weld: (data.format || '').indexOf('STL') === 0
+                    weld: (data.format || '').indexOf('STL') === 0   // 只有 STL 非索引
                 }, [copy.buffer]);
             }
             catch (e)

@@ -516,28 +516,14 @@
             };
         }
 
-        var pos = new Float32Array(triCount * 9);
-        var cdata = vcolors ? vcolors.data : null;
-        var cols = vcolors ? new Float32Array(triCount * 9) : null;
-        var w = 0;
-        for (var i = 0; i < triCount * 3; i++)
-        {
-            var vi = fdata[i] * 3;
-            pos[w] = vdata[vi];
-            pos[w + 1] = vdata[vi + 1];
-            pos[w + 2] = vdata[vi + 2];
-            if (cols)
-            {
-                cols[w] = cdata[vi];
-                cols[w + 1] = cdata[vi + 1];
-                cols[w + 2] = cdata[vi + 2];
-            }
-            w += 3;
-        }
-
+        /* OBJ 的 f 行是顶点索引，直接保留，不展开成坐标。
+         * 顶点表 + 索引已表达拓扑；焊接只适用于无索引的 STL。 */
         var objRes = {
             kind: 'mesh',
-            positions: pos,
+            positions: vdata,                          // 顶点表（含所有 v）
+            indices: fdata.subarray(0, triCount * 3),  // 面索引
+            indexed: true,
+            vertCount: vcount,
             count: triCount,
             bbox: bbox,
             format: 'OBJ',
@@ -545,7 +531,7 @@
             totalSource: srcTri,
             note: full ? ('仅载入前 ' + triCount + ' 个三角形') : ''
         };
-        if (cols) { objRes.colors = cols; }
+        if (vcolors) { objRes.colors = vcolors.result(); }   // 顶点表对应的颜色
         return objRes;
     }
 
@@ -830,7 +816,9 @@
         var faceBytes = Math.max(0, file.size - dataStart - totalV * stride);
         var idxCount = Math.floor(faceBytes / idxSize);
         var capTri = Math.max(1, Math.min(maxTri, idxCount));
-        var outPos = new Float32Array(capTri * 9);
+        /* 保留顶点索引（PLY 规范：face 存 vertex_indices），不展开成坐标。
+         * 索引本身表达拓扑，焊接只适用于无索引的 STL。 */
+        var outIdx = new Uint32Array(capTri * 3);
         var w = 0;
         var tri = 0;
         var stop = false;
@@ -854,20 +842,12 @@
                 else if (k === 2) { i2 = idx; }
                 if (k >= 2)
                 {
-                    if (tri >= maxTri || w + 9 > outPos.length)
+                    if (tri >= maxTri || w + 3 > outIdx.length)
                     {
                         stop = true;
                         break;
                     }
-                    outPos[w++] = verts[i0 * 3];
-                    outPos[w++] = verts[i0 * 3 + 1];
-                    outPos[w++] = verts[i0 * 3 + 2];
-                    outPos[w++] = verts[i1 * 3];
-                    outPos[w++] = verts[i1 * 3 + 1];
-                    outPos[w++] = verts[i1 * 3 + 2];
-                    outPos[w++] = verts[i2 * 3];
-                    outPos[w++] = verts[i2 * 3 + 1];
-                    outPos[w++] = verts[i2 * 3 + 2];
+                    outIdx[w++] = i0; outIdx[w++] = i1; outIdx[w++] = i2;
                     tri++;
                     i1 = i2;
                 }
@@ -877,9 +857,14 @@
 
         return {
             kind: 'mesh',
-            positions: outPos.subarray(0, w),
+            positions: verts,                          // 顶点表（原样）
+            indices: outIdx.subarray(0, w),            // 面索引
+            indexed: true,
+            vertCount: totalV,
             count: tri,
             bbox: bbox,
+            normals: normals,                          // 属性数组按顶点表组织，无需重映射
+            colors: colors,
             format: 'PLY(binary)',
             truncated: stop,
             totalSource: fElem ? fElem.count : totalV,
@@ -909,7 +894,7 @@
         var seen = 0;
         var inFace = 0;
         var tri = 0;
-        var out = new F32Accum(1 << 18);
+        var out = new I32Accum(1 << 18);            // 面索引（PLY face 存 vertex_indices）
         var full = false;
 
         await forEachLine(file, function (lines)
@@ -970,9 +955,7 @@
                                 break;
                             }
                             var a = numBuf[1], b = numBuf[k], d = numBuf[k + 1];
-                            out.push3(verts[a * 3], verts[a * 3 + 1], verts[a * 3 + 2]);
-                            out.push3(verts[b * 3], verts[b * 3 + 1], verts[b * 3 + 2]);
-                            out.push3(verts[d * 3], verts[d * 3 + 1], verts[d * 3 + 2]);
+                            out.push(a); out.push(b); out.push(d);
                             tri++;
                         }
                     }
@@ -1008,9 +991,14 @@
 
         return {
             kind: 'mesh',
-            positions: out.result(),
+            positions: verts,                          // 顶点表原样
+            indices: out.result(),                     // 面索引
+            indexed: true,
+            vertCount: vElem.count,
             count: tri,
             bbox: bbox,
+            normals: null,
+            colors: colors,                            // 属性数组按顶点表组织
             format: 'PLY(ascii)',
             truncated: full,
             totalSource: fElem ? fElem.count : 0,
@@ -1923,6 +1911,13 @@
         var ptColAcc = null;
         var pts = 0;
 
+        /* 全局顶点表 + 索引：glTF 每个 primitive 有自己的顶点空间，
+         * 变换到世界坐标后按 primitive 内索引用，再加全局偏移合并。 */
+        var allVerts = new F32Accum(1 << 18);
+        var allCols = new F32Accum(1 << 18);
+        var allIdx = new I32Accum(1 << 18);
+        var globalBase = 0;
+
         function pushPrimitive(prim, world)
         {
             if (full) { return; }
@@ -1989,13 +1984,42 @@
 
             if (C && !colAcc) { colAcc = new F32Accum(4096); hasColor = true; }
 
-            /* ③ TRIANGLES(4) / TRIANGLE_STRIP(5) / TRIANGLE_FAN(6) */
+            /* ③ TRIANGLES(4) / TRIANGLE_STRIP(5) / TRIANGLE_FAN(6)
+             * 本 primitive 的局部顶点 → 全局顶点表的偏移映射 */
+            var localMap = Object.create(null);
+            function globalVertex(localVi)
+            {
+                if (localVi < 0 || localVi >= vertCount) { localVi = 0; }
+                if (localMap[localVi] !== undefined) { return localMap[localVi]; }
+                var g = globalBase + localVi;
+                /* 把该顶点变换后写进全局顶点表对应槽位（按顺序补齐） */
+                while (allVerts.n < (g + 1) * 3)
+                {
+                    allVerts.push(0); allVerts.push(0); allVerts.push(0);
+                    if (C || hasColor) { allCols.push(1); allCols.push(1); allCols.push(1); }
+                }
+                var x = P[localVi * 3], y = P[localVi * 3 + 1], z = P[localVi * 3 + 2];
+                var wx = world[0]*x + world[4]*y + world[8]*z + world[12];
+                var wy = world[1]*x + world[5]*y + world[9]*z + world[13];
+                var wz = world[2]*x + world[6]*y + world[10]*z + world[14];
+                allVerts.data[g*3] = wx; allVerts.data[g*3+1] = -wz; allVerts.data[g*3+2] = wy;
+                if (C)
+                {
+                    allCols.data[g*3] = C[localVi*3] || 0;
+                    allCols.data[g*3+1] = C[localVi*3+1] || 0;
+                    allCols.data[g*3+2] = C[localVi*3+2] || 0;
+                }
+                localMap[localVi] = g;
+                return g;
+            }
+            globalBase += vertCount;                  // 本 primitive 预留顶点区间
+
             function emitTri(a, b, c)
             {
                 if (tri >= maxTri) { full = true; return false; }
-                emit(vidx(a), posAcc, colAcc);
-                emit(vidx(b), posAcc, colAcc);
-                emit(vidx(c), posAcc, colAcc);
+                allIdx.push(globalVertex(vidx(a)));
+                allIdx.push(globalVertex(vidx(b)));
+                allIdx.push(globalVertex(vidx(c)));
                 tri++;
                 return true;
             }
@@ -2090,10 +2114,43 @@
             throw new Error('glTF 里没有可显示的三角面');
         }
 
-        var pos = posAcc.result();
+        /* 压缩顶点表：primitive 预留区间可能含未使用的占位顶点，
+         * 按实际被引用的索引压实并重映射。 */
+        var oldIdx = allIdx.result();
+        var used = new Uint8Array(allVerts.n / 3);
+        for (var ui = 0; ui < oldIdx.length; ui++) { used[oldIdx[ui]] = 1; }
+        var remapG = new Int32Array(used.length);
+        var nv2 = 0;
+        for (var uj = 0; uj < used.length; uj++)
+        {
+            remapG[uj] = used[uj] ? nv2++ : -1;
+        }
+        var compactVerts = new Float32Array(nv2 * 3);
+        var compactCols = (hasColor && allCols.n >= allVerts.n) ? new Float32Array(nv2 * 3) : null;
+        for (var uk = 0; uk < used.length; uk++)
+        {
+            if (remapG[uk] < 0) { continue; }
+            var dst = remapG[uk] * 3, src = uk * 3;
+            compactVerts[dst] = allVerts.data[src];
+            compactVerts[dst+1] = allVerts.data[src+1];
+            compactVerts[dst+2] = allVerts.data[src+2];
+            if (compactCols)
+            {
+                compactCols[dst] = allCols.data[src];
+                compactCols[dst+1] = allCols.data[src+1];
+                compactCols[dst+2] = allCols.data[src+2];
+            }
+        }
+        var compactIdx = new Uint32Array(oldIdx.length);
+        for (var ul = 0; ul < oldIdx.length; ul++) { compactIdx[ul] = remapG[oldIdx[ul]]; }
+
+        var pos = compactVerts;
         var res = {
             kind: 'mesh',
             positions: pos,
+            indices: compactIdx,
+            indexed: true,
+            vertCount: nv2,
             count: tri,
             bbox: bboxAccum(pos, pos.length / 3),
             format: isGLB ? 'GLB' : 'glTF',
@@ -2101,7 +2158,7 @@
             totalSource: tri,
             note: full ? ('仅载入前 ' + tri + ' 个三角形') : ''
         };
-        if (colAcc && hasColor) { res.colors = colAcc.result(); }
+        if (compactCols) { res.colors = compactCols; }
         return res;
     }
 
@@ -2189,6 +2246,71 @@
         return '';
     }
 
+    /* indexed 网格（OFF 等）的焊接：顶点表本身是 nv 个唯一坐标，
+     * 按坐标去重后重映射面索引。焊接是正确性步骤，不因性能跳过。 */
+    function weldIndexed(verts, indices, nv)
+    {
+        var Q = 1e4;
+        var seen = new Map();
+        var uniq = new Float32Array(nv * 3);
+        var oldToNew = new Uint32Array(nv);
+        var m = 0;
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+
+        for (var v = 0; v < nv; v++)
+        {
+            var o = v * 3;
+            var x = verts[o], y = verts[o + 1], z = verts[o + 2];
+            if (x < mnx) { mnx = x; }
+            if (y < mny) { mny = y; }
+            if (z < mnz) { mnz = z; }
+            if (x > mxx) { mxx = x; }
+            if (y > mxy) { mxy = y; }
+            if (z > mxz) { mxz = z; }
+
+            var kx = Math.round(x * Q), ky = Math.round(y * Q), kz = Math.round(z * Q);
+            var key = (kx * 73856093) ^ (ky * 19349663) ^ (kz * 83492791);
+            var bucket = seen.get(key);
+            var hitId = -1;
+            if (bucket)
+            {
+                for (var b = 0; b < bucket.length; b++)
+                {
+                    var u = bucket[b];
+                    if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                    {
+                        hitId = u;
+                        break;
+                    }
+                }
+                if (hitId < 0) { bucket.push(m); }
+            }
+            else { seen.set(key, [m]); }
+
+            if (hitId < 0)
+            {
+                uniq[m * 3] = x; uniq[m * 3 + 1] = y; uniq[m * 3 + 2] = z;
+                hitId = m++;
+            }
+            oldToNew[v] = hitId;
+        }
+
+        /* 重映射索引 */
+        var newIdx = new Uint32Array(indices.length);
+        for (var i = 0; i < indices.length; i++)
+        {
+            var old = indices[i];
+            newIdx[i] = (old >= 0 && old < nv) ? oldToNew[old] : 0;
+        }
+        return {
+            vertCount: m,
+            bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] },
+            uniqVerts: uniq.slice(0, m * 3),
+            remap: newIdx                    // 重映射后的面索引
+        };
+    }
+
     async function loadFile(file, opts, onProgress, confirmColumns)
     {
         var o = opts || {};
@@ -2237,6 +2359,7 @@
 
     global.MV.loaders = {
         loadFile: loadFile,
+        weldIndexed: weldIndexed,
         extOf: extOf,
         DEFAULT_MAX_TRIANGLES: DEFAULT_MAX_TRIANGLES,
         DEFAULT_MAX_POINTS: DEFAULT_MAX_POINTS
@@ -3028,6 +3151,8 @@ if (typeof importScripts === 'function')
     {
         'use strict';
 
+
+
         function analyzeMesh(positions)
         {
             var n = positions.length;
@@ -3245,16 +3370,47 @@ if (typeof importScripts === 'function')
 
                     /* 网格：在 Worker 内接着做预处理，省一次主线程往返 */
                     var pos = data.positions;
-                    var tri = Math.floor(pos.length / 9);
-                    var an = analyzeMesh(pos);
-                    var ix = buildIndexed(pos, !!m.weld, an);
-                    var sc = buildSpaceChunks(ix, tri);
-                    var maxId = ix.vcount - 1;
-                    var badIdx = 0;
-                    for (var bi = 0; bi < sc.idx.length; bi++)
+                    var tri, an, ix, sc, badIdx = 0, remapForTopo;
+
+                    if (data.indexed && data.indices && data.vertCount)
                     {
-                        if (sc.idx[bi] > maxId) { badIdx++; }
+                        /* OFF 等自带索引：顶点表 + 索引已经表达了拓扑，
+                         * 不需要也不能按坐标焊接（会把硬边/接缝合并）。
+                         * 直接用解析器的索引，面数用 data.count。 */
+                        tri = data.count;
+                        remapForTopo = data.indices;
+                        an = { vertCount: data.vertCount, bbox: data.bbox,
+                               uniqVerts: pos, remap: data.indices };
+                        ix = { verts: pos, idx: data.indices, vcount: data.vertCount };
+                        /* 空间分块是渲染优化；超大网格用单块绘制避免分钟级重排 */
+                        sc = (tri <= 2000000)
+                            ? buildSpaceChunks(ix, tri)
+                            : { chunks: null, idx: data.indices };
+                        var maxId2 = data.vertCount - 1;
+                        badIdx = 0;
+                        for (var bi2 = 0; bi2 < sc.idx.length; bi2++)
+                        {
+                            if (sc.idx[bi2] > maxId2) { badIdx++; }
+                        }
+                        data.preIdxOk = badIdx === 0;
+                        data.preBadIdx = badIdx;
                     }
+                    else
+                    {
+                        tri = Math.floor(pos.length / 9);
+                        an = analyzeMesh(pos);
+                        ix = buildIndexed(pos, !!m.weld, an);
+                        sc = buildSpaceChunks(ix, tri);
+                        var maxId = ix.vcount - 1;
+                        for (var bi = 0; bi < sc.idx.length; bi++)
+                        {
+                            if (sc.idx[bi] > maxId) { badIdx++; }
+                        }
+                        remapForTopo = an.remap;
+                        data.preIdxOk = badIdx === 0;
+                        data.preBadIdx = badIdx;
+                    }
+
                     data.vertCount = an.vertCount;
                     data.bbox = an.bbox;
                     data.preVerts = ix.verts;
@@ -3262,16 +3418,30 @@ if (typeof importScripts === 'function')
                     data.preVcount = ix.vcount;
                     data.preChunks = sc.chunks;
                     data.preOrderedIdx = sc.idx;
-                    data.preIdxOk = badIdx === 0;
-                    data.preBadIdx = badIdx;
 
                     /* 拓扑一并算好：导入完成时线框/边界/法向数据已就绪，零等待。
                      * pos 随后被 transfer，但 VAO 用 GPU 缓冲 + 索引，不依赖 CPU 侧 positions。 */
-                    data.topo = computeTopo(pos, an.remap, tri);
+                    data.topo = computeTopo(pos, remapForTopo, tri);
 
-                    var transfers = [pos.buffer, an.uniqVerts.buffer, an.remap.buffer,
-                        ix.verts.buffer, ix.idx.buffer, sc.idx.buffer,
-                        data.topo.edges.buffer, data.topo.boundary.buffer, data.topo.faces.buffer];
+                    /* transfer 列表必须去重：indexed 焊接后 an.remap / ix.idx / sc.idx
+                     * 可能是同一个 ArrayBuffer，重复 transfer 会抛 "duplicate" 错误。 */
+                    var transfers = [];
+                    var seenBuf = [];
+                    function addTransfer(buf)
+                    {
+                        if (buf && seenBuf.indexOf(buf) < 0)
+                        {
+                            seenBuf.push(buf); transfers.push(buf);
+                        }
+                    }
+                    addTransfer(pos.buffer);
+                    addTransfer(an.uniqVerts && an.uniqVerts.buffer);
+                    addTransfer(an.remap && an.remap.buffer);
+                    addTransfer(ix.idx && ix.idx.buffer);
+                    addTransfer(sc.idx && sc.idx.buffer);
+                    addTransfer(data.topo.edges.buffer);
+                    addTransfer(data.topo.boundary.buffer);
+                    addTransfer(data.topo.faces.buffer);
                     self.postMessage({ id: m.id, cmd: 'parsed', data: data }, transfers);
                 }
                 catch (e)

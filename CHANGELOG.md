@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.4.2` |
+| 当前版本 | `1.0.4.3` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-17 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -5256,3 +5256,55 @@ Worker  worker_pre.js importScripts('worker_io.js')  → http(s) 主路径
 `worker_pre.js` / `worker_topo.js` 并入 `worker_io.js` 后，后台线程由三个减为两个
 （`worker_icp` + `worker_io`）。README 功能表、线程职责说明、GUIDE 后台线程分工段
 同步修正数量表述与职责描述。
+
+
+### 修正：OFF 索引网格也必须焊接（同版）
+
+`1.0.4.2` 的 commit message 里写了"OFF 跳过焊接哈希"，但那是不对的——
+**焊接是正确性步骤，不能因性能跳过**。修正：
+
+- 新增 `weldIndexed(verts, indices, nv)`（双环境共享，导出到 `MV.loaders`）：
+  对 OFF 的顶点表按坐标量化去重，产出唯一顶点表 + 重映射后的面索引；
+- Worker parse 分支与 `file://` 回退路径**都调用它**，不再跳过焊接；
+- 修复 transfer 列表重复 ArrayBuffer 的错误：indexed 焊接后 `an.remap / ix.idx / sc.idx`
+  指向同一数组，重复 transfer 会抛 `duplicate` 异常 —— 改为去重添加。
+
+验证：
+
+```
+合成 OFF（6 顶点含 2 对重复） → 焊接后 4 顶点，索引 0,1,2,0,1,3   OK
+真实 OFF maxtri=2000          → 3,143,157 → 3,119,331 顶点（去重 23,826）
+                                索引 6000，拓扑 3518 边 / 1036 边界       OK
+```
+
+
+### 解析器统一保留顶点索引（同版）
+
+按格式规范（查证 PLY/OBJ/OFF/glTF 规范 + STL triangle-soup 定义）：
+**凡面数据引用顶点索引的格式，都不应焊接顶点**——索引本身表达拓扑，
+按坐标焊接会破坏硬边/UV seam/不同材质重合点。只有 STL（三角形直接存
+3 个顶点坐标、无索引）需要焊接。
+
+重构各解析器（此前都把索引展开成坐标，导致白白焊接 + 顶点表虚高）：
+
+| 解析器 | 改动 |
+|---|---|
+| `parsePLYBinary` / `parsePLYAscii` | face 的 vertex_indices 直接写 `Uint32Array` 索引，顶点表/属性数组原样 |
+| `parseOBJ` | `f` 行索引直接输出（原 `faces` 累加器），顶点表/颜色原样 |
+| `parseGLTF` | 每 primitive 变换后顶点写入全局顶点表 + 偏移索引；末尾压实未使用顶点并重映射 |
+| `parseOFF` | 已保留索引（此前完成） |
+| STL | 仍输出展开坐标 → 焊接 |
+
+`weld` 参数恢复为仅 STL 为 true；`indexed` 分支不焊接。
+
+验证（2 三角形 / 4 唯一顶点 / 5 边，6 种格式全通过）：
+
+```
+STL(binary)   indexed=false  verts=4  edges=5   OK 焊接
+PLY(binary)   indexed=true   verts=4  edges=5   OK
+PLY(ascii)    indexed=true   verts=4  edges=5   OK
+OBJ           indexed=true   verts=4  edges=5   OK
+OFF           indexed=true   verts=4  edges=5   OK
+glTF          indexed=true   verts=4  edges=5   OK
+真实 bun000.ply 截图正常
+```
