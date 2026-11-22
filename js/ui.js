@@ -136,20 +136,15 @@
             };
         }
 
-        /* 网格：只传几何，法向由 ICP Worker 内部计算（normalsOf）。
-         * 主线程不再跑 O(面数) 的 computeVertexNormals。 */
-        if (d.uniqVerts && d.remap && d.vertCount)
-        {
-            return {
-                kind: 'mesh', pos: d.uniqVerts,
-                positions: d.positions, remap: d.remap, vertCount: d.vertCount,
-                nrm: null, count: d.vertCount
-            };
-        }
+        /* 网格：pos 恒为顶点表，remap 恒为面顶点索引（无索引 soup 时为 null）。
+         * 法向由 Worker 内 computeVertexNormals 按同一套数据计算。 */
+        var verts = d.uniqVerts || d.preVerts || d.positions;
+        var triIdx = d.remap || d.preIdx || null;
+        var nv = d.vertCount || (triIdx ? 0 : Math.floor(verts.length / 3));
         return {
-            kind: 'mesh', pos: d.positions,
-            positions: d.positions, remap: null, vertCount: null,
-            nrm: null, count: d.count || Math.floor(d.positions.length / 3)
+            kind: 'mesh', pos: verts,
+            positions: verts, remap: triIdx, vertCount: nv || null,
+            nrm: null, count: nv || d.count || Math.floor(verts.length / 3)
         };
     }
 
@@ -707,7 +702,7 @@
 
         if (layer.kind === 'mesh')
         {
-            var tri = d.positions ? Math.floor(d.positions.length / 9) : (d.count || 0);
+            var tri = d.count || (d.positions ? Math.floor(d.positions.length / 9) : 0);
             lines.push('面数：' + formatCount(tri) + ' 三角形');
         }
         else
@@ -4499,18 +4494,19 @@
             }
             opts.kd = fullKd;
 
-            /* 同步兜底路径：主线程这里仍需法向（Worker 路径由 normalsOf 负责）。 */
+            /* 同步兜底路径：主线程这里仍需法向（Worker 路径由 normalsOf 负责）。
+             * pos 是规范化顶点表，remap 是面顶点索引；与 three.js 同口径。 */
             var mNrm = moving.nrm;
             var fNrm = fixed.nrm;
-            if (!mNrm && moving.positions && global.MV.icp.computeVertexNormals)
+            if (!mNrm && moving.pos && global.MV.icp.computeVertexNormals)
             {
                 mNrm = global.MV.icp.computeVertexNormals(
-                    moving.positions, moving.remap || null, moving.vertCount || null).normals;
+                    moving.pos, moving.remap || null, moving.vertCount || null).normals;
             }
-            if (!fNrm && fixed.positions && global.MV.icp.computeVertexNormals)
+            if (!fNrm && fixed.pos && global.MV.icp.computeVertexNormals)
             {
                 fNrm = global.MV.icp.computeVertexNormals(
-                    fixed.positions, fixed.remap || null, fixed.vertCount || null).normals;
+                    fixed.pos, fixed.remap || null, fixed.vertCount || null).normals;
             }
             return global.MV.icp.createSolver(moving.pos, mNrm, fixed.pos, fNrm, opts);
         }

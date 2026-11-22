@@ -2,8 +2,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.4.3` |
-| 记录范围 | 2026-10-21（项目起点）→ 2026-11-17 |
+| 当前版本 | `1.0.4.4` |
+| 记录范围 | 2026-10-21（项目起点）→ 2026-11-22 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
 
@@ -12,6 +12,37 @@
 > 对外只有一个版本号：`git HEAD` 是 `1.0.3.2`，本次按规则发布为 **`1.0.3.3`**。
 
 > **可信度说明**：`2026-10-21` ~ `2026-10-22` 上午没有逐条记录，只保留由现存代码反推的「基线能力」（文中标注 *基线*）。`2026-10-22` 下午起为逐条实测记录。
+
+---
+
+## 1.0.4.4：统一三维导入的「顶点表 + 面索引」口径（2026-11-22）
+
+**根因**：`1.0.4.3` 让 OBJ/PLY/OFF/glTF 解析器保留「顶点表 + 面索引」，
+但 `computeTopo()` / `computeVertexNormals()` / 拾取 / 顶点云拷贝仍按
+triangle soup（`o=i*9`、`v=i*3`）读取，并把 soup 槽位写进线框/边界 EBO；
+GPU 顶点缓冲却已是焊接后的紧凑顶点表。索引空间不一致 ⇒ 边框、法向、边界全错。
+
+**参考约定**（未凭猜测）：
+- CloudCompare `ObjFilter::loadFile`：`addTriangle(A->vIndex, B->vIndex, C->vIndex)`，
+  面存顶点索引；`STLFilter` 导入后按近重合容差焊接，并重映射三角形索引、丢弃退化面。
+- three.js `BufferGeometry.computeVertexNormals()`：索引几何用 `index.getX(i)`
+  从 `position` 属性取三点，面法线累加到共享顶点后归一化；非索引几何才逐 9 float 取面。
+- Open3D `TriangleMesh`：官方定义即「vertices + triangles represented by the indices to the vertices」。
+
+**改动**：
+- `worker_io.js`：拓扑上移为双环境共享的 `MV.topology.computeTopo(verts, triIdx, tri)`；
+  按面索引取顶点，EBO 写顶点表下标；退化面跳过；大 id 字符串键兜底。
+- `render.js`：`ensureTopo()` 与同步上传路径都使用 `preVerts/preIdx` / `uniqVerts/remap`；
+  焊接按量化键（`Q=1e4`）判重，与 Worker 一致。
+- `algo.js` / `worker_icp.js` / `ui.js`：顶点法向改为 three.js 同口径；
+  `pos` 恒为顶点表、`remap` 恒为面索引；拾取、拆分、撤销同步改用面索引。
+- `app.js`：索引格式小网格不再被误判为 soup；顶点云拷贝遍历规范顶点表。
+- `parseOBJ` 返回 `verts.result()`（按实际 `vcount` 压实），不再把 `F32Accum` 预分配的
+  `1<<20` 个 float 全当顶点；实测 OBJ 四顶点表从 349525 顶点回落到 4。
+- 索引越界自检由 `> maxId` 修正为 `>= maxId + 1`。
+
+**验证**：`_t/topo_regress.html`（本地无头 Chrome）覆盖
+顶点表+面索引、STL 焊接、退化面、顶点法向索引/非索引两条路径。
 
 ---
 

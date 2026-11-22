@@ -513,11 +513,14 @@
             var bucket = seen.get(key);
             if (bucket)
             {
-                // 哈希冲突时逐个比对真实坐标
+                // 哈希冲突时逐个比对量化键（Q=1e4，0.1 μm 容差），与 Worker 版一致
                 for (var b = 0; b < bucket.length; b++)
                 {
                     var u = bucket[b];
-                    if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                    var ukx = Math.round(uniq[u * 3] * Q);
+                    var uky = Math.round(uniq[u * 3 + 1] * Q);
+                    var ukz = Math.round(uniq[u * 3 + 2] * Q);
+                    if (ukx === kx && uky === ky && ukz === kz)
                     {
                         hit = true;
                         hitId = u;
@@ -763,7 +766,12 @@
             else
             {
                 // 回退：同步路径（Worker 不可用 / 小网格）
-                if (doWeld && d.uniqVerts && d.remap)
+                // 索引格式必须保留解析器给的顶点表 + 面索引，不能退化为恒等索引。
+                if (d.indexed && d.indices && d.vertCount)
+                {
+                    ix = { verts: d.positions, idx: d.indices, vcount: d.vertCount };
+                }
+                else if (doWeld && d.uniqVerts && d.remap)
                 {
                     ix = { verts: d.uniqVerts, idx: d.remap, vcount: d.vertCount };
                 }
@@ -1454,40 +1462,39 @@
             return g.topo;
         }
 
-        var pos = d.positions;
+        /* 与 Worker 同源：顶点表 + 面索引。preVerts/preIdx 来自导入预处理，
+         * uniqVerts/remap 是 file:// 兜底；都没有时按 soup + 恒等索引处理。 */
+        var verts = d.preVerts || d.uniqVerts || null;
+        var triIdx = d.preIdx || d.remap || null;
+        if (!verts || !triIdx || verts.length < 3 || triIdx.length < g.triCount * 3)
+        {
+            var built = buildIndexed(d.positions, false);
+            verts = built.verts;
+            triIdx = built.idx;
+        }
         var tri = g.triCount;
-        var remap = (d.remap && d.remap.length >= tri * 3) ? d.remap : null;
-        var LIM = 16777216;                       // 2^24，焊接 id 上限（4096 万顶点足够）
-
-        /* 边表用 Map：按实际出现的边增长，不再一次预分配 tri*6 的巨型数组。
-         * 之前用开放寻址表对 200 万面要 96MB 键 + 48MB 值，载入后自动跑会卡死主线程。
-         * 同一个焊接 id 对 (u,v) 只存一次，键是数值 u*LIM+v（无字符串拼接）。 */
-        var edgeMap = new Map();                  // key -> 边序号
-
-        /* 边端点先用普通数组累积（稀疏增长），最后压紧成 TypedArray。 */
-        var eU = [];                              // 焊接端点（仅用于调试/去重）
-        var eA = [];                              // 原始顶点索引（写进 GPU 缓冲）
+        var LIM = 16777216;                       // 常规 id 数值键；超大 id 退化字符串键
+        var edgeMap = new Map();
+        var eA = [];                              // 顶点表下标（直接写 GPU EBO）
         var eB = [];
-        var eUse = [];                            // 使用次数
+        var eUse = [];
         var ne = 0;
-
-        /* 面法向：每面 6 float（质心 xyz + 单位法向 xyz），颜色现算；全量不抽稀。 */
         var faces = new Float32Array(tri * 6);
         var nf = 0;
         var sumEdge = 0, cntEdge = 0;
         var probe = Math.max(1, Math.floor(tri / 512));
 
-        function addEdge(va, vb, ua, ub)
+        function addEdge(va, vb)
         {
-            if (ua === ub) { return; }
-            var key = ua < ub ? ua * LIM + ub : ub * LIM + ua;
+            if (va === vb) { return; }
+            var key = (va < LIM && vb < LIM)
+                ? (va < vb ? va * LIM + vb : vb * LIM + va)
+                : (va < vb ? va + '|' + vb : vb + '|' + va);
             var idx = edgeMap.get(key);
             if (idx === undefined)
             {
                 edgeMap.set(key, ne);
-                eU.push(ua);
-                eA.push(va); eB.push(vb);
-                eUse.push(1);
+                eA.push(va); eB.push(vb); eUse.push(1);
                 ne++;
                 return;
             }
@@ -1496,10 +1503,13 @@
 
         for (var i = 0; i < tri; i++)
         {
-            var o = i * 9;
-            var x0 = pos[o], y0 = pos[o + 1], z0 = pos[o + 2];
-            var x1 = pos[o + 3], y1 = pos[o + 4], z1 = pos[o + 5];
-            var x2 = pos[o + 6], y2 = pos[o + 7], z2 = pos[o + 8];
+            var t3 = i * 3;
+            var v0 = triIdx[t3], v1 = triIdx[t3 + 1], v2 = triIdx[t3 + 2];
+            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
+            var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
+            var x0 = verts[o0], y0 = verts[o0 + 1], z0 = verts[o0 + 2];
+            var x1 = verts[o1], y1 = verts[o1 + 1], z1 = verts[o1 + 2];
+            var x2 = verts[o2], y2 = verts[o2 + 1], z2 = verts[o2 + 2];
 
             var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
             var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
@@ -1528,13 +1538,9 @@
                 cntEdge++;
             }
 
-            var v0 = i * 3, v1 = v0 + 1, v2 = v0 + 2;
-            var u0 = remap ? remap[v0] : v0;
-            var u1 = remap ? remap[v1] : v1;
-            var u2 = remap ? remap[v2] : v2;
-            addEdge(v0, v1, u0, u1);
-            addEdge(v1, v2, u1, u2);
-            addEdge(v2, v0, u2, u0);
+            addEdge(v0, v1);
+            addEdge(v1, v2);
+            addEdge(v2, v0);
         }
 
         /* 压紧成最终缓冲：线框 = 所有边；边界 = 使用次数为 1 的边 */
@@ -1556,7 +1562,7 @@
                 boundary[bw++] = eB[k2];
             }
         }
-        eU.length = eA.length = eB.length = eUse.length = 0;   // 释放临时数组
+        eA.length = eB.length = eUse.length = 0;   // 释放临时数组
 
         g.topo = {
             edges: edges,

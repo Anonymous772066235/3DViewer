@@ -403,20 +403,25 @@
      * 面片与选区判定所需的平面表示与点云拆分（splitPointsByPlanes）一致。 */
     function splitMesh(layer, planes)
     {
-        var pos = layer.data.positions;
-        var tri = Math.floor(pos.length / 9);
+        var d = layer.data;
+        var pos = d.preVerts || d.uniqVerts || d.positions;
+        var triIdx = d.preIdx || d.remap || null;
+        var tri = d.count || Math.floor(pos.length / 9);
         var segOut = [];
         var remOut = [];
         var np = planes.length;
 
         for (var t = 0; t < tri; t++)
         {
-            var o = t * 9;
+            var t3 = t * 3;
+            var o0 = (triIdx ? triIdx[t3] : t3) * 3;
+            var o1 = (triIdx ? triIdx[t3 + 1] : t3 + 1) * 3;
+            var o2 = (triIdx ? triIdx[t3 + 2] : t3 + 2) * 3;
 
             // 质心
-            var cx = (pos[o] + pos[o + 3] + pos[o + 6]) / 3;
-            var cy = (pos[o + 1] + pos[o + 4] + pos[o + 7]) / 3;
-            var cz = (pos[o + 2] + pos[o + 5] + pos[o + 8]) / 3;
+            var cx = (pos[o0] + pos[o1] + pos[o2]) / 3;
+            var cy = (pos[o0 + 1] + pos[o1 + 1] + pos[o2 + 1]) / 3;
+            var cz = (pos[o0 + 2] + pos[o1 + 2] + pos[o2 + 2]) / 3;
 
             var inside = true;
             for (var p = 0; p < np; p++)
@@ -430,9 +435,9 @@
             }
 
             var dst = inside ? segOut : remOut;
-            dst.push(pos[o], pos[o + 1], pos[o + 2],
-                     pos[o + 3], pos[o + 4], pos[o + 5],
-                     pos[o + 6], pos[o + 7], pos[o + 8]);
+            dst.push(pos[o0], pos[o0 + 1], pos[o0 + 2],
+                     pos[o1], pos[o1 + 1], pos[o1 + 2],
+                     pos[o2], pos[o2 + 1], pos[o2 + 2]);
         }
 
         return {
@@ -768,7 +773,14 @@
 
         var layer = preview.layer;
         var seg = null;
-        var rem = { positions: layer.data.positions };
+        var srcD = layer.data;
+        var rem = {
+            positions: srcD.preVerts || srcD.uniqVerts || srcD.positions,
+            remap: srcD.preIdx || srcD.remap || null,
+            count: srcD.count,
+            vertCount: srcD.vertCount,
+            format: srcD.format
+        };
 
         for (var i = 0; i < preview.planes.length; i++)
         {
@@ -1064,17 +1076,18 @@
      * 辅助函数（rayTriangle / rayAabb / ensurePickGrid / pickCandidates）
      * 不依赖 App，已提到模块作用域。 */
 
-function rayTriangle(ox, oy, oz, dx, dy, dz, pos, o)
+/* pos 为顶点表，o0/o1/o2 是三个顶点在表中的 float 偏移（由面索引换算）。 */
+function rayTriangle(ox, oy, oz, dx, dy, dz, pos, o0, o1, o2)
 {
-    var ax = pos[o];
-    var ay = pos[o + 1];
-    var az = pos[o + 2];
-    var e1x = pos[o + 3] - ax;
-    var e1y = pos[o + 4] - ay;
-    var e1z = pos[o + 5] - az;
-    var e2x = pos[o + 6] - ax;
-    var e2y = pos[o + 7] - ay;
-    var e2z = pos[o + 8] - az;
+    var ax = pos[o0];
+    var ay = pos[o0 + 1];
+    var az = pos[o0 + 2];
+    var e1x = pos[o1] - ax;
+    var e1y = pos[o1 + 1] - ay;
+    var e1z = pos[o1 + 2] - az;
+    var e2x = pos[o2] - ax;
+    var e2y = pos[o2 + 1] - ay;
+    var e2z = pos[o2 + 2] - az;
 
     var px = dy * e2z - dz * e2y;
     var py = dz * e2x - dx * e2z;
@@ -1149,11 +1162,13 @@ function ensurePickGrid(layer, tri)
         return layer._pickGrid;
     }
 
-    var pos = layer.data.positions;
+    var d = layer.data;
+    var pos = d.preVerts || d.uniqVerts || d.positions;
+    var triIdx = d.preIdx || d.remap || null;
     var mnx = Infinity, mny = Infinity, mnz = Infinity;
     var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
     var i;
-    for (i = 0; i < tri * 9; i += 3)
+    for (i = 0; i < pos.length; i += 3)
     {
         var x = pos[i], y = pos[i + 1], z = pos[i + 2];
         if (x < mnx) { mnx = x; } if (x > mxx) { mxx = x; }
@@ -1169,13 +1184,16 @@ function ensurePickGrid(layer, tri)
 
     for (var t = 0; t < tri; t++)
     {
-        var o = t * 9;
-        var tx0 = Math.min(pos[o], pos[o + 3], pos[o + 6]);
-        var tx1 = Math.max(pos[o], pos[o + 3], pos[o + 6]);
-        var ty0 = Math.min(pos[o + 1], pos[o + 4], pos[o + 7]);
-        var ty1 = Math.max(pos[o + 1], pos[o + 4], pos[o + 7]);
-        var tz0 = Math.min(pos[o + 2], pos[o + 5], pos[o + 8]);
-        var tz1 = Math.max(pos[o + 2], pos[o + 5], pos[o + 8]);
+        var t3 = t * 3;
+        var o0 = (triIdx ? triIdx[t3] : t3) * 3;
+        var o1 = (triIdx ? triIdx[t3 + 1] : t3 + 1) * 3;
+        var o2 = (triIdx ? triIdx[t3 + 2] : t3 + 2) * 3;
+        var tx0 = Math.min(pos[o0], pos[o1], pos[o2]);
+        var tx1 = Math.max(pos[o0], pos[o1], pos[o2]);
+        var ty0 = Math.min(pos[o0 + 1], pos[o1 + 1], pos[o2 + 1]);
+        var ty1 = Math.max(pos[o0 + 1], pos[o1 + 1], pos[o2 + 1]);
+        var tz0 = Math.min(pos[o0 + 2], pos[o1 + 2], pos[o2 + 2]);
+        var tz1 = Math.max(pos[o0 + 2], pos[o1 + 2], pos[o2 + 2]);
 
         var i0 = Math.min(N - 1, Math.max(0, Math.floor((tx0 - mnx) / sx)));
         var i1 = Math.min(N - 1, Math.max(0, Math.floor((tx1 - mnx) / sx)));
@@ -1367,7 +1385,9 @@ function pickCandidates(layer, eye, dir, tri)
 
             if (l.kind === 'mesh')
             {
-                var pos = l.data.positions;
+                var ld = l.data;
+                var pos = ld.preVerts || ld.uniqVerts || ld.positions;
+                var triIdx = ld.preIdx || ld.remap || null;
                 var tri = l.gpu.triCount;
                 var cand = pickCandidates(l, eye, dir, tri);
                 var nCand = cand ? cand.length : tri;
@@ -1375,14 +1395,17 @@ function pickCandidates(layer, eye, dir, tri)
                 for (var ci = 0; ci < nCand; ci++)
                 {
                     var t = cand ? cand[ci] : ci;
-                    var o = t * 9;
-                    var tt = rayTriangle(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], pos, o);
+                    var t3 = t * 3;
+                    var o0 = (triIdx ? triIdx[t3] : t3) * 3;
+                    var o1 = (triIdx ? triIdx[t3 + 1] : t3 + 1) * 3;
+                    var o2 = (triIdx ? triIdx[t3 + 2] : t3 + 2) * 3;
+                    var tt = rayTriangle(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], pos, o0, o1, o2);
 
                     if (tt > 0 && tt < bestT)
                     {
                         bestT = tt;
-                        var e1 = [pos[o + 3] - pos[o], pos[o + 4] - pos[o + 1], pos[o + 5] - pos[o + 2]];
-                        var e2 = [pos[o + 6] - pos[o], pos[o + 7] - pos[o + 1], pos[o + 8] - pos[o + 2]];
+                        var e1 = [pos[o1] - pos[o0], pos[o1 + 1] - pos[o0 + 1], pos[o1 + 2] - pos[o0 + 2]];
+                        var e2 = [pos[o2] - pos[o0], pos[o2 + 1] - pos[o0 + 1], pos[o2 + 2] - pos[o0 + 2]];
 
                         hit = {
                             layer: l,
@@ -1583,7 +1606,9 @@ function pickCandidates(layer, eye, dir, tri)
 
             if (l.kind === 'mesh')
             {
-                var pos = l.data.positions;
+                var ld = l.data;
+                var pos = ld.preVerts || ld.uniqVerts || ld.positions;
+                var triIdx = ld.preIdx || ld.remap || null;
                 var tri = l.gpu.triCount;
                 // 分块粗筛：大模型只对射线穿过的块内三角形求交
                 var cand = pickCandidates(l, eye, dir, tri);
@@ -1591,15 +1616,18 @@ function pickCandidates(layer, eye, dir, tri)
                 for (var ci2 = 0; ci2 < nCand; ci2++)
                 {
                     var t = cand ? cand[ci2] : ci2;
-                    var o = t * 9;
-                    var tt = rayTriangle(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], pos, o);
+                    var t3 = t * 3;
+                    var o0 = (triIdx ? triIdx[t3] : t3) * 3;
+                    var o1 = (triIdx ? triIdx[t3 + 1] : t3 + 1) * 3;
+                    var o2 = (triIdx ? triIdx[t3 + 2] : t3 + 2) * 3;
+                    var tt = rayTriangle(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], pos, o0, o1, o2);
                     if (tt > 0 && tt < bestT)
                     {
                         bestT = tt;
 
                         // 面法向（三角形两条边的叉积）
-                        var e1 = [pos[o + 3] - pos[o], pos[o + 4] - pos[o + 1], pos[o + 5] - pos[o + 2]];
-                        var e2 = [pos[o + 6] - pos[o], pos[o + 7] - pos[o + 1], pos[o + 8] - pos[o + 2]];
+                        var e1 = [pos[o1] - pos[o0], pos[o1 + 1] - pos[o0 + 1], pos[o1 + 2] - pos[o0 + 2]];
+                        var e2 = [pos[o2] - pos[o0], pos[o2 + 1] - pos[o0 + 1], pos[o2 + 2] - pos[o0 + 2]];
 
                         hit = {
                             layer: l,
@@ -2009,48 +2037,51 @@ function pickCandidates(layer, eye, dir, tri)
 
     /* ---------------- 顶点法向 ---------------- */
 
-    /* 由网格三角形累积顶点法向；remap 为三角形顶点索引（每三角形 3 个），可省略 */
-    function computeVertexNormals(positions, remap, vertCount)
+    /* 与 three.js BufferGeometry.computeVertexNormals 同口径：
+     *   positions = 顶点表（3 float / 顶点）
+     *   indices   = 面顶点索引（3 uint / 面）；为 null 时 positions 按 soup 处理
+     * 面法线按索引从顶点表取三点，累加到共享顶点后统一归一化。 */
+    function computeVertexNormals(positions, indices, vertCount)
     {
-        var nTri = Math.floor(positions.length / 9);
-        var nv = vertCount || (remap ? (remap.length / 3) : Math.floor(positions.length / 3));
-
-        if (remap && vertCount)
+        var indexed = !!indices;
+        var nTri = indexed ? Math.floor(indices.length / 3)
+                           : Math.floor(positions.length / 9);
+        var nv;
+        if (vertCount)
         {
             nv = vertCount;
         }
-        else if (remap)
+        else if (indexed)
         {
             var mx = 0;
-            for (var r = 0; r < remap.length; r++) { if (remap[r] > mx) { mx = remap[r]; } }
+            for (var r = 0; r < indices.length; r++) { if (indices[r] > mx) { mx = indices[r]; } }
             nv = mx + 1;
+        }
+        else
+        {
+            nv = Math.floor(positions.length / 3);
         }
 
         var nrm = new Float32Array(nv * 3);
 
         for (var t = 0; t < nTri; t++)
         {
-            var o = t * 9;
-            var ax = positions[o], ay = positions[o + 1], az = positions[o + 2];
-            var bx = positions[o + 3], by = positions[o + 4], bz = positions[o + 5];
-            var cx = positions[o + 6], cy = positions[o + 7], cz = positions[o + 8];
+            var t3 = t * 3;
+            var i0 = indexed ? indices[t3] : t3;
+            var i1 = indexed ? indices[t3 + 1] : t3 + 1;
+            var i2 = indexed ? indices[t3 + 2] : t3 + 2;
+            if (i0 === i1 || i1 === i2 || i2 === i0) { continue; }
+
+            var o0 = i0 * 3, o1 = i1 * 3, o2 = i2 * 3;
+            var ax = positions[o0], ay = positions[o0 + 1], az = positions[o0 + 2];
+            var bx = positions[o1], by = positions[o1 + 1], bz = positions[o1 + 2];
+            var cx = positions[o2], cy = positions[o2 + 1], cz = positions[o2 + 2];
 
             var e1x = bx - ax, e1y = by - ay, e1z = bz - az;
             var e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
-
             var nx = e1y * e2z - e1z * e2y;
             var ny = e1z * e2x - e1x * e2z;
             var nz = e1x * e2y - e1y * e2x;
-
-            var i0, i1, i2;
-            if (remap)
-            {
-                i0 = remap[t * 3]; i1 = remap[t * 3 + 1]; i2 = remap[t * 3 + 2];
-            }
-            else
-            {
-                i0 = t * 3; i1 = t * 3 + 1; i2 = t * 3 + 2;
-            }
 
             nrm[i0 * 3] += nx; nrm[i0 * 3 + 1] += ny; nrm[i0 * 3 + 2] += nz;
             nrm[i1 * 3] += nx; nrm[i1 * 3 + 1] += ny; nrm[i1 * 3 + 2] += nz;

@@ -60,17 +60,16 @@ function ensureKd()
     return kdFixed;
 }
 
-/* 网格样本的法向在 Worker 内部算（主线程只传 positions/remap/vertCount），
- * 避免主线程每次配准都跑一遍 O(面数) 的 computeVertexNormals。
- * 点云样本自带 normals（或从 positions 直接来），不需要重算。 */
+/* 网格样本的法向在 Worker 内部算。computeVertexNormals 现在与 three.js 同口径：
+ * 第一参数是顶点表，第二参数是面顶点索引；pos 是规范化后的顶点表。 */
 function normalsOf(sample)
 {
     if (!sample) { return null; }
     if (sample.nrm) { return sample.nrm; }
-    if (sample.kind !== 'mesh' || !sample.positions) { return null; }
+    if (sample.kind !== 'mesh' || !sample.pos) { return null; }
     var fn = self.MV.icp && self.MV.icp.computeVertexNormals;
     if (!fn) { return null; }
-    var r = fn(sample.positions, sample.remap || null, sample.vertCount || null);
+    var r = fn(sample.pos, sample.remap || null, sample.vertCount || null);
     return r.normals;
 }
 

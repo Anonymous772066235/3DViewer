@@ -1121,19 +1121,21 @@
             return;
         }
 
-        var pos = src.data.positions;
-        var nTri = Math.floor(pos.length / 9);
+        /* 优先用规范化顶点表（索引格式 = 解析器顶点表；STL = 焊接结果），
+         * 避免把索引格式的顶点表当成 soup 重复展开。 */
+        var pos = src.data.uniqVerts || src.data.positions;
+        var nSrc = Math.floor(pos.length / 3);
         var map = new Map();
-        var out = new Float32Array(nTri * 3 * 3);
+        var out = new Float32Array(pos.length);
         var n = 0;
         var Q = 1e4;
 
         var minX = Infinity, minY = Infinity, minZ = Infinity;
         var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-        for (var t = 0; t < nTri * 3; t++)
+        for (var v = 0; v < nSrc; v++)
         {
-            var o = t * 3;
+            var o = v * 3;
             var x = pos[o], y = pos[o + 1], z = pos[o + 2];
             var key = Math.round(x * Q) + ',' + Math.round(y * Q) + ',' + Math.round(z * Q);
             if (map.has(key))
@@ -1297,10 +1299,11 @@
         {
             return Promise.resolve(false);
         }
-        var tri = Math.floor(data.positions.length / 9);
-        if (!tri || tri < 1000) { return Promise.resolve(false); }   // 小网格不值得开 Worker
+        /* 索引格式的 positions 是顶点表，不是 soup，面数必须取 data.count。 */
+        var tri = data.count || Math.floor(data.positions.length / 9);
+        if (!tri) { return Promise.resolve(false); }
 
-        /* 索引化格式（OFF 等）：顶点表+索引已表达拓扑，保留原样不焊接 */
+        /* 索引化格式（OBJ/PLY/OFF/glTF）：顶点表+索引已表达拓扑，保留原样不焊接 */
         if (data.indexed && data.indices && data.vertCount)
         {
             return Promise.resolve({
@@ -1313,6 +1316,8 @@
             }).then(function (r)
             {
                 data.vertCount = r.vertCount;
+                data.uniqVerts = r.uniqVerts;
+                data.remap = r.remap;
                 data.preVerts = r.verts;
                 data.preIdx = r.idx;
                 data.preVcount = r.vcount;
@@ -1322,6 +1327,8 @@
                 return true;
             });
         }
+
+        if (tri < 1000) { return Promise.resolve(false); }   // soup 小网格不值得开 Worker
 
         var W = getPreprocessWorker();
         if (!W) { return Promise.resolve(false); }
@@ -1368,10 +1375,13 @@
     {
         var d = layer && layer.data;
         if (!d || d.kind !== 'mesh' || !d.positions) { return; }
-        var tri = Math.floor(d.positions.length / 9);
+        var tri = d.count || Math.floor(d.positions.length / 9);
         if (tri < 4000 || !global.Worker) { return; }   // 小网格 / 无 Worker：同步兜底
 
-        var copy = new Float32Array(d.positions);
+        var verts = d.preVerts || d.uniqVerts || d.positions;
+        var triIdx = d.preIdx || d.remap || null;
+        var copy = new Float32Array(verts);
+        var idxCopy = triIdx ? new Uint32Array(triIdx) : null;
         var id = layer.id;
         try
         {
@@ -1387,10 +1397,12 @@
                 W.terminate();                          // 一次性
             };
             W.onerror = function () { try { W.terminate(); } catch (e) { /* ignore */ } };
+            var tr = [copy.buffer];
+            if (idxCopy) { tr.push(idxCopy.buffer); }
             W.postMessage({
                 id: id, cmd: 'pickgrid', layerId: id,
-                positions: copy, triCount: tri, N: 8
-            }, [copy.buffer]);
+                verts: copy, idx: idxCopy, triCount: tri, N: 8
+            }, tr);
         }
         catch (e) { /* 失败不影响拾取（走同步兜底） */ }
     };
@@ -1401,7 +1413,13 @@
         // 网格只分析一次：顶点数 / 包围盒 / 去重顶点集，后续（树显示、顶点云拷贝）全部复用
         if (data.kind === 'mesh' && data.positions && data.uniqVerts === undefined)
         {
-            if (global.MV.render && global.MV.render.analyzeMesh)
+            if (data.indexed && data.indices && data.vertCount)
+            {
+                /* 索引格式：顶点表 + 面索引本身就是规范表示，不能按 soup 再分析一次。 */
+                data.uniqVerts = data.positions;
+                data.remap = data.indices;
+            }
+            else if (global.MV.render && global.MV.render.analyzeMesh)
             {
                 var an = global.MV.render.analyzeMesh(data.positions);
                 data.vertCount = an.vertCount;

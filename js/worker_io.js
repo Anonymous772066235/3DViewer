@@ -495,7 +495,9 @@
             }
         });
 
-        var vdata = verts.data;
+        /* 顶点表必须按实际 vcount 压实：F32Accum 初始容量 1<<20，
+         * 直接返回 .data 会把 unused 空间当成顶点，破坏「positions 长度=3×vertCount」约定。 */
+        var vdata = verts.result();
         var fdata = faces.data;
 
         /* 只有顶点、没有面（扫描点云常这么导出）→ 按点云返回。
@@ -2278,7 +2280,12 @@
                 for (var b = 0; b < bucket.length; b++)
                 {
                     var u = bucket[b];
-                    if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                    /* 与 CloudCompare STL 导入一致：按量化容差判重，而非浮点严格相等。
+                     * Q 已把坐标分桶到 0.1 μm，桶内再比较量化键即可。 */
+                    var ukx = Math.round(uniq[u * 3] * Q);
+                    var uky = Math.round(uniq[u * 3 + 1] * Q);
+                    var ukz = Math.round(uniq[u * 3 + 2] * Q);
+                    if (ukx === kx && uky === ky && ukz === kz)
                     {
                         hitId = u;
                         break;
@@ -3042,37 +3049,33 @@
         };
     })();
 
-})(typeof self !== 'undefined' ? self : window);
-
-
-/* ==================== Worker 专属：预处理 / 拾取网格 / 消息协议 ====================
- * 仅当在 Worker 中运行时注册（主线程加载 worker_io.js 时不执行）。
- * 由 worker_icp.js 同一手法保证 core.js 的 window IIFE 可用。
- */
-if (typeof importScripts === 'function')
-{
-    self.window = self;
-    var __QS = location.search || '';
-    importScripts('core.js' + __QS);
-
-    /* 拓扑计算：一次三角形遍历同时产出边表 / 边界边 / 面法向 / 平均边长。
-     * 原 worker_topo.js 的算法内联于此 —— parse 完成后数据就在手边，
-     * 直接算完一起回传，省一次 transfer + 一次消息往返。 */
-    function computeTopo(pos, remap, tri)
+    /* ==================== 拓扑（双环境共享） ====================
+     * 数据约定与 CloudCompare / three.js / Open3D 一致：
+     *   positions = 顶点表（3 float / 顶点）
+     *   triangles = 面顶点索引（3 uint / 三角形，指向 positions）
+     * STL 这类无索引格式先焊接成唯一顶点表 + 重映射索引，再走同一条路径。
+     * 线框/边界 EBO 必须直接写顶点表下标，焊接 id 只用于去重键。
+     */
+    function computeTopo(positions, triangles, tri)
     {
-        var LIM = 16777216;
+        var LIM = 16777216;                       // 常规 id 走数值键；超大 id 退化字符串键
         var edgeMap = new Map();
         var eA = [], eB = [], eUse = [];
         var ne = 0;
+        var nTri = triangles ? Math.floor(triangles.length / 3)
+                             : Math.floor(positions.length / 9);
+        if (tri > nTri) { tri = nTri; }
         var faces = new Float32Array(tri * 6);
         var nf = 0;
         var sumEdge = 0, cntEdge = 0;
         var probe = Math.max(1, Math.floor(tri / 512));
 
-        function addEdge(va, vb, ua, ub)
+        function addEdge(va, vb)
         {
-            if (ua === ub) { return; }
-            var key = ua < ub ? ua * LIM + ub : ub * LIM + ua;
+            if (va === vb) { return; }
+            var key = (va < LIM && vb < LIM)
+                ? (va < vb ? va * LIM + vb : vb * LIM + va)
+                : (va < vb ? va + '|' + vb : vb + '|' + va);
             var idx = edgeMap.get(key);
             if (idx === undefined)
             {
@@ -3086,10 +3089,19 @@ if (typeof importScripts === 'function')
 
         for (var i = 0; i < tri; i++)
         {
-            var o = i * 9;
-            var x0 = pos[o], y0 = pos[o + 1], z0 = pos[o + 2];
-            var x1 = pos[o + 3], y1 = pos[o + 4], z1 = pos[o + 5];
-            var x2 = pos[o + 6], y2 = pos[o + 7], z2 = pos[o + 8];
+            var t3 = i * 3;
+            var v0 = triangles ? triangles[t3] : t3;
+            var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
+            var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
+
+            /* 与 CloudCompare 一致：焊接后出现重合顶点的退化面直接丢弃。 */
+            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
+
+            var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
+            var x0 = positions[o0], y0 = positions[o0 + 1], z0 = positions[o0 + 2];
+            var x1 = positions[o1], y1 = positions[o1 + 1], z1 = positions[o1 + 2];
+            var x2 = positions[o2], y2 = positions[o2 + 1], z2 = positions[o2 + 2];
+
             var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
             var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
             var nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
@@ -3112,13 +3124,9 @@ if (typeof importScripts === 'function')
                             Math.sqrt(ex * ex + ey * ey + ez * ez)) / 3;
                 cntEdge++;
             }
-            var v0 = i * 3, v1 = v0 + 1, v2 = v0 + 2;
-            var u0 = remap ? remap[v0] : v0;
-            var u1 = remap ? remap[v1] : v1;
-            var u2 = remap ? remap[v2] : v2;
-            addEdge(v0, v1, u0, u1);
-            addEdge(v1, v2, u1, u2);
-            addEdge(v2, v0, u2, u0);
+            addEdge(v0, v1);
+            addEdge(v1, v2);
+            addEdge(v2, v0);
         }
 
         var edges = new Uint32Array(ne * 2);
@@ -3146,6 +3154,25 @@ if (typeof importScripts === 'function')
             avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
         };
     }
+
+    global.MV.topology = { computeTopo: computeTopo };
+
+})(typeof self !== 'undefined' ? self : window);
+
+
+/* ==================== Worker 专属：预处理 / 拾取网格 / 消息协议 ====================
+ * 仅当在 Worker 中运行时注册（主线程加载 worker_io.js 时不执行）。
+ * 由 worker_icp.js 同一手法保证 core.js 的 window IIFE 可用。
+ */
+if (typeof importScripts === 'function')
+{
+    self.window = self;
+    var __QS = location.search || '';
+    importScripts('core.js' + __QS);
+
+    /* 拓扑计算已上移到双环境共享的 MV.topology.computeTopo。
+     * 这里直接复用，保证 Worker 与 file:// 主线程兜底走同一套顶点表+面索引口径。 */
+    var computeTopo = self.MV.topology.computeTopo;
 
     (function ()
     {
@@ -3187,7 +3214,13 @@ if (typeof importScripts === 'function')
                     for (var b = 0; b < bucket.length; b++)
                     {
                         var u = bucket[b];
-                        if (uniq[u * 3] === x && uniq[u * 3 + 1] === y && uniq[u * 3 + 2] === z)
+                        /* 量化键相等即视为同一顶点（Q=1e4，0.1 μm 容差）。
+                         * 分桶哈希只负责缩小比较范围，真正的判据必须是量化键，
+                         * 否则相邻浮点值仍会被当成两个顶点，边界被高估。 */
+                        var ukx = Math.round(uniq[u * 3] * Q);
+                        var uky = Math.round(uniq[u * 3 + 1] * Q);
+                        var ukz = Math.round(uniq[u * 3 + 2] * Q);
+                        if (ukx === kx && uky === ky && ukz === kz)
                         {
                             hit = true; hitId = u;
                             break;
@@ -3294,11 +3327,11 @@ if (typeof importScripts === 'function')
 
         /* 拾取空间网格：三角形 AABB 覆盖的格子登记三角形编号。
          * 与 ensurePickGrid 的实现一致；只在 PICK_GRID_MIN_TRIS 以上才值得建。 */
-        function buildPickGrid(positions, tri, N)
+        function buildPickGrid(positions, indices, tri, N)
         {
             var mnx = Infinity, mny = Infinity, mnz = Infinity;
             var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-            for (var i = 0; i < tri * 9; i += 3)
+            for (var i = 0; i < positions.length; i += 3)
             {
                 var x = positions[i], y = positions[i + 1], z = positions[i + 2];
                 if (x < mnx) { mnx = x; } if (x > mxx) { mxx = x; }
@@ -3311,13 +3344,16 @@ if (typeof importScripts === 'function')
             var cells = new Array(N * N * N);
             for (var t = 0; t < tri; t++)
             {
-                var o = t * 9;
-                var tx0 = Math.min(positions[o], positions[o + 3], positions[o + 6]);
-                var tx1 = Math.max(positions[o], positions[o + 3], positions[o + 6]);
-                var ty0 = Math.min(positions[o + 1], positions[o + 4], positions[o + 7]);
-                var ty1 = Math.max(positions[o + 1], positions[o + 4], positions[o + 7]);
-                var tz0 = Math.min(positions[o + 2], positions[o + 5], positions[o + 8]);
-                var tz1 = Math.max(positions[o + 2], positions[o + 5], positions[o + 8]);
+                var t3 = t * 3;
+                var o0 = (indices ? indices[t3] : t3) * 3;
+                var o1 = (indices ? indices[t3 + 1] : t3 + 1) * 3;
+                var o2 = (indices ? indices[t3 + 2] : t3 + 2) * 3;
+                var tx0 = Math.min(positions[o0], positions[o1], positions[o2]);
+                var tx1 = Math.max(positions[o0], positions[o1], positions[o2]);
+                var ty0 = Math.min(positions[o0 + 1], positions[o1 + 1], positions[o2 + 1]);
+                var ty1 = Math.max(positions[o0 + 1], positions[o1 + 1], positions[o2 + 1]);
+                var tz0 = Math.min(positions[o0 + 2], positions[o1 + 2], positions[o2 + 2]);
+                var tz1 = Math.max(positions[o0 + 2], positions[o1 + 2], positions[o2 + 2]);
                 var i0 = Math.min(N - 1, Math.max(0, Math.floor((tx0 - mnx) / sx)));
                 var i1 = Math.min(N - 1, Math.max(0, Math.floor((tx1 - mnx) / sx)));
                 var j0 = Math.min(N - 1, Math.max(0, Math.floor((ty0 - mny) / sy)));
@@ -3370,7 +3406,7 @@ if (typeof importScripts === 'function')
 
                     /* 网格：在 Worker 内接着做预处理，省一次主线程往返 */
                     var pos = data.positions;
-                    var tri, an, ix, sc, badIdx = 0, remapForTopo;
+                    var tri, an, ix, sc, badIdx = 0;
 
                     if (data.indexed && data.indices && data.vertCount)
                     {
@@ -3378,7 +3414,6 @@ if (typeof importScripts === 'function')
                          * 不需要也不能按坐标焊接（会把硬边/接缝合并）。
                          * 直接用解析器的索引，面数用 data.count。 */
                         tri = data.count;
-                        remapForTopo = data.indices;
                         an = { vertCount: data.vertCount, bbox: data.bbox,
                                uniqVerts: pos, remap: data.indices };
                         ix = { verts: pos, idx: data.indices, vcount: data.vertCount };
@@ -3390,7 +3425,7 @@ if (typeof importScripts === 'function')
                         badIdx = 0;
                         for (var bi2 = 0; bi2 < sc.idx.length; bi2++)
                         {
-                            if (sc.idx[bi2] > maxId2) { badIdx++; }
+                            if (sc.idx[bi2] >= maxId2 + 1) { badIdx++; }
                         }
                         data.preIdxOk = badIdx === 0;
                         data.preBadIdx = badIdx;
@@ -3404,9 +3439,8 @@ if (typeof importScripts === 'function')
                         var maxId = ix.vcount - 1;
                         for (var bi = 0; bi < sc.idx.length; bi++)
                         {
-                            if (sc.idx[bi] > maxId) { badIdx++; }
+                            if (sc.idx[bi] >= maxId + 1) { badIdx++; }
                         }
-                        remapForTopo = an.remap;
                         data.preIdxOk = badIdx === 0;
                         data.preBadIdx = badIdx;
                     }
@@ -3419,9 +3453,9 @@ if (typeof importScripts === 'function')
                     data.preChunks = sc.chunks;
                     data.preOrderedIdx = sc.idx;
 
-                    /* 拓扑一并算好：导入完成时线框/边界/法向数据已就绪，零等待。
-                     * pos 随后被 transfer，但 VAO 用 GPU 缓冲 + 索引，不依赖 CPU 侧 positions。 */
-                    data.topo = computeTopo(pos, remapForTopo, tri);
+                    /* 拓扑基于规范化后的顶点表 + 面索引计算：线框/边界 EBO 与
+                     * VAO 的 posBuffer 使用同一套顶点下标，与 CloudCompare/three.js 约定一致。 */
+                    data.topo = computeTopo(ix.verts, ix.idx, tri);
 
                     /* transfer 列表必须去重：indexed 焊接后 an.remap / ix.idx / sc.idx
                      * 可能是同一个 ArrayBuffer，重复 transfer 会抛 "duplicate" 错误。 */
@@ -3454,7 +3488,7 @@ if (typeof importScripts === 'function')
             /* 拓扑重算兜底（正常 parse 已产出 data.topo） */
             if (m.cmd === 'topo')
             {
-                var tp = computeTopo(m.positions, m.remap, m.triCount | 0);
+                var tp = computeTopo(m.verts || m.positions, m.idx || null, m.triCount | 0);
                 self.postMessage({ id: m.id, cmd: 'topo', topo: tp },
                     [tp.edges.buffer, tp.boundary.buffer, tp.faces.buffer]);
                 return;
@@ -3463,7 +3497,7 @@ if (typeof importScripts === 'function')
             /* 拾取网格命令：与导入预处理共用同一 Worker，不额外开线程 */
             if (m.cmd === 'pickgrid')
             {
-                var pg = buildPickGrid(m.positions, m.triCount, m.N);
+                var pg = buildPickGrid(m.verts || m.positions, m.idx || null, m.triCount, m.N);
                 self.postMessage({ id: m.id, cmd: 'pickgrid', grid: pg });
                 return;
             }
@@ -3481,7 +3515,7 @@ if (typeof importScripts === 'function')
             var badIdx = 0;
             for (var i = 0; i < sc.idx.length; i++)
             {
-                if (sc.idx[i] > maxId) { badIdx++; }
+                if (sc.idx[i] >= maxId + 1) { badIdx++; }
             }
 
             self.postMessage({
