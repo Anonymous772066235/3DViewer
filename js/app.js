@@ -578,6 +578,13 @@
             debug: params.get('debug') === '1',
             cull: params.get('cull') !== '0',
 
+        /* 网格 LOD：参考 three.js LOD 的距离切换 + 3D Tiles 的屏幕空间误差。
+         * ?lod=0 关闭；?lodpx=N 调整允许误差（像素，默认 12）。 */
+            lod: params.get('lod') !== '0',
+            lodPx: parseFloat(params.get('lodpx')) || 16,   // CSS 像素；渲染时乘 dpr
+            pickgrid: params.get('pickgrid') === '1',       // 超大网格默认不预建拾取网格
+            lodcache: params.get('lodcache') !== '0',       // ?lodcache=0 禁用 LOD 缓存
+
         /* 线框 / 顶点「按屏幕密度自动隐藏」。?density=0 关闭，
          * 用于对比或强制查看密集网格的全部边线。 */
         density: params.get('density') !== '0',
@@ -1232,7 +1239,7 @@
                     vertCount: m.vertCount, bbox: m.bbox,
                     uniqVerts: m.uniqVerts, remap: m.remap,
                     verts: m.verts, idx: m.idx, vcount: m.vcount,
-                    chunks: m.chunks, orderedIdx: m.orderedIdx,
+                    chunks: m.chunks, lods: m.lods, orderedIdx: m.orderedIdx,
                     idxOk: m.idxOk, badIdx: m.badIdx
                 });
             };
@@ -1256,6 +1263,29 @@
     }
 
     var parsePending = Object.create(null);
+
+    /* LOD 缓存：同一文件第二次打开不再重复跑聚类简化。
+     * 缓存键含文件名/大小/修改时间/算法版本，源数据变了自动失效。 */
+    App.prototype.applyLodCache = async function (data, file)
+    {
+        if (!data || data.kind !== 'mesh' || !data.preLods ||
+            !global.MV.lodCache || (global.MV.config && global.MV.config.lodcache === false))
+        {
+            return;
+        }
+        var key = 'lod-v1|' + file.name + '|' + file.size + '|' + (file.lastModified || 0);
+        var cached = await global.MV.lodCache.get(key);
+        if (cached && cached.length === data.preLods.length)
+        {
+            data.preLods = cached;
+            data.lodCacheHit = true;
+        }
+        else
+        {
+            await global.MV.lodCache.put(key, data.preLods);
+            data.lodCacheHit = false;
+        }
+    };
 
     /* 完整导入（解析 + 预处理）在 Worker 内一次完成。
      * 主线程只负责：发 File、显示进度、收结果。
@@ -1306,12 +1336,20 @@
         /* 索引化格式（OBJ/PLY/OFF/glTF）：顶点表+索引已表达拓扑，保留原样不焊接 */
         if (data.indexed && data.indices && data.vertCount)
         {
+            /* file:// 回退也能分块：buildSpaceChunks 已上移到双环境共享作用域。 */
+            var ix = { verts: data.positions, idx: data.indices, vcount: data.vertCount };
+            var topo = global.MV.topology || {};
+            var sc = topo.buildSpaceChunks ? topo.buildSpaceChunks(ix, tri)
+                : { chunks: null, bbox: data.bbox, n: 1, idx: data.indices };
+            var lods = (topo.buildClusterLods && sc.chunks)
+                ? topo.buildClusterLods(ix, tri, sc.bbox, sc.n, sc.chunks)
+                : null;
             return Promise.resolve({
                 vertCount: data.vertCount, bbox: data.bbox,
                 uniqVerts: data.positions, remap: data.indices,
                 verts: data.positions, idx: data.indices, vcount: data.vertCount,
-                chunks: null,                    // 单块绘制（file:// 回退路径）
-                orderedIdx: data.indices,
+                chunks: sc.chunks, lods: lods,
+                orderedIdx: sc.idx,
                 idxOk: true, badIdx: 0
             }).then(function (r)
             {
@@ -1321,6 +1359,8 @@
                 data.preVerts = r.verts;
                 data.preIdx = r.idx;
                 data.preVcount = r.vcount;
+                data.preChunks = r.chunks;
+                data.preLods = r.lods;
                 data.preOrderedIdx = r.orderedIdx;
                 data.preIdxOk = true;
                 data.preBadIdx = 0;
@@ -1362,6 +1402,7 @@
             data.preIdx = r.idx;
             data.preVcount = r.vcount;
             data.preChunks = r.chunks;
+            data.preLods = r.lods || null;
             data.preOrderedIdx = r.orderedIdx;
             data.preIdxOk = r.idxOk;
             data.preBadIdx = r.badIdx;
@@ -1377,6 +1418,9 @@
         if (!d || d.kind !== 'mesh' || !d.positions) { return; }
         var tri = d.count || Math.floor(d.positions.length / 9);
         if (tri < 4000 || !global.Worker) { return; }   // 小网格 / 无 Worker：同步兜底
+        /* 200 万面以上预建要复制 100+ MiB 并后台扫全量面，和首帧渲染抢资源；
+         * 默认跳过，首次点选时走全量拾取。?pickgrid=1 可强制预建。 */
+        if (tri > 2000000 && !(global.MV.config && global.MV.config.pickgrid)) { return; }
 
         var verts = d.preVerts || d.uniqVerts || d.positions;
         var triIdx = d.preIdx || d.remap || null;
@@ -2661,6 +2705,9 @@
 
         var parseMs = UI.nowMs() - tParse;
 
+        /* LOD 缓存：命中则跳过重新聚类简化；未命中则异步回写 */
+        if (data && data.kind === 'mesh') { await self.applyLodCache(data, file); }
+
         if (!data)
         {
             global.MV.ui.setProgress(false, '');
@@ -2862,8 +2909,9 @@
 
         if (this.selectedId === null && firstLayer)
         {
-            // 导入后不自动选中：需要用户点一下网格，才显示它的 vertices 子树
-        this.selectedId = null;
+            /* 没有选中图层时，新导入的数据自动选中；
+             * 已有选中项则保持不动，避免打断当前编辑/对比对象。 */
+            this.selectLayer(firstLayer.id);
         }
 
         /* 只适配「本次之前还是空的那几个视图」：
@@ -3515,7 +3563,10 @@
         if (now - this.statStamp >= 400)
         {
             this.statStamp = now;
-            global.MV.ui.setStats(this.fps, this.layers.length, this.lastStats.triangles, this.lastStats.points);
+            var rs = this.renderer && this.renderer.stats;
+            var detail = rs ? (' · ' + rs.chunksDrawn + '/' + rs.chunksTotal +
+                ' chunks · L' + rs.lod0 + '/' + rs.lod1 + '/' + rs.lod2) : '';
+            global.MV.ui.setStats(this.fps, this.layers.length, this.lastStats.triangles, this.lastStats.points, detail);
         }
     };
 
@@ -3780,7 +3831,9 @@
     if (global.MV.render && global.MV.render.bindHooks)
     {
         global.MV.render.bindHooks({
-            refreshTree: global.MV.ui.renderTree, notify: global.MV.ui.setInfo, refreshProps: global.MV.ui.renderProps });
+            refreshTree: global.MV.ui.renderTree, notify: global.MV.ui.setInfo,
+            refreshProps: global.MV.ui.renderProps,
+            invalidate: function () { if (global.MV.app) { global.MV.app.markDirty(); } } });
     }
 
     window.addEventListener('load', function ()

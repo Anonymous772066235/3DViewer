@@ -3155,7 +3155,201 @@
         };
     }
 
-    global.MV.topology = { computeTopo: computeTopo };
+    /* 超大网格优化参考 three.js 的 per-object 视锥剔除 + 3D Tiles 的 boundingVolume/SSE：
+     * 把面按质心分到固定 N³ 空间格，用两次线性扫描 + 计数排序重排索引，
+     * 不用 grid[key].push(t) 的 JS 数组（620 万面时那是分钟级来源）。
+     * chunk 的 bbox 用格子的保守 AABB，不再逐顶点重算。 */
+    var LOD_MIN_TRIS = 2000000;
+    var LOD_RATIOS = [0.15, 0.03];   // 聚类简化目标顶点比例（MeshLab Clustering Decimation 口径）
+
+    /* 3D Tiles 式空间 tile：固定 N³ 网格，所有 LOD 层使用同一 bbox/N，
+     * chunk 下标即 tile id，逐 tile 选择 LOD 才能与父级 REPLACE 对应。 */
+    function buildSpaceChunks(ix, tri, opts)
+    {
+        opts = opts || {};
+        if (!tri || !ix || !ix.verts || !ix.idx)
+        {
+            return { idx: ix && ix.idx, chunks: [], n: 1,
+                     bbox: opts.bbox || { min: [0, 0, 0], max: [0, 0, 0] } };
+        }
+        var N = opts.N || (tri > 2000000 ? 4
+              : (tri > 500000 ? 5
+              : Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3))));
+        var mnx, mny, mnz, mxx, mxy, mxz;
+        if (opts.bbox)
+        {
+            mnx = opts.bbox.min[0]; mny = opts.bbox.min[1]; mnz = opts.bbox.min[2];
+            mxx = opts.bbox.max[0]; mxy = opts.bbox.max[1]; mxz = opts.bbox.max[2];
+        }
+        else
+        {
+            mnx = mny = mnz = Infinity; mxx = mxy = mxz = -Infinity;
+            for (var i = 0; i < ix.vcount; i++)
+            {
+                var vx = ix.verts[i * 3], vy = ix.verts[i * 3 + 1], vz = ix.verts[i * 3 + 2];
+                if (vx < mnx) { mnx = vx; } if (vx > mxx) { mxx = vx; }
+                if (vy < mny) { mny = vy; } if (vy > mxy) { mxy = vy; }
+                if (vz < mnz) { mnz = vz; } if (vz > mxz) { mxz = vz; }
+            }
+        }
+        var sx = ((mxx - mnx) / N) || 1;
+        var sy = ((mxy - mny) / N) || 1;
+        var sz = ((mxz - mnz) / N) || 1;
+        var cells = N * N * N;
+        var counts = new Uint32Array(cells);
+
+        for (var t = 0; t < tri; t++)
+        {
+            var o = t * 3;
+            var a0 = ix.idx[o] * 3, a1 = ix.idx[o + 1] * 3, a2 = ix.idx[o + 2] * 3;
+            var cx = (ix.verts[a0] + ix.verts[a1] + ix.verts[a2]) / 3;
+            var cy = (ix.verts[a0 + 1] + ix.verts[a1 + 1] + ix.verts[a2 + 1]) / 3;
+            var cz = (ix.verts[a0 + 2] + ix.verts[a1 + 2] + ix.verts[a2 + 2]) / 3;
+            var gi = Math.min(N - 1, Math.max(0, Math.floor((cx - mnx) / sx)));
+            var gj = Math.min(N - 1, Math.max(0, Math.floor((cy - mny) / sy)));
+            var gk = Math.min(N - 1, Math.max(0, Math.floor((cz - mnz) / sz)));
+            counts[(gi * N + gj) * N + gk]++;
+        }
+
+        var starts = new Uint32Array(cells);
+        var total = 0;
+        for (var c = 0; c < cells; c++) { starts[c] = total; total += counts[c]; }
+        var newIdx = new Uint32Array(total * 3);
+        var cursor = new Uint32Array(starts);
+        var chunks = [];
+
+        for (var ck = 0; ck < cells; ck++)
+        {
+            var ci = Math.floor(ck / (N * N));
+            var rem = ck % (N * N);
+            var cj = Math.floor(rem / N);
+            var ckz = rem % N;
+            var cmnx = mnx + ci * sx, cmny = mny + cj * sy, cmnz = mnz + ckz * sz;
+            var cmxx = cmnx + sx, cmxy = cmny + sy, cmxz = cmnz + sz;
+            var dx = cmxx - cmnx, dy = cmxy - cmny, dz = cmxz - cmnz;
+            chunks.push({
+                count: counts[ck] * 3, offset: starts[ck] * 12,
+                mnx: cmnx, mny: cmny, mnz: cmnz,
+                mxx: cmxx, mxy: cmxy, mxz: cmxz,
+                diag: Math.sqrt(dx * dx + dy * dy + dz * dz)
+            });
+        }
+
+        for (var t2 = 0; t2 < tri; t2++)
+        {
+            var o2 = t2 * 3;
+            var b0 = ix.idx[o2] * 3, b1 = ix.idx[o2 + 1] * 3, b2 = ix.idx[o2 + 2] * 3;
+            var mx = (ix.verts[b0] + ix.verts[b1] + ix.verts[b2]) / 3;
+            var my = (ix.verts[b0 + 1] + ix.verts[b1 + 1] + ix.verts[b2 + 1]) / 3;
+            var mz = (ix.verts[b0 + 2] + ix.verts[b1 + 2] + ix.verts[b2 + 2]) / 3;
+            var ii = Math.min(N - 1, Math.max(0, Math.floor((mx - mnx) / sx)));
+            var jj = Math.min(N - 1, Math.max(0, Math.floor((my - mny) / sy)));
+            var kk = Math.min(N - 1, Math.max(0, Math.floor((mz - mnz) / sz)));
+            var key2 = (ii * N + jj) * N + kk;
+            var w = cursor[key2] * 3;
+            newIdx[w] = ix.idx[o2]; newIdx[w + 1] = ix.idx[o2 + 1]; newIdx[w + 2] = ix.idx[o2 + 2];
+            cursor[key2]++;
+        }
+        return { idx: newIdx, chunks: chunks, n: N,
+                 bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] } };
+    }
+
+    /* 真实简化 LOD：参考 MeshLab "Clustering Decimation" / Blender Decimate。
+     * 用 3D 网格把近重合顶点聚成代表点，重建三角形并丢弃退化面。
+     * 与旧的 1/4、1/16 索引抽样不同，输出是独立、连续的低面数几何。 */
+    function buildClusterLods(ix, tri, bbox, N, level0Chunks)
+    {
+        var levels = [{
+            verts: ix.verts, idx: ix.idx, vcount: ix.vcount, triCount: tri,
+            chunks: level0Chunks, error: 0, ratio: 1
+        }];
+        if (tri < LOD_MIN_TRIS ||
+            (global.MV && global.MV.config && global.MV.config.lod === false))
+        {
+            return levels;
+        }
+
+        var ex = bbox.max[0] - bbox.min[0];
+        var ey = bbox.max[1] - bbox.min[1];
+        var ez = bbox.max[2] - bbox.min[2];
+        var maxExt = Math.max(ex, ey, ez, 1e-9);
+
+        for (var li = 0; li < LOD_RATIOS.length; li++)
+        {
+            var ratio = LOD_RATIOS[li];
+            var targetV = Math.max(64, Math.floor(ix.vcount * ratio));
+            var step = Math.max(1e-9, maxExt / Math.sqrt(targetV));
+            var seen = new Map();
+            var oldToNew = new Uint32Array(ix.vcount);
+            var rx = [], ry = [], rz = [];
+
+            for (var v = 0; v < ix.vcount; v++)
+            {
+                var vo = v * 3;
+                var x = ix.verts[vo], y = ix.verts[vo + 1], z = ix.verts[vo + 2];
+                var key = Math.floor((x - bbox.min[0]) / step) + '|' +
+                          Math.floor((y - bbox.min[1]) / step) + '|' +
+                          Math.floor((z - bbox.min[2]) / step);
+                var id = seen.get(key);
+                if (id === undefined)
+                {
+                    id = rx.length;
+                    seen.set(key, id);
+                    rx.push(x); ry.push(y); rz.push(z);
+                }
+                oldToNew[v] = id;
+            }
+
+            var out = [];
+            var seenFace = new Set();
+            var R = rx.length + 1;
+            for (var t = 0; t < tri; t++)
+            {
+                var o = t * 3;
+                var a = oldToNew[ix.idx[o]];
+                var b = oldToNew[ix.idx[o + 1]];
+                var c = oldToNew[ix.idx[o + 2]];
+                if (a === b || b === c || c === a) { continue; }
+                /* 聚类后大量三角形会映射到同一个代表点三元组；必须去重，
+                 * 否则面数几乎不降（MeshLab Clustering Decimation 也做这一步）。 */
+                var x = a, y = b, z = c, tmp;
+                if (x > y) { tmp = x; x = y; y = tmp; }
+                if (y > z) { tmp = y; y = z; z = tmp; }
+                if (x > y) { tmp = x; x = y; y = tmp; }
+                var fkey = R <= 200000
+                    ? (x * R + y) * R + z
+                    : (x + '|' + y + '|' + z);
+                if (seenFace.has(fkey)) { continue; }
+                seenFace.add(fkey);
+                out.push(a, b, c);
+            }
+            var lodIx = {
+                verts: new Float32Array(rx.length * 3),
+                idx: new Uint32Array(out),
+                vcount: rx.length
+            };
+            for (var r = 0; r < rx.length; r++)
+            {
+                lodIx.verts[r * 3] = rx[r];
+                lodIx.verts[r * 3 + 1] = ry[r];
+                lodIx.verts[r * 3 + 2] = rz[r];
+            }
+            var triLod = out.length / 3;
+            var sc = buildSpaceChunks(lodIx, triLod, { bbox: bbox, N: N });
+            levels.push({
+                verts: lodIx.verts, idx: sc.idx, vcount: rx.length,
+                triCount: triLod, chunks: sc.chunks,
+                error: step * 2, ratio: ratio
+            });
+        }
+        return levels;
+    }
+
+    global.MV.topology = {
+        computeTopo: computeTopo,
+        buildSpaceChunks: buildSpaceChunks,
+        buildClusterLods: buildClusterLods
+    };
 
 })(typeof self !== 'undefined' ? self : window);
 
@@ -3173,6 +3367,8 @@ if (typeof importScripts === 'function')
     /* 拓扑计算已上移到双环境共享的 MV.topology.computeTopo。
      * 这里直接复用，保证 Worker 与 file:// 主线程兜底走同一套顶点表+面索引口径。 */
     var computeTopo = self.MV.topology.computeTopo;
+    var buildSpaceChunks = self.MV.topology.buildSpaceChunks;
+    var buildClusterLods = self.MV.topology.buildClusterLods;
 
     (function ()
     {
@@ -3258,71 +3454,6 @@ if (typeof importScripts === 'function')
                 return { verts: flat, idx: eidx, vcount: tri * 3 };
             }
             return { verts: an.uniqVerts, idx: an.remap, vcount: an.vertCount };
-        }
-
-        function buildSpaceChunks(ix, tri)
-        {
-            var N = Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3));
-            var mnx = Infinity, mny = Infinity, mnz = Infinity;
-            var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-            var i;
-            for (i = 0; i < ix.vcount; i++)
-            {
-                var vx = ix.verts[i * 3], vy = ix.verts[i * 3 + 1], vz = ix.verts[i * 3 + 2];
-                if (vx < mnx) { mnx = vx; } if (vx > mxx) { mxx = vx; }
-                if (vy < mny) { mny = vy; } if (vy > mxy) { mxy = vy; }
-                if (vz < mnz) { mnz = vz; } if (vz > mxz) { mxz = vz; }
-            }
-            var sx = ((mxx - mnx) / N) || 1;
-            var sy = ((mxy - mny) / N) || 1;
-            var sz = ((mxz - mnz) / N) || 1;
-            var grid = new Array(N * N * N);
-
-            for (var t = 0; t < tri; t++)
-            {
-                var a0 = ix.idx[t * 3] * 3, a1 = ix.idx[t * 3 + 1] * 3, a2 = ix.idx[t * 3 + 2] * 3;
-                var cx = (ix.verts[a0] + ix.verts[a1] + ix.verts[a2]) / 3;
-                var cy = (ix.verts[a0 + 1] + ix.verts[a1 + 1] + ix.verts[a2 + 1]) / 3;
-                var cz = (ix.verts[a0 + 2] + ix.verts[a1 + 2] + ix.verts[a2 + 2]) / 3;
-                var gi = Math.min(N - 1, Math.max(0, Math.floor((cx - mnx) / sx)));
-                var gj = Math.min(N - 1, Math.max(0, Math.floor((cy - mny) / sy)));
-                var gk = Math.min(N - 1, Math.max(0, Math.floor((cz - mnz) / sz)));
-                var key = (gi * N + gj) * N + gk;
-                if (!grid[key]) { grid[key] = []; }
-                grid[key].push(t);
-            }
-
-            var newIdx = new Uint32Array(tri * 3);
-            var chunks = [];
-            var w = 0;
-            for (var ck = 0; ck < grid.length; ck++)
-            {
-                var list = grid[ck];
-                if (!list) { continue; }
-                var start = w;
-                var cmnx = Infinity, cmny = Infinity, cmnz = Infinity;
-                var cmxx = -Infinity, cmxy = -Infinity, cmxz = -Infinity;
-                for (var q = 0; q < list.length; q++)
-                {
-                    var o2 = list[q] * 3;
-                    for (var k = 0; k < 3; k++)
-                    {
-                        var id = ix.idx[o2 + k];
-                        newIdx[w++] = id;
-                        var vo = id * 3;
-                        var qx = ix.verts[vo], qy = ix.verts[vo + 1], qz = ix.verts[vo + 2];
-                        if (qx < cmnx) { cmnx = qx; } if (qx > cmxx) { cmxx = qx; }
-                        if (qy < cmny) { cmny = qy; } if (qy > cmxy) { cmxy = qy; }
-                        if (qz < cmnz) { cmnz = qz; } if (qz > cmxz) { cmxz = qz; }
-                    }
-                }
-                chunks.push({
-                    count: w - start, offset: start * 4,
-                    mnx: cmnx, mny: cmny, mnz: cmnz,
-                    mxx: cmxx, mxy: cmxy, mxz: cmxz
-                });
-            }
-            return { idx: newIdx, chunks: chunks, n: N };
         }
 
         /* 拾取空间网格：三角形 AABB 覆盖的格子登记三角形编号。
@@ -3417,10 +3548,8 @@ if (typeof importScripts === 'function')
                         an = { vertCount: data.vertCount, bbox: data.bbox,
                                uniqVerts: pos, remap: data.indices };
                         ix = { verts: pos, idx: data.indices, vcount: data.vertCount };
-                        /* 空间分块是渲染优化；超大网格用单块绘制避免分钟级重排 */
-                        sc = (tri <= 2000000)
-                            ? buildSpaceChunks(ix, tri)
-                            : { chunks: null, idx: data.indices };
+                        /* 计数排序分块：620 万面也只做两趟线性扫描，不再因"分钟级重排"跳过 */
+                        sc = buildSpaceChunks(ix, tri);
                         var maxId2 = data.vertCount - 1;
                         badIdx = 0;
                         for (var bi2 = 0; bi2 < sc.idx.length; bi2++)
@@ -3451,11 +3580,11 @@ if (typeof importScripts === 'function')
                     data.preIdx = ix.idx;
                     data.preVcount = ix.vcount;
                     data.preChunks = sc.chunks;
+                    data.preLods = buildClusterLods(ix, tri, sc.bbox, sc.n, sc.chunks);
                     data.preOrderedIdx = sc.idx;
 
-                    /* 拓扑基于规范化后的顶点表 + 面索引计算：线框/边界 EBO 与
-                     * VAO 的 posBuffer 使用同一套顶点下标，与 CloudCompare/three.js 约定一致。 */
-                    data.topo = computeTopo(ix.verts, ix.idx, tri);
+                    /* 拓扑改为按需计算：默认只画面，导入时不构建 edges/boundary/faces，
+                     * 省下 621 万面时约 213 MiB 常驻缓冲和一次千万级 Map 构建。 */
 
                     /* transfer 列表必须去重：indexed 焊接后 an.remap / ix.idx / sc.idx
                      * 可能是同一个 ArrayBuffer，重复 transfer 会抛 "duplicate" 错误。 */
@@ -3473,9 +3602,12 @@ if (typeof importScripts === 'function')
                     addTransfer(an.remap && an.remap.buffer);
                     addTransfer(ix.idx && ix.idx.buffer);
                     addTransfer(sc.idx && sc.idx.buffer);
-                    addTransfer(data.topo.edges.buffer);
-                    addTransfer(data.topo.boundary.buffer);
-                    addTransfer(data.topo.faces.buffer);
+                    for (var lodi = 0; lodi < data.preLods.length; lodi++)
+                    {
+                        var lv = data.preLods[lodi];
+                        addTransfer(lv.verts && lv.verts.buffer);
+                        addTransfer(lv.idx && lv.idx.buffer);
+                    }
                     self.postMessage({ id: m.id, cmd: 'parsed', data: data }, transfers);
                 }
                 catch (e)
@@ -3485,7 +3617,7 @@ if (typeof importScripts === 'function')
                 return;
             }
 
-            /* 拓扑重算兜底（正常 parse 已产出 data.topo） */
+            /* 拓扑按需计算：渲染首次需要线框/边界/法向时由主线程发此命令 */
             if (m.cmd === 'topo')
             {
                 var tp = computeTopo(m.verts || m.positions, m.idx || null, m.triCount | 0);
@@ -3518,17 +3650,27 @@ if (typeof importScripts === 'function')
                 if (sc.idx[i] >= maxId + 1) { badIdx++; }
             }
 
+            var outBufs = [], seenOut = [];
+            function addOut(buf)
+            {
+                if (buf && seenOut.indexOf(buf) < 0) { seenOut.push(buf); outBufs.push(buf); }
+            }
+            var lods = buildClusterLods(ix, tri, sc.bbox, sc.n, sc.chunks);
+            addOut(an.uniqVerts.buffer); addOut(an.remap.buffer);
+            addOut(ix.verts.buffer); addOut(ix.idx.buffer); addOut(sc.idx.buffer);
+            for (var li2 = 0; li2 < lods.length; li2++)
+            {
+                addOut(lods[li2].verts && lods[li2].verts.buffer);
+                addOut(lods[li2].idx && lods[li2].idx.buffer);
+            }
             self.postMessage({
                 id: m.id,
                 uniqVerts: an.uniqVerts, remap: an.remap,
                 vertCount: an.vertCount, bbox: an.bbox,
                 verts: ix.verts, idx: ix.idx, vcount: ix.vcount,
-                chunks: sc.chunks, orderedIdx: sc.idx,
+                chunks: sc.chunks, lods: lods, orderedIdx: sc.idx,
                 idxOk: badIdx === 0, badIdx: badIdx
-            }, [
-                an.uniqVerts.buffer, an.remap.buffer,
-                ix.verts.buffer, ix.idx.buffer, sc.idx.buffer
-            ]);
+            }, outBufs);
         };
     })();
 }

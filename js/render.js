@@ -13,7 +13,8 @@
     var renderHooks = {
         notify: function () {},
         refreshProps: function () {},
-        refreshTree: function () {}
+        refreshTree: function () {},
+        invalidate: function () {}
     };
 
     function bindRenderHooks(h)
@@ -333,7 +334,9 @@
      * 与「按顺序切块」相比，每块 AABB 只覆盖局部区域，视锥剔除率高得多 */
     function buildSpaceChunks(ix, tri)
     {
-        var N = Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3));
+        var N = tri > 2000000 ? 4
+              : (tri > 500000 ? 5
+              : Math.max(3, Math.min(8, Math.round(Math.cbrt(tri / 4000)) || 3)));
 
         var mnx = Infinity, mny = Infinity, mnz = Infinity;
         var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
@@ -660,7 +663,7 @@
         this.gl = null;
         this.idxOk = true;   // 索引值域自检结果（false = 曾有越界）
         this.ready = false;
-        this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0, chunksDrawn: 0, chunksTotal: 0 };
+        this.stats = { triangles: 0, points: 0, draws: 0, meshCalls: 0, wireCalls: 0, vertCalls: 0, normalCalls: 0, boundaryCalls: 0, chunksDrawn: 0, chunksTotal: 0, lod0: 0, lod1: 0, lod2: 0 };
 
         // 编辑选区预览
         // ghost（对面图层叠加）的基色与透明度，随主题切换
@@ -813,6 +816,37 @@
             var ib = gl.createBuffer();
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, sc.idx, gl.STATIC_DRAW);
+
+            /* 真实几何 LOD：每级有独立顶点表/索引/空间 tile；level0 复用上面的 VAO。 */
+            var srcLevels = d.preLods && d.preLods.length && d.preLods[0].chunks
+                ? d.preLods
+                : [{ verts: ix.verts, idx: sc.idx, vcount: ix.vcount,
+                     triCount: d.count, chunks: sc.chunks, error: 0, ratio: 1 }];
+            var lodLevels = [];
+            for (var li = 0; li < srcLevels.length; li++)
+            {
+                var srcLv = srcLevels[li];
+                var lvVao = vao, lvPb = pb, lvIb = ib;
+                if (li > 0 && srcLv.verts && srcLv.idx)
+                {
+                    lvVao = gl.createVertexArray();
+                    gl.bindVertexArray(lvVao);
+                    lvPb = gl.createBuffer();
+                    gl.bindBuffer(gl.ARRAY_BUFFER, lvPb);
+                    gl.bufferData(gl.ARRAY_BUFFER, srcLv.verts, gl.STATIC_DRAW);
+                    gl.enableVertexAttribArray(this.meshA.pos);
+                    gl.vertexAttribPointer(this.meshA.pos, 3, gl.FLOAT, false, 0, 0);
+                    lvIb = gl.createBuffer();
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lvIb);
+                    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, srcLv.idx, gl.STATIC_DRAW);
+                }
+                lodLevels.push({
+                    verts: srcLv.verts, idx: srcLv.idx,
+                    vao: lvVao, posBuffer: lvPb, indexBuffer: lvIb,
+                    chunks: srcLv.chunks, error: srcLv.error || 0,
+                    ratio: srcLv.ratio || 1, triCount: srcLv.triCount || d.count
+                });
+            }
             gl.bindVertexArray(null);
 
             layer.gpu = {
@@ -820,6 +854,7 @@
                 vao: vao,
                 posBuffer: pb,
                 indexBuffer: ib,
+                lodLevels: lodLevels,
                 srcIndex: ix.idx,          // CPU 侧保留，供线框生成边索引
                 // 唯一顶点集：优先用 createLayer 时算好的，避免重复遍历
                 uniqVerts: (d.uniqVerts && d.uniqVerts.length) ? d.uniqVerts
@@ -1047,6 +1082,26 @@
         if (g.tagBuffer) { gl.deleteBuffer(g.tagBuffer); }
         if (g.colBuffer) { gl.deleteBuffer(g.colBuffer); }
         if (g.lodBuffer) { gl.deleteBuffer(g.lodBuffer); }
+        if (g.lodLevels)
+        {
+            var seenLevelBuf = [];
+            for (var lvi = 0; lvi < g.lodLevels.length; lvi++)
+            {
+                var lv = g.lodLevels[lvi];
+                if (lv.vao && seenLevelBuf.indexOf(lv.vao) < 0)
+                {
+                    gl.deleteVertexArray(lv.vao); seenLevelBuf.push(lv.vao);
+                }
+                if (lv.posBuffer && seenLevelBuf.indexOf(lv.posBuffer) < 0)
+                {
+                    gl.deleteBuffer(lv.posBuffer); seenLevelBuf.push(lv.posBuffer);
+                }
+                if (lv.indexBuffer && seenLevelBuf.indexOf(lv.indexBuffer) < 0)
+                {
+                    gl.deleteBuffer(lv.indexBuffer); seenLevelBuf.push(lv.indexBuffer);
+                }
+            }
+        }
         if (g.normalVao) { gl.deleteVertexArray(g.normalVao); }
         if (g.normalBuffer) { gl.deleteBuffer(g.normalBuffer); }
         if (g.wireVao) { gl.deleteVertexArray(g.wireVao); }
@@ -1259,7 +1314,7 @@
         return this._pmT;
     };
 
-    Renderer.prototype.drawMesh = function (layer, mvp, view, color, shade, pushBack, noStat, backCol, backShade)
+    Renderer.prototype.drawMesh = function (layer, mvp, viewM, color, shade, pushBack, noStat, backCol, backShade, view)
     {
         var gl = this.gl;
         var g = layer.gpu;
@@ -1288,7 +1343,7 @@
         gl.useProgram(this.meshP);
         gl.uniformMatrix4fv(this.meshU.uMVP, false, mvp);
         gl.uniformMatrix4fv(this.meshU.uModel, false, this.modelOf(layer));
-        gl.uniformMatrix4fv(this.meshU.uView, false, view);
+        gl.uniformMatrix4fv(this.meshU.uView, false, viewM);
         gl.uniform4fv(this.meshU.uColor, color);
         // 双面一次绘制：背面用 uBackColor / uBackShade（见 drawMeshLayer 快路径）
         gl.uniform4fv(this.meshU.uBackColor, backCol || color);
@@ -1297,37 +1352,103 @@
         gl.uniform3fv(this.meshU.uLightView, this.lightView || [0, 0, 1]);
         gl.uniform1i(this.meshU.uShade, shade);
 
-        gl.bindVertexArray(g.vao);
-
         // 分块 + 视锥剔除（?cull=0 可关闭以便对比）
         var cullCfg = !(global.MV.config && global.MV.config.cull === false);
-
         // 有预览变换时不能按旧 bbox 判断可见性：chunks 的 bbox 是原始位置，
         // 而顶点会被 uModel 搬走，按旧位置判断会把真正可见的块误剔除。
         // 但必须仍然走「分块」这条绘制路径 —— 整体那条用 g.triCount * 3 作索引数，
         // 与实际索引缓冲的长度不一定一致，切过去会导致模型大面积缺失。
         var testVisible = cullCfg && !layer.previewMat;
 
-        if (g.chunks && g.chunks.length > 1)
+        /* 真几何 LOD + 3D Tiles 式逐 tile REPLACE：
+         * 每个空间 tile 独立按 SSE 选级，近处 tile 用 LOD0，远处 tile 用粗级。 */
+        var levels = g.lodLevels && g.lodLevels.length ? g.lodLevels : null;
+        var useLod = !!(levels && levels.length > 1 && view && view.camera && view.h > 0 &&
+            !(global.MV.config && global.MV.config.lod === false));
+        var dpr = Math.min(global.devicePixelRatio || 1, 2);
+        var eye = null, fovTan = Math.tan(0.785 * 0.5), lodPx = 16 * dpr;
+        if (useLod)
+        {
+            eye = view.camera.getPosition ? view.camera.getPosition() : null;
+            var fov = view.camera.fovY || view.camera.fov || 0.785;
+            fovTan = Math.max(1e-6, Math.tan(fov * 0.5));
+            var cfgPx = global.MV.config && global.MV.config.lodPx;
+            if (cfgPx > 0) { lodPx = cfgPx * dpr; }
+            if (!eye) { useLod = false; }
+        }
+
+        var drawnTris = 0;
+        var drawnChunks = 0;
+        var tiles = levels ? levels[0].chunks : g.chunks;
+        if (tiles && tiles.length > 1)
         {
             var planes = frustumFromMVP(mvp);
-            var drawn = 0;
-            for (var ci3 = 0; ci3 < g.chunks.length; ci3++)
+            var buckets = useLod ? [] : null;
+            if (buckets) { for (var bi = 0; bi < levels.length; bi++) { buckets.push([]); } }
+            for (var ci3 = 0; ci3 < tiles.length; ci3++)
             {
-                var ch = g.chunks[ci3];
-                if (testVisible && !aabbVisible(ch, planes))
+                var ch = tiles[ci3];
+                if (!ch.count || (testVisible && !aabbVisible(ch, planes))) { continue; }
+                drawnChunks++;
+                var chosen = 0;
+                if (useLod)
                 {
-                    continue;
+                    var ccx = (ch.mnx + ch.mxx) * 0.5;
+                    var ccy = (ch.mny + ch.mxy) * 0.5;
+                    var ccz = (ch.mnz + ch.mxz) * 0.5;
+                    var ex = ccx - eye[0], ey = ccy - eye[1], ez = ccz - eye[2];
+                    var dist = Math.max(1e-6, Math.sqrt(ex * ex + ey * ey + ez * ez));
+                    var ppu = view.h / (2 * dist * fovTan);
+                    for (var L = levels.length - 1; L >= 1; L--)
+                    {
+                        var lv = levels[L];
+                        /* 误差由 LOD 几何自身给出；不能再叠 chunk.diag ——
+                         * 那会让 err 达几十~上百毫米，LOD 永远选不中。 */
+                        var err = lv.error;
+                        var hysteresis = (ch.tileLod === L) ? 1.1 : 1;
+                        if (err * ppu <= lodPx * hysteresis)
+                        {
+                            chosen = L;
+                            break;
+                        }
+                    }
+                    ch.tileLod = chosen;
                 }
-                gl.drawElements(gl.TRIANGLES, ch.count, gl.UNSIGNED_INT, ch.offset);
-                drawn++;
+                if (buckets) { buckets[chosen].push(ci3); }
+                else
+                {
+                    gl.bindVertexArray(g.vao);
+                    gl.drawElements(gl.TRIANGLES, ch.count, gl.UNSIGNED_INT, ch.offset);
+                    drawnTris += ch.count / 3;
+                }
             }
-            this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + drawn;
-            this.stats.chunksTotal = (this.stats.chunksTotal || 0) + g.chunks.length;
+
+            if (buckets)
+            {
+                for (var lvI = 0; lvI < buckets.length; lvI++)
+                {
+                    var bucket = buckets[lvI];
+                    if (!bucket.length) { continue; }
+                    if (this.stats['lod' + lvI] !== undefined) { this.stats['lod' + lvI] += bucket.length; }
+                    gl.bindVertexArray(levels[lvI].vao);
+                    for (var bq = 0; bq < bucket.length; bq++)
+                    {
+                        var tileId = bucket[bq];
+                        var drawCh = levels[lvI].chunks[tileId];
+                        if (!drawCh || !drawCh.count) { continue; }
+                        gl.drawElements(gl.TRIANGLES, drawCh.count, gl.UNSIGNED_INT, drawCh.offset);
+                        drawnTris += drawCh.count / 3;
+                    }
+                }
+            }
+            this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + drawnChunks;
+            this.stats.chunksTotal = (this.stats.chunksTotal || 0) + tiles.length;
         }
         else
         {
+            gl.bindVertexArray(g.vao);
             gl.drawElements(gl.TRIANGLES, g.triCount * 3, gl.UNSIGNED_INT, 0);
+            drawnTris = g.triCount;
             this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + 1;
             this.stats.chunksTotal = (this.stats.chunksTotal || 0) + 1;
         }
@@ -1340,7 +1461,7 @@
 
         if (!noStat)
         {
-            this.stats.triangles += g.triCount;
+            this.stats.triangles += drawnTris;
         }
         this.stats.draws++;
         this.stats.meshCalls++;
@@ -1373,7 +1494,7 @@
                 var backCol2 = [bc2[0], bc2[1], bc2[2], alpha];
                 var backShade2 = (layer.shadeMode === 2) ? 0 : layer.shadeMode;
                 if (layer.shadeMode === 2) { backCol2 = [0, 0, 0, alpha]; }
-                this.drawMesh(layer, mvp, viewM, col, layer.shadeMode, false, false, backCol2, backShade2);
+                this.drawMesh(layer, mvp, viewM, col, layer.shadeMode, false, false, backCol2, backShade2, view);
             }
             return;
         }
@@ -1399,16 +1520,16 @@
                 // 快路径：不透明图层一次绘制，正/背面由着色器按 gl_FrontFacing 选色
                 // （原先是剔除背面画一遍 + 剔除正面再画一遍，绘制量是两倍）
                 gl.disable(gl.CULL_FACE);
-                this.drawMesh(layer, mvp, viewM, col, shade, pushBack, false, backCol, backShade);
+                this.drawMesh(layer, mvp, viewM, col, shade, pushBack, false, backCol, backShade, view);
             }
             else
             {
                 // 半透明：仍需两遍（先背面后正面），保证混合顺序
                 gl.enable(gl.CULL_FACE);
                 gl.cullFace(gl.BACK);
-                this.drawMesh(layer, mvp, viewM, col, shade, pushBack, false);
+                this.drawMesh(layer, mvp, viewM, col, shade, pushBack, false, null, null, view);
                 gl.cullFace(gl.FRONT);
-                this.drawMesh(layer, mvp, viewM, backCol, backShade, pushBack, true);
+                this.drawMesh(layer, mvp, viewM, backCol, backShade, pushBack, true, null, null, view);
                 gl.disable(gl.CULL_FACE);
             }
         }
@@ -1449,21 +1570,70 @@
        法向又单独扫一遍算叉积和边长。这里合并为一次遍历，并复用载入时 analyzeMesh
        已算好的 data.remap 做焊接 id（零哈希、零字符串）。
        ========================================================================== */
+    /* 拓扑改为按需异步生成：只有首次勾选线框/边界/法向才发 cmd:'topo'。
+     * 大网格导入时不再花千万级 Map + 200 MiB 缓冲，默认只画面片。 */
+    Renderer.prototype.requestTopo = function (layer)
+    {
+        var g = layer.gpu, d = layer.data;
+        if (!g || !d || g.topoPending || g.topo || d.topo || !global.Worker) { return; }
+        var verts = d.preVerts || d.uniqVerts || null;
+        var triIdx = d.preIdx || d.remap || null;
+        if (!verts || !triIdx) { return; }
+
+        g.topoPending = true;
+        var vCopy = new Float32Array(verts);
+        var iCopy = new Uint32Array(triIdx);
+        var v = (global.MV.config && global.MV.config.version) || '';
+        var W;
+        try { W = new global.Worker('js/worker_io.js' + (v ? '?v=' + v : '')); }
+        catch (e) { g.topoPending = false; return; }
+
+        var self = this;
+        W.onmessage = function (ev)
+        {
+            var m = ev.data;
+            if (m && m.cmd === 'topo' && m.topo)
+            {
+                d.topo = m.topo;
+                g.topo = m.topo;
+            }
+            g.topoPending = false;
+            try { W.terminate(); } catch (e) { /* ignore */ }
+
+            /* 拓扑换了，辅助线 VAO 必须重建 */
+            var gl = self.gl;
+            if (g.wireVao) { gl.deleteVertexArray(g.wireVao); }
+            if (g.wireBuffer) { gl.deleteBuffer(g.wireBuffer); }
+            if (g.boundaryVao) { gl.deleteVertexArray(g.boundaryVao); }
+            if (g.boundaryBuffer) { gl.deleteBuffer(g.boundaryBuffer); }
+            if (g.normalVao) { gl.deleteVertexArray(g.normalVao); }
+            if (g.normalBuffer) { gl.deleteBuffer(g.normalBuffer); }
+            g.wireVao = g.wireBuffer = null; g.wireCount = 0;
+            g.boundaryVao = g.boundaryBuffer = null; g.boundaryDone = false;
+            g.normalVao = g.normalBuffer = null; g.normalCount = 0;
+            if (renderHooks.invalidate) { renderHooks.invalidate(); }
+        };
+        W.onerror = function ()
+        {
+            g.topoPending = false;
+            try { W.terminate(); } catch (e) { /* ignore */ }
+        };
+        W.postMessage({
+            cmd: 'topo', verts: vCopy, idx: iCopy, triCount: g.triCount
+        }, [vCopy.buffer, iCopy.buffer]);
+    };
+
     Renderer.prototype.ensureTopo = function (layer)
     {
         var g = layer.gpu, d = layer.data;
-        if (!g || !d || d.kind !== 'mesh' || !g.triCount || g.topo) { return g && g.topo; }
+        if (!g || !d || d.kind !== 'mesh' || !g.triCount) { return null; }
+        if (g.topo) { return g.topo; }
+        if (d.topo) { g.topo = d.topo; return g.topo; }
 
-        /* Worker 导入时已算好拓扑（edges/boundary/faces…），直接取用，零重算。
-         * file:// 回退路径没有 data.topo → 落到下面的主线程同步计算。 */
-        if (d.topo)
-        {
-            g.topo = d.topo;
-            return g.topo;
-        }
+        /* HTTP Worker 路径：后台算，本帧辅助线先不画，算完 invalidate 重画。 */
+        if (global.Worker) { this.requestTopo(layer); return null; }
 
-        /* 与 Worker 同源：顶点表 + 面索引。preVerts/preIdx 来自导入预处理，
-         * uniqVerts/remap 是 file:// 兜底；都没有时按 soup + 恒等索引处理。 */
+        /* file:// 无 Worker：只能用共享实现同步兜底（小网格无感，大网格会卡一帧）。 */
         var verts = d.preVerts || d.uniqVerts || null;
         var triIdx = d.preIdx || d.remap || null;
         if (!verts || !triIdx || verts.length < 3 || triIdx.length < g.triCount * 3)
@@ -1472,114 +1642,13 @@
             verts = built.verts;
             triIdx = built.idx;
         }
-        var tri = g.triCount;
-        var LIM = 16777216;                       // 常规 id 数值键；超大 id 退化字符串键
-        var edgeMap = new Map();
-        var eA = [];                              // 顶点表下标（直接写 GPU EBO）
-        var eB = [];
-        var eUse = [];
-        var ne = 0;
-        var faces = new Float32Array(tri * 6);
-        var nf = 0;
-        var sumEdge = 0, cntEdge = 0;
-        var probe = Math.max(1, Math.floor(tri / 512));
-
-        function addEdge(va, vb)
-        {
-            if (va === vb) { return; }
-            var key = (va < LIM && vb < LIM)
-                ? (va < vb ? va * LIM + vb : vb * LIM + va)
-                : (va < vb ? va + '|' + vb : vb + '|' + va);
-            var idx = edgeMap.get(key);
-            if (idx === undefined)
-            {
-                edgeMap.set(key, ne);
-                eA.push(va); eB.push(vb); eUse.push(1);
-                ne++;
-                return;
-            }
-            if (eUse[idx] < 255) { eUse[idx]++; }
-        }
-
-        for (var i = 0; i < tri; i++)
-        {
-            var t3 = i * 3;
-            var v0 = triIdx[t3], v1 = triIdx[t3 + 1], v2 = triIdx[t3 + 2];
-            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
-            var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
-            var x0 = verts[o0], y0 = verts[o0 + 1], z0 = verts[o0 + 2];
-            var x1 = verts[o1], y1 = verts[o1 + 1], z1 = verts[o1 + 2];
-            var x2 = verts[o2], y2 = verts[o2 + 1], z2 = verts[o2 + 2];
-
-            var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
-            var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
-            var nx = ay * bz - az * by;
-            var ny = az * bx - ax * bz;
-            var nz = ax * by - ay * bx;
-            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (nl >= 1e-12)
-            {
-                nx /= nl; ny /= nl; nz /= nl;
-                var q = nf * 6;
-                faces[q] = (x0 + x1 + x2) / 3;
-                faces[q + 1] = (y0 + y1 + y2) / 3;
-                faces[q + 2] = (z0 + z1 + z2) / 3;
-                faces[q + 3] = nx; faces[q + 4] = ny; faces[q + 5] = nz;
-                nf++;
-            }
-
-            if ((i % probe) === 0)
-            {
-                sumEdge += (Math.sqrt(ax * ax + ay * ay + az * az) +
-                            Math.sqrt(bx * bx + by * by + bz * bz) +
-                            Math.sqrt((x2 - x1) * (x2 - x1) +
-                                      (y2 - y1) * (y2 - y1) +
-                                      (z2 - z1) * (z2 - z1))) / 3;
-                cntEdge++;
-            }
-
-            addEdge(v0, v1);
-            addEdge(v1, v2);
-            addEdge(v2, v0);
-        }
-
-        /* 压紧成最终缓冲：线框 = 所有边；边界 = 使用次数为 1 的边 */
-        var edges = new Uint32Array(ne * 2);
-        var bCount = 0;
-        for (var k = 0; k < ne; k++)
-        {
-            edges[k * 2] = eA[k];
-            edges[k * 2 + 1] = eB[k];
-            if (eUse[k] === 1) { bCount++; }
-        }
-        var boundary = new Uint32Array(bCount * 2);
-        var bw = 0;
-        for (var k2 = 0; k2 < ne; k2++)
-        {
-            if (eUse[k2] === 1)
-            {
-                boundary[bw++] = eA[k2];
-                boundary[bw++] = eB[k2];
-            }
-        }
-        eA.length = eB.length = eUse.length = 0;   // 释放临时数组
-
-        g.topo = {
-            edges: edges,
-            boundary: boundary,
-            faces: faces.subarray(0, nf * 6),
-            faceCount: nf,
-            edgeCount: ne,
-            boundaryEdges: bCount,
-            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
-        };
+        if (!global.MV.topology || !global.MV.topology.computeTopo) { return null; }
+        g.topo = global.MV.topology.computeTopo(verts, triIdx, g.triCount);
         return g.topo;
     };
 
-    /* 拓扑已由 worker_io.js 在导入时算好并挂在 data.topo 上，
-     * ensureTopo() 直接取用即可 —— 不再需要独立的 topo Worker 与预构建队列。
-     * file:// 回退路径下 data.topo 不存在，ensureTopo() 会在主线程同步计算，
-     * 为超大网格提供分帧兜底：载入后让出首帧再算，避免阻塞渲染。 */
+    /* 拓扑默认不在导入时算；小网格仍可在 file:// 下用 prewireQueue 分帧兜底。
+     * HTTP 路径走 requestTopo() 异步 Worker，算完 invalidate 重绘辅助线。 */
     function pumpPrewireSync()
     {
         if (!prewireQueue.length) { return; }
@@ -2130,6 +2199,7 @@
         this.stats.boundaryCalls = 0;
         this.stats.chunksDrawn = 0;
         this.stats.chunksTotal = 0;
+        this.stats.lod0 = this.stats.lod1 = this.stats.lod2 = 0;
 
         gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0, 0, W, H);
@@ -2313,7 +2383,7 @@
                     {
                         // 半透明灰色轮廓，正反面同色，不显示线框与法向
                         var gc = this.ghostColor || [0.62, 0.68, 0.78];
-                        this.drawMesh(lay, mvp, viewM, [gc[0], gc[1], gc[2], this.ghostAlpha], 0, false);
+                        this.drawMesh(lay, mvp, viewM, [gc[0], gc[1], gc[2], this.ghostAlpha], 0, false, false, null, null, view);
                     }
                 }
                 else

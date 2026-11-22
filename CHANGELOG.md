@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.4.4` |
+| 当前版本 | `1.0.4.9` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-22 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -12,6 +12,91 @@
 > 对外只有一个版本号：`git HEAD` 是 `1.0.3.2`，本次按规则发布为 **`1.0.3.3`**。
 
 > **可信度说明**：`2026-10-21` ~ `2026-10-22` 上午没有逐条记录，只保留由现存代码反推的「基线能力」（文中标注 *基线*）。`2026-10-22` 下午起为逐条实测记录。
+
+---
+
+## 1.0.4.9：导入后自动选中首个新图层（2026-11-22）
+
+原逻辑在 `selectedId === null` 时仍强制置空，需手动点一下网格才显示 vertices 子树。
+改为：无选中项时 `selectLayer(firstLayer.id)`；已有选中项时保持不变，不打断当前编辑/对比。
+
+---
+
+## 1.0.4.8：修正 LOD 永不生效的误差口径（2026-11-22）
+
+`1.0.4.7` 中逐 tile SSE 使用了
+`err = lv.error + ch.diag * (1 - lv.ratio) * 0.25`。
+`ch.diag` 是空间 tile 的边长量级（几十~几百 mm），叠加后误差过大，
+任何视角下 `err * ppu > lodPx`，LOD1/LOD2 永远选不中，仍然画全量 621 万面。
+
+修正：
+- SSE 只使用 LOD 几何自身的 `geometricError`（聚类格步长的保守值 `step * 2`）；
+- `chunk.diag` 仅用于视锥包围盒，不再参与误差。
+
+验证：`_t/chunk_lod_regress.html` 18 项 PASS；lints 0 error。
+
+---
+
+## 1.0.4.7：真实几何 LOD + 逐 tile REPLACE + 缓存（2026-11-22）
+
+参考 MeshLab Clustering Decimation / Blender Decimate / 3D Tiles / Nanite：
+不再用「每块保留 1/4、1/16 索引」的假 LOD。
+
+- **阶段 1**：`buildClusterLods()` 按 3D 网格把顶点聚类成代表点，重建并去重三角形，
+  生成 ~15% / ~3% 顶点目标的真实低模；`buildSpaceChunks` 不再生成抽样索引。
+- **阶段 2**：LOD0/1/2 共用同一 bbox 与 \(N^3\) 网格，chunk 下标即 tile id；
+  绘制时**逐 tile**按 `geometricError + tile.diag` 计算 SSE 选择级别（REPLACE），
+  远处 tile 可以用粗级、近处 tile 保留全量。
+- **阶段 3**：新增 `js/lod_cache.js`（IndexedDB），同一文件第二次打开直接复用 LOD；
+  `?lodcache=0` 可禁用。
+
+配置：`?lod=0` 关 LOD，`?lodpx=N` 改 CSS 像素误差阈值（默认 16）。
+
+验证：`_t/chunk_lod_regress.html` 18 项 PASS（200 万面合成：LOD1 降到 ~10 万面，
+三级 tile 数组对齐、覆盖完整）；`topo_regress` / `import_regress` PASS；lints 0 error。
+
+---
+
+## 1.0.4.6：首帧继续卡顿的收尾优化（2026-11-22）
+
+`1.0.4.5` 后仍只有几帧，定位到四点：
+
+1. `lodPx` 用设备像素比较，DPI=2 时阈值等效减半；改为 **CSS 像素口径**（默认 16，渲染时乘 dpr）。
+2. 621 万面按 `N=8` 切成 512 块，双视图下 draw call 太重；改为 **>200 万面用 4³=64 块**，50~200 万面 5³=125 块。
+3. 导入时仍无条件 `computeTopo`（142 MiB faces + 71~142 MiB edges）；改为**按需异步生成**：
+   首次勾选线框/边界/法向才发 `cmd:'topo'` 到 Worker，算完 `invalidate` 重绘；`file://` 保留同步兜底。
+4. 导入后仍无条件 `schedulePickGrid`（复制 100+ MiB + 扫全量面）；200 万面以上默认跳过，
+   `?pickgrid=1` 可强制预建。
+
+状态栏新增 `chunksDrawn/chunksTotal` 与 `L0/L1/L2` chunk 数，便于确认 LOD 是否生效。
+
+验证：`_t/chunk_lod_regress.html`、`_t/topo_regress.html`、`_t/import_regress.html` 全 PASS；lints 0 error。
+
+---
+
+## 1.0.4.5：超大网格分块剔除与 LOD（2026-11-22）
+
+针对 `0.4-mesh_src-1.off`（250.78 MB，314 万顶点 / 621 万面）导入后卡顿。
+
+**参考权威实现**（非凭猜测）：
+- three.js `WebGLRenderer` + `Frustum.intersectsBox()`：每个对象用包围体做保守视锥剔除；
+- three.js `LOD.update(camera)`：按相机距离切换层级，并用 `hysteresis` 避免阈值附近闪烁；
+- Cesium 3D Tiles：`boundingVolume` 先剔除，再用 `geometricError` 投影成屏幕空间误差（SSE）决定细化层级。
+
+**P0 分块剔除**：
+- `buildSpaceChunks` 移到双环境共享作用域，改为两趟线性扫描 + `Uint32Array` 计数排序；
+  不再用 `grid[key].push(t)`（621 万面时是分钟级来源），chunk bbox 用格子保守 AABB。
+- 删除 `tri <= 2000000` 才分块的限制；所有网格都分块，超大 OFF 也能逐块视锥剔除。
+
+**P2 LOD**：
+- 分块时同步生成两级索引：每块 1/4、1/16 三角形（`?lod=0` 关闭）。
+- 渲染时按 3D Tiles SSE 选级：`err = chunk.diag × {0.06, 0.18}`，
+  `SSE = err × view.h / (2 × 距离 × tan(fov/2))`，阈值 `?lodpx=N`（默认 12px）；
+  沿用 three.js `hysteresis=0.1` 防闪烁。
+- 每级独立 VAO/EBO，按级分桶绘制，避免逐 chunk 切换 VAO；统计改为实际绘制三角形数。
+
+**验证**：`_t/chunk_lod_regress.html`（小网格 + 200 万面合成用例）13 项全 PASS；
+原 `_t/topo_regress.html` / `_t/import_regress.html` 回归全 PASS。
 
 ---
 

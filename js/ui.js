@@ -5569,11 +5569,12 @@
         if (!noLog) { pushLog(text, level); }
     }
 
-    function setStats(fps, layerCount, triangles, points)
+    function setStats(fps, layerCount, triangles, points, detail)
     {
         $('st-fps').textContent = fps + ' fps';
         $('st-count').textContent = layerCount + ' 图层 · ' +
-            formatCount(triangles) + ' tri · ' + formatCount(points) + ' pts';
+            formatCount(triangles) + ' tri · ' + formatCount(points) + ' pts' +
+            (detail || '');
     }
 
     /* ---------------- 二次确认 ---------------- */
