@@ -3056,36 +3056,19 @@
      * STL 这类无索引格式先焊接成唯一顶点表 + 重映射索引，再走同一条路径。
      * 线框/边界 EBO 必须直接写顶点表下标，焊接 id 只用于去重键。
      */
+    /* 快速线框 + 面法向：逐面独立计算，零全局 Map。
+     * 线框直接输出每面 3 条边（共享边重复画在同位置，视觉无差别），
+     * 避免为「边界统计」让所有线框/法向都承担千万级 Map 开销。 */
     function computeTopo(positions, triangles, tri)
     {
-        var LIM = 16777216;                       // 常规 id 走数值键；超大 id 退化字符串键
-        var edgeMap = new Map();
-        var eA = [], eB = [], eUse = [];
-        var ne = 0;
         var nTri = triangles ? Math.floor(triangles.length / 3)
                              : Math.floor(positions.length / 9);
         if (tri > nTri) { tri = nTri; }
         var faces = new Float32Array(tri * 6);
-        var nf = 0;
+        var edges = new Uint32Array(tri * 6);      // tri*3 边 * 2 顶点
+        var nf = 0, ne = 0;
         var sumEdge = 0, cntEdge = 0;
         var probe = Math.max(1, Math.floor(tri / 512));
-
-        function addEdge(va, vb)
-        {
-            if (va === vb) { return; }
-            var key = (va < LIM && vb < LIM)
-                ? (va < vb ? va * LIM + vb : vb * LIM + va)
-                : (va < vb ? va + '|' + vb : vb + '|' + va);
-            var idx = edgeMap.get(key);
-            if (idx === undefined)
-            {
-                edgeMap.set(key, ne);
-                eA.push(va); eB.push(vb); eUse.push(1);
-                ne++;
-                return;
-            }
-            if (eUse[idx] < 255) { eUse[idx]++; }
-        }
 
         for (var i = 0; i < tri; i++)
         {
@@ -3093,8 +3076,6 @@
             var v0 = triangles ? triangles[t3] : t3;
             var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
             var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
-
-            /* 与 CloudCompare 一致：焊接后出现重合顶点的退化面直接丢弃。 */
             if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
 
             var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
@@ -3124,21 +3105,135 @@
                             Math.sqrt(ex * ex + ey * ey + ez * ez)) / 3;
                 cntEdge++;
             }
-            addEdge(v0, v1);
-            addEdge(v1, v2);
-            addEdge(v2, v0);
+            /* 线框：每面 3 条边顺序写出，不去重（零 Map）。 */
+            edges[ne++] = v0; edges[ne++] = v1;
+            edges[ne++] = v1; edges[ne++] = v2;
+            edges[ne++] = v2; edges[ne++] = v0;
         }
+        return {
+            edges: edges.subarray(0, ne),           // 零拷贝视图，省去 slice 复制
+            faces: faces.subarray(0, nf * 6),
+            faceCount: nf, edgeCount: ne / 2,
+            /* 边界留空：由 computeBoundary 单独按需计算 */
+            boundary: new Uint32Array(0), boundaryEdges: 0,
+            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
+        };
+    }
 
-        var edges = new Uint32Array(ne * 2);
-        var bCount = 0;
-        for (var k = 0; k < ne; k++)
+    /* computeTopo 的分帧异步版：与 computeTopo 同算法（零 Map），
+     * 每 CHUNK 面让出主线程一次，供进度条刷新。线框与法向共用这一次计算。 */
+    function computeTopoAsync(positions, triangles, tri, onProgress, onDone)
+    {
+        var nTri = triangles ? Math.floor(triangles.length / 3)
+                             : Math.floor(positions.length / 9);
+        if (tri > nTri) { tri = nTri; }
+        var CHUNK = 200000;
+        var faces = new Float32Array(tri * 6);
+        var edges = new Uint32Array(tri * 6);
+        var nf = 0, ne = 0, i = 0;
+        var sumEdge = 0, cntEdge = 0;
+        var probe = Math.max(1, Math.floor(tri / 512));
+
+        function step()
         {
-            edges[k * 2] = eA[k]; edges[k * 2 + 1] = eB[k];
-            if (eUse[k] === 1) { bCount++; }
+            var end = Math.min(tri, i + CHUNK);
+            for (; i < end; i++)
+            {
+                var t3 = i * 3;
+                var v0 = triangles ? triangles[t3] : t3;
+                var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
+                var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
+                if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
+
+                var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
+                var x0 = positions[o0], y0 = positions[o0 + 1], z0 = positions[o0 + 2];
+                var x1 = positions[o1], y1 = positions[o1 + 1], z1 = positions[o1 + 2];
+                var x2 = positions[o2], y2 = positions[o2 + 1], z2 = positions[o2 + 2];
+
+                var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
+                var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
+                var nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+                var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+                if (nl >= 1e-12)
+                {
+                    nx /= nl; ny /= nl; nz /= nl;
+                    var q = nf * 6;
+                    faces[q] = (x0 + x1 + x2) / 3;
+                    faces[q + 1] = (y0 + y1 + y2) / 3;
+                    faces[q + 2] = (z0 + z1 + z2) / 3;
+                    faces[q + 3] = nx; faces[q + 4] = ny; faces[q + 5] = nz;
+                    nf++;
+                }
+                if ((i % probe) === 0)
+                {
+                    var ex = x2 - x1, ey = y2 - y1, ez = z2 - z1;
+                    sumEdge += (Math.sqrt(ax * ax + ay * ay + az * az) +
+                                Math.sqrt(bx * bx + by * by + bz * bz) +
+                                Math.sqrt(ex * ex + ey * ey + ez * ez)) / 3;
+                    cntEdge++;
+                }
+                edges[ne++] = v0; edges[ne++] = v1;
+                edges[ne++] = v1; edges[ne++] = v2;
+                edges[ne++] = v2; edges[ne++] = v0;
+            }
+            if (onProgress) { onProgress(tri > 0 ? i / tri : 1); }
+            if (i < tri)
+            {
+                global.setTimeout(step, 0);
+                return;
+            }
+            if (onDone)
+            {
+                onDone({
+                    edges: edges.subarray(0, ne),
+                    faces: faces.subarray(0, nf * 6),
+                    faceCount: nf, edgeCount: ne / 2,
+                    boundary: new Uint32Array(0), boundaryEdges: 0,
+                    avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
+                });
+            }
         }
+        global.setTimeout(step, 0);
+    }
+
+    /* 边界边：只被一个面使用的边 —— 唯一需要全局去重的拓扑量。
+     * 仅在用户勾选「边界」时调用，避免拖慢线框/法向。 */
+    function computeBoundary(positions, triangles, tri)
+    {
+        var LIM = 16777216;
+        var edgeMap = new Map();                   // key -> 该边首次出现的索引
+        var eA = [], eB = [], eUse = [];
+        var nTri = triangles ? Math.floor(triangles.length / 3)
+                             : Math.floor(positions.length / 9);
+        if (tri > nTri) { tri = nTri; }
+        function addEdge(va, vb)
+        {
+            if (va === vb) { return; }
+            var key = (va < LIM && vb < LIM)
+                ? (va < vb ? va * LIM + vb : vb * LIM + va)
+                : (va < vb ? va + '|' + vb : vb + '|' + va);
+            var u = edgeMap.get(key);
+            if (u === undefined)
+            {
+                edgeMap.set(key, eA.length);
+                eA.push(va); eB.push(vb); eUse.push(1);
+            }
+            else if (eUse[u] < 2) { eUse[u]++; }
+        }
+        for (var i = 0; i < tri; i++)
+        {
+            var t3 = i * 3;
+            var v0 = triangles ? triangles[t3] : t3;
+            var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
+            var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
+            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
+            addEdge(v0, v1); addEdge(v1, v2); addEdge(v2, v0);
+        }
+        var bCount = 0;
+        for (var k = 0; k < eUse.length; k++) { if (eUse[k] === 1) { bCount++; } }
         var boundary = new Uint32Array(bCount * 2);
         var bw = 0;
-        for (var k2 = 0; k2 < ne; k2++)
+        for (var k2 = 0; k2 < eUse.length; k2++)
         {
             if (eUse[k2] === 1)
             {
@@ -3147,23 +3242,93 @@
         }
         eA.length = eB.length = eUse.length = 0;
         edgeMap.clear();
-        return {
-            edges: edges, boundary: boundary,
-            faces: faces.slice(0, nf * 6),
-            faceCount: nf, edgeCount: ne, boundaryEdges: bCount,
-            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
-        };
+        return { boundary: boundary, boundaryEdges: bCount };
     }
 
-    /* 超大网格优化参考 three.js 的 per-object 视锥剔除 + 3D Tiles 的 boundingVolume/SSE：
-     * 把面按质心分到固定 N³ 空间格，用两次线性扫描 + 计数排序重排索引，
-     * 不用 grid[key].push(t) 的 JS 数组（620 万面时那是分钟级来源）。
-     * chunk 的 bbox 用格子的保守 AABB，不再逐顶点重算。 */
-    var LOD_MIN_TRIS = 2000000;
-    var LOD_RATIOS = [0.15, 0.03];   // 聚类简化目标顶点比例（MeshLab Clustering Decimation 口径）
+    /* 边界计算的分帧异步版 —— 排序法（零 Map）：
+     * 每条边编码成一个数值 key = min(v0,v1)*LIM + max(v0,v1)，
+     * 全部写入 Float64Array 后原生 sort()，排序后「落单的 key」即边界边。
+     * 相比 Map 方案：无百万次 JS 对象操作，内存从 200~400MB 降到 ~80MB。
+     * LIM=2^24 可支持 1677 万顶点；key 最大 ~2^48 < 2^53，Float64 精确无误。
+     * 阶段 1（写 key）分帧让出，阶段 2（原生 sort）一次性，阶段 3（扫描落单）一次性。 */
+    var BOUND_LIM = 16777216;
+    function computeBoundaryAsync(positions, triangles, tri, onProgress, onDone)
+    {
+        var nTri = triangles ? Math.floor(triangles.length / 3)
+                             : Math.floor(positions.length / 9);
+        if (tri > nTri) { tri = nTri; }
+        var CHUNK = 200000;                        // 每帧 20 万面
+        var keys = new Float64Array(tri * 3);      // 每面 3 条边
+        var ne = 0, i = 0;
 
-    /* 3D Tiles 式空间 tile：固定 N³ 网格，所有 LOD 层使用同一 bbox/N，
-     * chunk 下标即 tile id，逐 tile 选择 LOD 才能与父级 REPLACE 对应。 */
+        function writeEdges()
+        {
+            var end = Math.min(tri, i + CHUNK);
+            for (; i < end; i++)
+            {
+                var t3 = i * 3;
+                var v0 = triangles ? triangles[t3] : t3;
+                var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
+                var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
+                if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
+                keys[ne++] = (v0 < v1 ? v0 * BOUND_LIM + v1 : v1 * BOUND_LIM + v0);
+                keys[ne++] = (v1 < v2 ? v1 * BOUND_LIM + v2 : v2 * BOUND_LIM + v1);
+                keys[ne++] = (v2 < v0 ? v2 * BOUND_LIM + v0 : v0 * BOUND_LIM + v2);
+            }
+            /* 写 key 占 0~0.7，排序 0.7~0.85，扫描 0.85~1 */
+            if (onProgress) { onProgress(tri > 0 ? (i / tri) * 0.7 : 0.7); }
+            if (i < tri)
+            {
+                global.setTimeout(writeEdges, 0);
+                return;
+            }
+            global.setTimeout(sortAndExtract, 0);
+        }
+
+        function sortAndExtract()
+        {
+            if (onProgress) { onProgress(0.72); }
+            var sorted = keys.subarray(0, ne);
+            sorted.sort();                         // 原生 TypedArray 数值排序
+
+            if (onProgress) { onProgress(0.88); }
+            /* 扫描：相邻相等 = 内部边（出现 2 次），落单 = 边界边。
+             * 正常流形网格每条边最多 2 面共享；>2 次的非流形边同样不输出。 */
+            var bCount = 0;
+            for (var k = 0; k < ne;)
+            {
+                var key = sorted[k];
+                var j = k + 1;
+                while (j < ne && sorted[j] === key) { j++; }
+                if (j - k === 1) { bCount++; }
+                k = j;
+            }
+            var boundary = new Uint32Array(bCount * 2);
+            var bw = 0;
+            for (var k2 = 0; k2 < ne;)
+            {
+                var key2 = sorted[k2];
+                var j2 = k2 + 1;
+                while (j2 < ne && sorted[j2] === key2) { j2++; }
+                if (j2 - k2 === 1)
+                {
+                    boundary[bw++] = Math.floor(key2 / BOUND_LIM);
+                    boundary[bw++] = key2 % BOUND_LIM;
+                }
+                k2 = j2;
+            }
+            if (onProgress) { onProgress(1); }
+            if (onDone) { onDone({ boundary: boundary, boundaryEdges: bCount }); }
+        }
+
+        global.setTimeout(writeEdges, 0);
+    }
+
+    /* 超大网格分块：参考 three.js per-object 视锥剔除 + 3D Tiles boundingVolume。
+     * 把面按质心分到固定 N³ 空间格，用计数排序重排索引；chunk AABB 按真实顶点
+     * min/max 计算（含越格顶点），供 renderer 做视锥剔除，几何本身不做任何简化。 */
+
+    /* 空间 tile：固定 N³ 网格，chunk 下标即 tile id，全量几何不分级。 */
     function buildSpaceChunks(ix, tri, opts)
     {
         opts = opts || {};
@@ -3235,13 +3400,22 @@
             });
         }
 
+        /* 每个 chunk 的真实 AABB 初值设为空；下面的重排循环按顶点 min/max 扩充。
+         * 旧版直接用格边界当 AABB，但三角形按质心入格、顶点可越格，
+         * 导致 AABB 偏小、视锥边缘的 chunk 被误剔除成片消失。 */
+        for (var cInit = 0; cInit < cells; cInit++)
+        {
+            var ci0 = chunks[cInit];
+            ci0.mnx = Infinity; ci0.mny = Infinity; ci0.mnz = Infinity;
+            ci0.mxx = -Infinity; ci0.mxy = -Infinity; ci0.mxz = -Infinity;
+        }
         for (var t2 = 0; t2 < tri; t2++)
         {
             var o2 = t2 * 3;
-            var b0 = ix.idx[o2] * 3, b1 = ix.idx[o2 + 1] * 3, b2 = ix.idx[o2 + 2] * 3;
-            var mx = (ix.verts[b0] + ix.verts[b1] + ix.verts[b2]) / 3;
-            var my = (ix.verts[b0 + 1] + ix.verts[b1 + 1] + ix.verts[b2 + 1]) / 3;
-            var mz = (ix.verts[b0 + 2] + ix.verts[b1 + 2] + ix.verts[b2 + 2]) / 3;
+            var i0 = ix.idx[o2] * 3, i1 = ix.idx[o2 + 1] * 3, i2 = ix.idx[o2 + 2] * 3;
+            var mx = (ix.verts[i0] + ix.verts[i1] + ix.verts[i2]) / 3;
+            var my = (ix.verts[i0 + 1] + ix.verts[i1 + 1] + ix.verts[i2 + 1]) / 3;
+            var mz = (ix.verts[i0 + 2] + ix.verts[i1 + 2] + ix.verts[i2 + 2]) / 3;
             var ii = Math.min(N - 1, Math.max(0, Math.floor((mx - mnx) / sx)));
             var jj = Math.min(N - 1, Math.max(0, Math.floor((my - mny) / sy)));
             var kk = Math.min(N - 1, Math.max(0, Math.floor((mz - mnz) / sz)));
@@ -3249,104 +3423,57 @@
             var w = cursor[key2] * 3;
             newIdx[w] = ix.idx[o2]; newIdx[w + 1] = ix.idx[o2 + 1]; newIdx[w + 2] = ix.idx[o2 + 2];
             cursor[key2]++;
+
+            /* 用三个真实顶点扩充所在 chunk 的 AABB（含越格顶点） */
+            var aabb = chunks[key2];
+            var vx0 = ix.verts[i0], vy0 = ix.verts[i0 + 1], vz0 = ix.verts[i0 + 2];
+            var vx1 = ix.verts[i1], vy1 = ix.verts[i1 + 1], vz1 = ix.verts[i1 + 2];
+            var vx2 = ix.verts[i2], vy2 = ix.verts[i2 + 1], vz2 = ix.verts[i2 + 2];
+            var tmnx = Math.min(vx0, vx1, vx2), tmny = Math.min(vy0, vy1, vy2), tmnz = Math.min(vz0, vz1, vz2);
+            var tmxx = Math.max(vx0, vx1, vx2), tmxy = Math.max(vy0, vy1, vy2), tmxz = Math.max(vz0, vz1, vz2);
+            if (tmnx < aabb.mnx) { aabb.mnx = tmnx; }
+            if (tmny < aabb.mny) { aabb.mny = tmny; }
+            if (tmnz < aabb.mnz) { aabb.mnz = tmnz; }
+            if (tmxx > aabb.mxx) { aabb.mxx = tmxx; }
+            if (tmxy > aabb.mxy) { aabb.mxy = tmxy; }
+            if (tmxz > aabb.mxz) { aabb.mxz = tmxz; }
+        }
+        /* 空 chunk 保留格边界，避免 AABB 无效导致 aabbVisible 误判 */
+        for (var cFin = 0; cFin < cells; cFin++)
+        {
+            var cf = chunks[cFin];
+            if (!isFinite(cf.mnx))
+            {
+                var fi = Math.floor(cFin / (N * N));
+                var frem = cFin % (N * N);
+                var fj = Math.floor(frem / N);
+                var fk = frem % N;
+                cf.mnx = mnx + fi * sx; cf.mny = mny + fj * sy; cf.mnz = mnz + fk * sz;
+                cf.mxx = cf.mnx + sx; cf.mxy = cf.mny + sy; cf.mxz = cf.mnz + sz;
+            }
+            var ddx = cf.mxx - cf.mnx, ddy = cf.mxy - cf.mny, ddz = cf.mxz - cf.mnz;
+            cf.diag = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
         }
         return { idx: newIdx, chunks: chunks, n: N,
                  bbox: { min: [mnx, mny, mnz], max: [mxx, mxy, mxz] } };
     }
 
-    /* 真实简化 LOD：参考 MeshLab "Clustering Decimation" / Blender Decimate。
-     * 用 3D 网格把近重合顶点聚成代表点，重建三角形并丢弃退化面。
-     * 与旧的 1/4、1/16 索引抽样不同，输出是独立、连续的低面数几何。 */
+    /* 全量几何层级：只返回一级 L0，顶点/索引/分块都是原始拓扑。
+     * 不再做空间聚类简化（那会随机连顶点、产生错面/缝隙）；
+     * 可见性由视锥剔除 + 近→远排序 + 遮挡剔除负责，绝不改变拓扑。 */
     function buildClusterLods(ix, tri, bbox, N, level0Chunks)
     {
-        var levels = [{
+        return [{
             verts: ix.verts, idx: ix.idx, vcount: ix.vcount, triCount: tri,
             chunks: level0Chunks, error: 0, ratio: 1
         }];
-        if (tri < LOD_MIN_TRIS ||
-            (global.MV && global.MV.config && global.MV.config.lod === false))
-        {
-            return levels;
-        }
-
-        var ex = bbox.max[0] - bbox.min[0];
-        var ey = bbox.max[1] - bbox.min[1];
-        var ez = bbox.max[2] - bbox.min[2];
-        var maxExt = Math.max(ex, ey, ez, 1e-9);
-
-        for (var li = 0; li < LOD_RATIOS.length; li++)
-        {
-            var ratio = LOD_RATIOS[li];
-            var targetV = Math.max(64, Math.floor(ix.vcount * ratio));
-            var step = Math.max(1e-9, maxExt / Math.sqrt(targetV));
-            var seen = new Map();
-            var oldToNew = new Uint32Array(ix.vcount);
-            var rx = [], ry = [], rz = [];
-
-            for (var v = 0; v < ix.vcount; v++)
-            {
-                var vo = v * 3;
-                var x = ix.verts[vo], y = ix.verts[vo + 1], z = ix.verts[vo + 2];
-                var key = Math.floor((x - bbox.min[0]) / step) + '|' +
-                          Math.floor((y - bbox.min[1]) / step) + '|' +
-                          Math.floor((z - bbox.min[2]) / step);
-                var id = seen.get(key);
-                if (id === undefined)
-                {
-                    id = rx.length;
-                    seen.set(key, id);
-                    rx.push(x); ry.push(y); rz.push(z);
-                }
-                oldToNew[v] = id;
-            }
-
-            var out = [];
-            var seenFace = new Set();
-            var R = rx.length + 1;
-            for (var t = 0; t < tri; t++)
-            {
-                var o = t * 3;
-                var a = oldToNew[ix.idx[o]];
-                var b = oldToNew[ix.idx[o + 1]];
-                var c = oldToNew[ix.idx[o + 2]];
-                if (a === b || b === c || c === a) { continue; }
-                /* 聚类后大量三角形会映射到同一个代表点三元组；必须去重，
-                 * 否则面数几乎不降（MeshLab Clustering Decimation 也做这一步）。 */
-                var x = a, y = b, z = c, tmp;
-                if (x > y) { tmp = x; x = y; y = tmp; }
-                if (y > z) { tmp = y; y = z; z = tmp; }
-                if (x > y) { tmp = x; x = y; y = tmp; }
-                var fkey = R <= 200000
-                    ? (x * R + y) * R + z
-                    : (x + '|' + y + '|' + z);
-                if (seenFace.has(fkey)) { continue; }
-                seenFace.add(fkey);
-                out.push(a, b, c);
-            }
-            var lodIx = {
-                verts: new Float32Array(rx.length * 3),
-                idx: new Uint32Array(out),
-                vcount: rx.length
-            };
-            for (var r = 0; r < rx.length; r++)
-            {
-                lodIx.verts[r * 3] = rx[r];
-                lodIx.verts[r * 3 + 1] = ry[r];
-                lodIx.verts[r * 3 + 2] = rz[r];
-            }
-            var triLod = out.length / 3;
-            var sc = buildSpaceChunks(lodIx, triLod, { bbox: bbox, N: N });
-            levels.push({
-                verts: lodIx.verts, idx: sc.idx, vcount: rx.length,
-                triCount: triLod, chunks: sc.chunks,
-                error: step * 2, ratio: ratio
-            });
-        }
-        return levels;
     }
 
     global.MV.topology = {
         computeTopo: computeTopo,
+        computeTopoAsync: computeTopoAsync,
+        computeBoundary: computeBoundary,
+        computeBoundaryAsync: computeBoundaryAsync,
         buildSpaceChunks: buildSpaceChunks,
         buildClusterLods: buildClusterLods
     };
@@ -3621,8 +3748,18 @@ if (typeof importScripts === 'function')
             if (m.cmd === 'topo')
             {
                 var tp = computeTopo(m.verts || m.positions, m.idx || null, m.triCount | 0);
-                self.postMessage({ id: m.id, cmd: 'topo', topo: tp },
-                    [tp.edges.buffer, tp.boundary.buffer, tp.faces.buffer]);
+                /* computeTopo 返回的是 subarray 视图；transfer 视图的底层 buffer 会
+                 * 让接收端拿到完整容量数组。这里 slice 成精确长度的独立 buffer 再传。 */
+                var edgesCopy = tp.edges.slice();
+                var facesCopy = tp.faces.slice();
+                var outTopo = {
+                    edges: edgesCopy, faces: facesCopy,
+                    faceCount: tp.faceCount, edgeCount: tp.edgeCount,
+                    boundary: new Uint32Array(0), boundaryEdges: 0,
+                    avgEdge: tp.avgEdge
+                };
+                self.postMessage({ id: m.id, cmd: 'topo', topo: outTopo },
+                    [edgesCopy.buffer, facesCopy.buffer]);
                 return;
             }
 

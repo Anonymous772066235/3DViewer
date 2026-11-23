@@ -14,7 +14,8 @@
         notify: function () {},
         refreshProps: function () {},
         refreshTree: function () {},
-        invalidate: function () {}
+        invalidate: function () {},
+        progress: function () {}
     };
 
     function bindRenderHooks(h)
@@ -1141,49 +1142,56 @@
             g.normalBuffer = null;
         }
 
-        /* 法向几何来自 ensureTopo 的 faces（每面 6 float：质心 + 单位法向）。
-         * 这里展开成 12 float 交错缓冲（两端各 xyz+rgb），颜色由单位法向现算。
+        /* 法向几何来自共享拓扑的 faces（每面 6 float：质心 + 单位法向）。
+         * 展开成 12 float 交错缓冲（两端各 xyz+rgb），颜色由单位法向现算。
          * lengthScale 改变时只重算终点坐标，不重扫三角形。 */
-        var topo = this.ensureTopo(layer);
-        if (!topo || !topo.faceCount) { return; }
-
-        var src = topo.faces;
-        var n = topo.faceCount;
-        var out = new Float32Array(n * 12);
-        var avgEdge = topo.avgEdge > 0 ? topo.avgEdge : 1;
-        var len = avgEdge * 1.2 * lengthScale;
-
-        for (var f = 0; f < n; f++)
+        if (g.normalPending) { return; }
+        g.normalPending = true;
+        var self = this;
+        this.ensureTopoAsync(layer, function (topo)
         {
-            var s0 = f * 6, d0 = f * 12;
-            var cx = src[s0], cy = src[s0 + 1], cz = src[s0 + 2];
-            var nx = src[s0 + 3], ny = src[s0 + 4], nz = src[s0 + 5];
-            var nr = nx * 0.5 + 0.5, ng = ny * 0.5 + 0.5, nb = nz * 0.5 + 0.5;
-            out[d0] = cx; out[d0 + 1] = cy; out[d0 + 2] = cz;
-            out[d0 + 3] = nr; out[d0 + 4] = ng; out[d0 + 5] = nb;
-            out[d0 + 6] = cx + nx * len;
-            out[d0 + 7] = cy + ny * len;
-            out[d0 + 8] = cz + nz * len;
-            out[d0 + 9] = nr; out[d0 + 10] = ng; out[d0 + 11] = nb;
-        }
+            g.normalPending = false;
+            if (layer.gpu !== g || !topo || !topo.faceCount) { return; }
 
-        var gl = this.gl;
-        var vao = gl.createVertexArray();
-        gl.bindVertexArray(vao);
-        var buf = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-        gl.bufferData(gl.ARRAY_BUFFER, out, gl.STATIC_DRAW);
-        var strideN = 6 * 4;
-        gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, strideN, 0);
-        gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, strideN, 12);
-        gl.bindVertexArray(null);
+            var src = topo.faces;
+            var n = topo.faceCount;
+            var out = new Float32Array(n * 12);
+            var avgEdge = topo.avgEdge > 0 ? topo.avgEdge : 1;
+            var len = avgEdge * 1.2 * lengthScale;
 
-        g.normalVao = vao;
-        g.normalBuffer = buf;
-        g.normalCount = n;
-        g.normalKey = key;
+            for (var f = 0; f < n; f++)
+            {
+                var s0 = f * 6, d0 = f * 12;
+                var cx = src[s0], cy = src[s0 + 1], cz = src[s0 + 2];
+                var nx = src[s0 + 3], ny = src[s0 + 4], nz = src[s0 + 5];
+                var nr = nx * 0.5 + 0.5, ng = ny * 0.5 + 0.5, nb = nz * 0.5 + 0.5;
+                out[d0] = cx; out[d0 + 1] = cy; out[d0 + 2] = cz;
+                out[d0 + 3] = nr; out[d0 + 4] = ng; out[d0 + 5] = nb;
+                out[d0 + 6] = cx + nx * len;
+                out[d0 + 7] = cy + ny * len;
+                out[d0 + 8] = cz + nz * len;
+                out[d0 + 9] = nr; out[d0 + 10] = ng; out[d0 + 11] = nb;
+            }
+
+            var gl = self.gl;
+            var vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+            var buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, out, gl.STATIC_DRAW);
+            var strideN = 6 * 4;
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, strideN, 0);
+            gl.enableVertexAttribArray(1);
+            gl.vertexAttribPointer(1, 3, gl.FLOAT, false, strideN, 12);
+            gl.bindVertexArray(null);
+
+            g.normalVao = vao;
+            g.normalBuffer = buf;
+            g.normalCount = n;
+            g.normalKey = key;
+            renderHooks.invalidate();
+        });
     };
 
     /* ---------------- 网格 / 坐标轴 ---------------- */
@@ -1360,87 +1368,47 @@
         // 与实际索引缓冲的长度不一定一致，切过去会导致模型大面积缺失。
         var testVisible = cullCfg && !layer.previewMat;
 
-        /* 真几何 LOD + 3D Tiles 式逐 tile REPLACE：
-         * 每个空间 tile 独立按 SSE 选级，近处 tile 用 LOD0，远处 tile 用粗级。 */
-        var levels = g.lodLevels && g.lodLevels.length ? g.lodLevels : null;
-        var useLod = !!(levels && levels.length > 1 && view && view.camera && view.h > 0 &&
-            !(global.MV.config && global.MV.config.lod === false));
-        var dpr = Math.min(global.devicePixelRatio || 1, 2);
-        var eye = null, fovTan = Math.tan(0.785 * 0.5), lodPx = 16 * dpr;
-        if (useLod)
-        {
-            eye = view.camera.getPosition ? view.camera.getPosition() : null;
-            var fov = view.camera.fovY || view.camera.fov || 0.785;
-            fovTan = Math.max(1e-6, Math.tan(fov * 0.5));
-            var cfgPx = global.MV.config && global.MV.config.lodPx;
-            if (cfgPx > 0) { lodPx = cfgPx * dpr; }
-            if (!eye) { useLod = false; }
-        }
-
+        /* 全量几何 + 可见性剔除：所有 chunk 都是原始拓扑，不做有损简化。
+         * 视锥外的块整体跳过；视锥内按到相机距离近→远排序提交，
+         * 让 GPU Early-Z 尽早淘汰被遮挡片元（正确性与 LOD 无关）。 */
+        var eye = (view && view.camera && view.camera.getPosition)
+            ? view.camera.getPosition() : null;
         var drawnTris = 0;
         var drawnChunks = 0;
-        var tiles = levels ? levels[0].chunks : g.chunks;
+        var tiles = g.chunks;
         if (tiles && tiles.length > 1)
         {
             var planes = frustumFromMVP(mvp);
-            var buckets = useLod ? [] : null;
-            if (buckets) { for (var bi = 0; bi < levels.length; bi++) { buckets.push([]); } }
+            var visible = [];
             for (var ci3 = 0; ci3 < tiles.length; ci3++)
             {
                 var ch = tiles[ci3];
                 if (!ch.count || (testVisible && !aabbVisible(ch, planes))) { continue; }
-                drawnChunks++;
-                var chosen = 0;
-                if (useLod)
+                var ccx = (ch.mnx + ch.mxx) * 0.5;
+                var ccy = (ch.mny + ch.mxy) * 0.5;
+                var ccz = (ch.mnz + ch.mxz) * 0.5;
+                var d2 = 0;
+                if (eye)
                 {
-                    var ccx = (ch.mnx + ch.mxx) * 0.5;
-                    var ccy = (ch.mny + ch.mxy) * 0.5;
-                    var ccz = (ch.mnz + ch.mxz) * 0.5;
-                    var ex = ccx - eye[0], ey = ccy - eye[1], ez = ccz - eye[2];
-                    var dist = Math.max(1e-6, Math.sqrt(ex * ex + ey * ey + ez * ez));
-                    var ppu = view.h / (2 * dist * fovTan);
-                    for (var L = levels.length - 1; L >= 1; L--)
-                    {
-                        var lv = levels[L];
-                        /* 误差由 LOD 几何自身给出；不能再叠 chunk.diag ——
-                         * 那会让 err 达几十~上百毫米，LOD 永远选不中。 */
-                        var err = lv.error;
-                        var hysteresis = (ch.tileLod === L) ? 1.1 : 1;
-                        if (err * ppu <= lodPx * hysteresis)
-                        {
-                            chosen = L;
-                            break;
-                        }
-                    }
-                    ch.tileLod = chosen;
+                    var dx = ccx - eye[0], dy = ccy - eye[1], dz = ccz - eye[2];
+                    d2 = dx * dx + dy * dy + dz * dz;
                 }
-                if (buckets) { buckets[chosen].push(ci3); }
-                else
-                {
-                    gl.bindVertexArray(g.vao);
-                    gl.drawElements(gl.TRIANGLES, ch.count, gl.UNSIGNED_INT, ch.offset);
-                    drawnTris += ch.count / 3;
-                }
+                visible.push({ ch: ch, d2: d2 });
             }
-
-            if (buckets)
+            /* 近→远排序：先画近处写深度，远处被覆盖的片元被 Early-Z 丢弃。 */
+            if (eye && visible.length > 1)
             {
-                for (var lvI = 0; lvI < buckets.length; lvI++)
-                {
-                    var bucket = buckets[lvI];
-                    if (!bucket.length) { continue; }
-                    if (this.stats['lod' + lvI] !== undefined) { this.stats['lod' + lvI] += bucket.length; }
-                    gl.bindVertexArray(levels[lvI].vao);
-                    for (var bq = 0; bq < bucket.length; bq++)
-                    {
-                        var tileId = bucket[bq];
-                        var drawCh = levels[lvI].chunks[tileId];
-                        if (!drawCh || !drawCh.count) { continue; }
-                        gl.drawElements(gl.TRIANGLES, drawCh.count, gl.UNSIGNED_INT, drawCh.offset);
-                        drawnTris += drawCh.count / 3;
-                    }
-                }
+                visible.sort(function (a, b) { return a.d2 - b.d2; });
             }
+            gl.bindVertexArray(g.vao);
+            for (var vi = 0; vi < visible.length; vi++)
+            {
+                var vch = visible[vi].ch;
+                gl.drawElements(gl.TRIANGLES, vch.count, gl.UNSIGNED_INT, vch.offset);
+                drawnTris += vch.count / 3;
+            }
+            drawnChunks = visible.length;
+            this.stats.lod0 = visible.length;
             this.stats.chunksDrawn = (this.stats.chunksDrawn || 0) + drawnChunks;
             this.stats.chunksTotal = (this.stats.chunksTotal || 0) + tiles.length;
         }
@@ -1570,70 +1538,21 @@
        法向又单独扫一遍算叉积和边长。这里合并为一次遍历，并复用载入时 analyzeMesh
        已算好的 data.remap 做焊接 id（零哈希、零字符串）。
        ========================================================================== */
-    /* 拓扑改为按需异步生成：只有首次勾选线框/边界/法向才发 cmd:'topo'。
-     * 大网格导入时不再花千万级 Map + 200 MiB 缓冲，默认只画面片。 */
-    Renderer.prototype.requestTopo = function (layer)
+    /* 线框/法向共享的拓扑：分帧异步生成 + 进度条，不阻塞渲染。
+     * HTTP 与 file:// 统一走主线程分帧（computeTopoAsync），保证进度条一致；
+     * 多次请求（线框+法向同时勾选）通过 waiters 队列共享同一次计算。 */
+    Renderer.prototype.ensureTopoAsync = function (layer, onReady)
     {
         var g = layer.gpu, d = layer.data;
-        if (!g || !d || g.topoPending || g.topo || d.topo || !global.Worker) { return; }
-        var verts = d.preVerts || d.uniqVerts || null;
-        var triIdx = d.preIdx || d.remap || null;
-        if (!verts || !triIdx) { return; }
-
-        g.topoPending = true;
-        var vCopy = new Float32Array(verts);
-        var iCopy = new Uint32Array(triIdx);
-        var v = (global.MV.config && global.MV.config.version) || '';
-        var W;
-        try { W = new global.Worker('js/worker_io.js' + (v ? '?v=' + v : '')); }
-        catch (e) { g.topoPending = false; return; }
-
-        var self = this;
-        W.onmessage = function (ev)
+        if (!g || !d || d.kind !== 'mesh' || !g.triCount) { onReady(null); return; }
+        if (g.topo) { onReady(g.topo); return; }
+        if (d.topo) { g.topo = d.topo; onReady(g.topo); return; }
+        if (g.topoPendingAsync)
         {
-            var m = ev.data;
-            if (m && m.cmd === 'topo' && m.topo)
-            {
-                d.topo = m.topo;
-                g.topo = m.topo;
-            }
-            g.topoPending = false;
-            try { W.terminate(); } catch (e) { /* ignore */ }
+            g.topoWaiters.push(onReady);
+            return;
+        }
 
-            /* 拓扑换了，辅助线 VAO 必须重建 */
-            var gl = self.gl;
-            if (g.wireVao) { gl.deleteVertexArray(g.wireVao); }
-            if (g.wireBuffer) { gl.deleteBuffer(g.wireBuffer); }
-            if (g.boundaryVao) { gl.deleteVertexArray(g.boundaryVao); }
-            if (g.boundaryBuffer) { gl.deleteBuffer(g.boundaryBuffer); }
-            if (g.normalVao) { gl.deleteVertexArray(g.normalVao); }
-            if (g.normalBuffer) { gl.deleteBuffer(g.normalBuffer); }
-            g.wireVao = g.wireBuffer = null; g.wireCount = 0;
-            g.boundaryVao = g.boundaryBuffer = null; g.boundaryDone = false;
-            g.normalVao = g.normalBuffer = null; g.normalCount = 0;
-            if (renderHooks.invalidate) { renderHooks.invalidate(); }
-        };
-        W.onerror = function ()
-        {
-            g.topoPending = false;
-            try { W.terminate(); } catch (e) { /* ignore */ }
-        };
-        W.postMessage({
-            cmd: 'topo', verts: vCopy, idx: iCopy, triCount: g.triCount
-        }, [vCopy.buffer, iCopy.buffer]);
-    };
-
-    Renderer.prototype.ensureTopo = function (layer)
-    {
-        var g = layer.gpu, d = layer.data;
-        if (!g || !d || d.kind !== 'mesh' || !g.triCount) { return null; }
-        if (g.topo) { return g.topo; }
-        if (d.topo) { g.topo = d.topo; return g.topo; }
-
-        /* HTTP Worker 路径：后台算，本帧辅助线先不画，算完 invalidate 重画。 */
-        if (global.Worker) { this.requestTopo(layer); return null; }
-
-        /* file:// 无 Worker：只能用共享实现同步兜底（小网格无感，大网格会卡一帧）。 */
         var verts = d.preVerts || d.uniqVerts || null;
         var triIdx = d.preIdx || d.remap || null;
         if (!verts || !triIdx || verts.length < 3 || triIdx.length < g.triCount * 3)
@@ -1642,13 +1561,36 @@
             verts = built.verts;
             triIdx = built.idx;
         }
-        if (!global.MV.topology || !global.MV.topology.computeTopo) { return null; }
-        g.topo = global.MV.topology.computeTopo(verts, triIdx, g.triCount);
-        return g.topo;
+        if (!global.MV.topology || !global.MV.topology.computeTopoAsync)
+        {
+            onReady(null);
+            return;
+        }
+
+        g.topoPendingAsync = true;
+        g.topoWaiters = [onReady];
+        renderHooks.progress(true, '生成线框/法向', 0);
+        global.MV.topology.computeTopoAsync(
+            verts, triIdx, g.triCount,
+            function (frac)
+            {
+                renderHooks.progress(true,
+                    '生成线框/法向 · ' + Math.round(frac * 100) + '%', frac);
+            },
+            function (topo)
+            {
+                g.topoPendingAsync = false;
+                renderHooks.progress(false, '');
+                if (layer.gpu !== g) { return; }   // 图层已释放
+                g.topo = topo;
+                var waiters = g.topoWaiters || [];
+                g.topoWaiters = [];
+                for (var w = 0; w < waiters.length; w++) { waiters[w](topo); }
+            });
     };
 
     /* 拓扑默认不在导入时算；小网格仍可在 file:// 下用 prewireQueue 分帧兜底。
-     * HTTP 路径走 requestTopo() 异步 Worker，算完 invalidate 重绘辅助线。 */
+     * 线框/法向/边界均走 ensureTopoAsync / computeBoundaryAsync，算完 invalidate 重绘。 */
     function pumpPrewireSync()
     {
         if (!prewireQueue.length) { return; }
@@ -1694,26 +1636,30 @@
     /* 线框：为每个三角形生成 3 条边索引（全部面，不做抽稀） */
     Renderer.prototype.ensureWire = function (layer)
     {
-        var gl = this.gl;
         var g = layer.gpu;
-        if (!g || !g.triCount || g.wireVao) { return; }
+        if (!g || !g.triCount || g.wireVao || g.wirePending) { return; }
+        g.wirePending = true;
+        var self = this;
+        this.ensureTopoAsync(layer, function (topo)
+        {
+            g.wirePending = false;
+            if (layer.gpu !== g || !topo || !topo.edgeCount) { return; }
+            var gl = self.gl;
+            var vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuffer);
+            gl.enableVertexAttribArray(self.lineA.pos);
+            gl.vertexAttribPointer(self.lineA.pos, 3, gl.FLOAT, false, 0, 0);
+            var ebo = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topo.edges, gl.STATIC_DRAW);
+            gl.bindVertexArray(null);
 
-        var topo = this.ensureTopo(layer);
-        if (!topo || !topo.edgeCount) { return; }
-
-        var vao = gl.createVertexArray();
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuffer);
-        gl.enableVertexAttribArray(this.lineA.pos);
-        gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
-        var ebo = gl.createBuffer();
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topo.edges, gl.STATIC_DRAW);
-        gl.bindVertexArray(null);
-
-        g.wireVao = vao;
-        g.wireBuffer = ebo;
-        g.wireCount = topo.edgeCount * 2;
+            g.wireVao = vao;
+            g.wireBuffer = ebo;
+            g.wireCount = topo.edgeCount * 2;
+            renderHooks.invalidate();
+        });
     };
 
     Renderer.prototype.drawWire = function (layer, mvp)
@@ -1753,42 +1699,76 @@
         this.stats.wireCalls++;
     };
 
-    /* 边界边：只被一个三角形使用的边（模型开放边界 / 破洞），按需一次性计算 */
+    /* 边界边：只被一个三角形使用的边（模型开放边界 / 破洞），按需一次性计算。
+     * 分帧异步 + 进度条：唯一需要全局去重的拓扑量，大网格同步跑会卡死主线程，
+     * 故 computeBoundaryAsync 每 20 万面让出一帧，进度条才能刷新。 */
     Renderer.prototype.ensureBoundary = function (layer)
     {
         var gl = this.gl;
         var g = layer.gpu;
-        if (!g || !g.triCount || g.boundaryVao || g.boundaryDone) { return; }
+        if (!g || !g.triCount || g.boundaryVao || g.boundaryDone || g.boundaryPending)
+        {
+            return;
+        }
         g.boundaryDone = true;
 
-        var topo = this.ensureTopo(layer);
         var notifyStat = function ()
         {
             try { renderHooks.refreshProps(); } catch (e) { /* ignore */ }
         };
 
-        if (!topo || !topo.boundaryEdges)
+        /* 边界是唯一需要全局去重的拓扑量，单独按需计算（computeTopo 已不再算它）。 */
+        var d = layer.data;
+        var verts = d.preVerts || d.uniqVerts || null;
+        var triIdx = d.preIdx || d.remap || null;
+        if ((!verts || !triIdx || triIdx.length < g.triCount * 3) ||
+            !global.MV.topology || !global.MV.topology.computeBoundaryAsync)
         {
             g.boundaryEdges = 0;
             notifyStat();
             return;
         }
 
-        var vao = gl.createVertexArray();
-        gl.bindVertexArray(vao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuffer);
-        gl.enableVertexAttribArray(this.lineA.pos);
-        gl.vertexAttribPointer(this.lineA.pos, 3, gl.FLOAT, false, 0, 0);
-        var ebo = gl.createBuffer();
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topo.boundary, gl.STATIC_DRAW);
-        gl.bindVertexArray(null);
+        g.boundaryPending = true;
+        renderHooks.progress(true, '统计边界边', 0);
+        var self = this;
+        global.MV.topology.computeBoundaryAsync(
+            verts, triIdx, g.triCount,
+            function (frac)
+            {
+                renderHooks.progress(true,
+                    '统计边界边 · ' + Math.round(frac * 100) + '%', frac);
+            },
+            function (bTopo)
+            {
+                g.boundaryPending = false;
+                renderHooks.progress(false, '');
+                /* 计算期间图层可能被释放/替换：此时 g 已失效，只丢弃结果。 */
+                if (layer.gpu !== g) { return; }
+                if (!bTopo.boundaryEdges)
+                {
+                    g.boundaryEdges = 0;
+                    notifyStat();
+                    return;
+                }
 
-        g.boundaryVao = vao;
-        g.boundaryBuffer = ebo;
-        g.boundaryCount = topo.boundaryEdges * 2;
-        g.boundaryEdges = topo.boundaryEdges;
-        notifyStat();
+                var vao = gl.createVertexArray();
+                gl.bindVertexArray(vao);
+                gl.bindBuffer(gl.ARRAY_BUFFER, g.posBuffer);
+                gl.enableVertexAttribArray(self.lineA.pos);
+                gl.vertexAttribPointer(self.lineA.pos, 3, gl.FLOAT, false, 0, 0);
+                var ebo = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, bTopo.boundary, gl.STATIC_DRAW);
+                gl.bindVertexArray(null);
+
+                g.boundaryVao = vao;
+                g.boundaryBuffer = ebo;
+                g.boundaryCount = bTopo.boundaryEdges * 2;
+                g.boundaryEdges = bTopo.boundaryEdges;
+                notifyStat();
+                renderHooks.invalidate();
+            });
     };
 
     Renderer.prototype.drawBoundary = function (layer, mvp)

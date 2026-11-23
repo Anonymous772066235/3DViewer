@@ -28,6 +28,94 @@
         return global.document.getElementById(id);
     }
 
+    /* LOD 几何的 IndexedDB 缓存（原 lod_cache.js，唯一使用方为 applyLodCache）。
+     * 导出：MV.lodCache.get(key) / put(key, lods) / clear() */
+    var LOD_DB_NAME = 'viewer3d-lod';
+    var LOD_STORE = 'lods';
+    var lodDbPromise = null;
+
+    function lodOpenDb()
+    {
+        if (lodDbPromise) { return lodDbPromise; }
+        lodDbPromise = new Promise(function (resolve, reject)
+        {
+            if (!global.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+            var req = global.indexedDB.open(LOD_DB_NAME, 1);
+            req.onupgradeneeded = function ()
+            {
+                var db = req.result;
+                if (!db.objectStoreNames.contains(LOD_STORE))
+                {
+                    db.createObjectStore(LOD_STORE, { keyPath: 'key' });
+                }
+            };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB open failed')); };
+        });
+        return lodDbPromise;
+    }
+
+    function lodCacheGet(key)
+    {
+        return lodOpenDb().then(function (db)
+        {
+            return new Promise(function (resolve)
+            {
+                try
+                {
+                    var tx = db.transaction(LOD_STORE, 'readonly');
+                    var req = tx.objectStore(LOD_STORE).get(key);
+                    req.onsuccess = function ()
+                    {
+                        var rec = req.result;
+                        resolve(rec && rec.lods && rec.lods.length ? rec.lods : null);
+                    };
+                    req.onerror = function () { resolve(null); };
+                }
+                catch (e) { resolve(null); }
+            });
+        }).catch(function () { return null; });
+    }
+
+    function lodCachePut(key, lods)
+    {
+        if (!lods || !lods.length) { return Promise.resolve(false); }
+        return lodOpenDb().then(function (db)
+        {
+            return new Promise(function (resolve)
+            {
+                try
+                {
+                    var tx = db.transaction(LOD_STORE, 'readwrite');
+                    tx.objectStore(LOD_STORE).put({ key: key, lods: lods, ts: Date.now() });
+                    tx.oncomplete = function () { resolve(true); };
+                    tx.onerror = function () { resolve(false); };
+                }
+                catch (e) { resolve(false); }
+            });
+        }).catch(function () { return false; });
+    }
+
+    function lodCacheClear()
+    {
+        return lodOpenDb().then(function (db)
+        {
+            return new Promise(function (resolve)
+            {
+                try
+                {
+                    var tx = db.transaction(LOD_STORE, 'readwrite');
+                    tx.objectStore(LOD_STORE).clear();
+                    tx.oncomplete = function () { resolve(true); };
+                    tx.onerror = function () { resolve(false); };
+                }
+                catch (e) { resolve(false); }
+            });
+        }).catch(function () { return false; });
+    }
+
+    MV.lodCache = { get: lodCacheGet, put: lodCachePut, clear: lodCacheClear };
+
     function app()
     {
         return MV.app;
@@ -580,7 +668,9 @@
 
         /* 网格 LOD：参考 three.js LOD 的距离切换 + 3D Tiles 的屏幕空间误差。
          * ?lod=0 关闭；?lodpx=N 调整允许误差（像素，默认 12）。 */
-            lod: params.get('lod') !== '0',
+            /* 默认全量几何 + 视锥/遮挡剔除，不做有损简化（避免错面/缝隙）。
+             * ?lod=1 可显式开启旧的空间聚类 LOD 作为对照。 */
+            lod: params.get('lod') === '1',
             lodPx: parseFloat(params.get('lodpx')) || 16,   // CSS 像素；渲染时乘 dpr
             pickgrid: params.get('pickgrid') === '1',       // 超大网格默认不预建拾取网格
             lodcache: params.get('lodcache') !== '0',       // ?lodcache=0 禁用 LOD 缓存
@@ -1209,9 +1299,15 @@
     var preprocessReqId = 0;
     var preprocessPending = Object.create(null);
 
+    /* file:// 下 new Worker 会跨域抛错，不能只看构造器是否存在。 */
+    function canUseWorker()
+    {
+        return /^https?:$/.test(global.location.protocol) && !!global.Worker;
+    }
+
     function getPreprocessWorker()
     {
-        if (preprocessWorker || !global.Worker) { return preprocessWorker; }
+        if (preprocessWorker || !canUseWorker()) { return preprocessWorker; }
         try
         {
             var v = (global.MV.config && global.MV.config.version) || '';
@@ -1417,7 +1513,7 @@
         var d = layer && layer.data;
         if (!d || d.kind !== 'mesh' || !d.positions) { return; }
         var tri = d.count || Math.floor(d.positions.length / 9);
-        if (tri < 4000 || !global.Worker) { return; }   // 小网格 / 无 Worker：同步兜底
+        if (tri < 4000 || !canUseWorker()) { return; }   // 小网格 / file:// 无 Worker：同步兜底
         /* 200 万面以上预建要复制 100+ MiB 并后台扫全量面，和首帧渲染抢资源；
          * 默认跳过，首次点选时走全量拾取。?pickgrid=1 可强制预建。 */
         if (tri > 2000000 && !(global.MV.config && global.MV.config.pickgrid)) { return; }
@@ -2594,6 +2690,9 @@
         {
             return;
         }
+        /* GitHub Pages 是纯静态托管，没有 /locate 端点；
+         * 提前返回，避免必然 404 的控制台噪音（与 optimize.js 的 IS_PAGES 口径一致）。 */
+        if (/\.github\.io$/i.test(global.location.hostname)) { return; }
         var f = layer.sourceFile;
         var base = /^https?:$/i.test(global.location.protocol) ? '' : 'http://127.0.0.1:8790';
         var url = base + '/locate?name=' + encodeURIComponent(f.name) + '&size=' + (f.size || 0);
@@ -3832,7 +3931,7 @@
     {
         global.MV.render.bindHooks({
             refreshTree: global.MV.ui.renderTree, notify: global.MV.ui.setInfo,
-            refreshProps: global.MV.ui.renderProps,
+            refreshProps: global.MV.ui.renderProps, progress: global.MV.ui.setProgress,
             invalidate: function () { if (global.MV.app) { global.MV.app.markDirty(); } } });
     }
 
@@ -3841,6 +3940,12 @@
         var app = new App();
         global.MV.app = app;
         app.init();
+
+        // file:// 下 Worker / fetch 不可用会静默降级到主线程，记一条日志避免被误判为卡顿
+        if (global.location.protocol === 'file:')
+        {
+            global.MV.ui.setInfo('以 file:// 打开，Worker 与本地文件读取受限，已回退主线程；建议运行 serve.bat 启用全部功能', false, 'warn');
+        }
 
         // ?tab=view 落到视图设置 Tab（config 此时已建立）
         var cfgTab = (global.MV.config || {}).tab;

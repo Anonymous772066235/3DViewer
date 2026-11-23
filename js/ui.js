@@ -4101,7 +4101,12 @@
     function getIcpWorker()
     {
         if (icpWorkerInst || icpWorkerBroken) { return icpWorkerInst; }
-        if (!global.Worker) { icpWorkerBroken = true; return null; }
+        /* file:// 下 new Worker 跨域抛错：直接标记不可用，走主线程回退。 */
+        if (!/^https?:$/.test(global.location.protocol) || !global.Worker)
+        {
+            icpWorkerBroken = true;
+            return null;
+        }
 
         try
         {
