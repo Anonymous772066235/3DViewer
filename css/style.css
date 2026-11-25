@@ -1818,6 +1818,107 @@ button.danger:hover {
     font-variant-numeric: tabular-nums;
 }
 
+/* 属性面板里的「计算…」按钮：inline3 的第 3 列是 1fr，默认会被拉满整行，
+ * 这里固定宽度并靠左，避免一个次要操作占掉大半行。 */
+#p-points-calc-normals {
+    justify-self: start;
+    width: auto;
+    min-width: 0;
+    padding: 3px 8px;
+}
+
+/* 法向弹窗：遮罩定位到三维视口矩形（由 showNormalsDialog 写入 left/top/width/height） */
+#normdlg {
+    right: auto;
+    bottom: auto;
+}
+
+/* ---------- 点云法向参数弹窗 ---------- */
+.norm-box {
+    width: 320px;
+    max-width: calc(100vw - 32px);
+    padding: 14px 16px 12px 16px;
+}
+.norm-box .modal-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.norm-body {
+    padding: 4px 0 14px 0;
+}
+/* 标签 / 控件 / 数值 同一行，避免内存弹窗那种"数值在上、滑块在下"的割裂 */
+.norm-row {
+    display: grid;
+    grid-template-columns: 60px minmax(0, 1fr) 34px;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    font-size: 12px;
+    color: var(--text);
+}
+.norm-label {
+    color: var(--dim);
+}
+.norm-val {
+    text-align: right;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent-2);
+}
+/* 朝向用分段按钮，默认「不定向」；radio 视觉隐藏，label 承载选中态 */
+.norm-orient {
+    grid-template-columns: 60px minmax(0, 1fr);
+    margin-top: 4px;
+}
+.norm-seg {
+    display: flex;
+    gap: 4px;
+}
+.norm-seg label {
+    flex: 0 1 auto;
+    min-width: 0;
+    position: relative;
+    cursor: pointer;
+}
+.norm-seg input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+.norm-seg span {
+    display: block;
+    text-align: center;
+    white-space: nowrap;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--dim);
+    background: var(--bg);
+    transition: background .12s, color .12s;
+}
+.norm-seg input:checked + span {
+    color: #fff;
+    background: var(--accent-2);
+    border-color: var(--accent-2);
+}
+.norm-box .modal-actions {
+    gap: 6px;
+}
+.norm-box .modal-actions button {
+    min-width: 0;
+    padding: 4px 12px;
+}
+.norm-hint {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--dim);
+}
+
 .mem-est {
     font-size: 11px;
     line-height: 1.6;
@@ -3130,6 +3231,13 @@ html.theme-light .pick-mark.pick.idle {
 #xform .xform-reg-row > select {
     flex: 1 1 0;
     min-width: 0;
+}
+/* 参考/目标互换按钮：夹在两个下拉之间，不参与均分 */
+#xform .xform-reg-row > button.mini {
+    flex: 0 0 auto;
+    min-width: 22px;
+    padding: 2px 4px;
+    line-height: 1;
 }
 
 /* 参考 / 目标是这一页的主参数（选错层整次配准就白做），

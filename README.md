@@ -122,7 +122,7 @@ python server/serve.py
 原因（实测，不是兼容性玄学）：
 
 ```
-new Worker('js/worker_icp.js')    // 配准
+new Worker('js/worker_align.js')    // 4PCS 粗配准 + 候选验证 + ICP 精配准
 new Worker('js/worker_io.js')     // 解析 + 预处理 + 拾取索引
   → SecurityError: Script at 'file:///…' cannot be accessed from origin 'null'
 fetch('js/core.js')
@@ -131,7 +131,7 @@ fetch('js/core.js')
 
 浏览器只在 `http(s)` 源下允许创建 `Worker`，也禁止 `file://` 页面 `fetch` 本地文件。
 `file://` 下启动时日志面板会记一条 `warn` 提示能力降级，不再静默。
-两个后台线程分别承担：配准（`worker_icp`）、导入解析 / 预处理 / 拾取索引（`worker_io`，与主线程共用内核）；
+两个后台线程分别承担：4PCS 粗配准 + 候选验证 + ICP 精配准（`worker_align`）、导入解析 / 预处理 / 拾取索引（`worker_io`，与主线程共用内核）；
 `file://` 下二者回退主线程。线框 / 法向 / 边界为**主线程分帧计算 + 进度条**（三者行为一致，不受协议影响），
 不会阻塞渲染，但缺少 Worker 并行。
 
@@ -324,7 +324,7 @@ PLY / OBJ / OFF / glTF **可以只有顶点、没有面**：按点云载入，�
 │   ├── render.js          [L4·渲染]   WebGL / 拓扑 / 视角器
 │   ├── ui.js              [L5·界面]   面板 / 场景树 / 工具
 │   ├── app.js             [L6·编排]   状态 / 加载 / 快捷键（含原 keys.js）
-│   ├── worker_icp.js      [W·后台]    配准计算
+│   ├── worker_align.js      [W·后台]    4PCS 粗配准 + 候选验证 + ICP 精配准
 │   └── optimize.js        [P·插件]    扩展入口（含原 registry.js）
 ```
 

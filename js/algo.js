@@ -404,8 +404,8 @@
     function splitMesh(layer, planes)
     {
         var d = layer.data;
-        var pos = d.preVerts || d.uniqVerts || d.positions;
-        var triIdx = d.preIdx || d.remap || null;
+        var pos = d.uniqVerts || d.positions;
+        var triIdx = d.remap || null;
         var tri = d.count || Math.floor(pos.length / 9);
         var segOut = [];
         var remOut = [];
@@ -775,8 +775,8 @@
         var seg = null;
         var srcD = layer.data;
         var rem = {
-            positions: srcD.preVerts || srcD.uniqVerts || srcD.positions,
-            remap: srcD.preIdx || srcD.remap || null,
+            positions: srcD.uniqVerts || srcD.positions,
+            remap: srcD.remap || null,
             count: srcD.count,
             vertCount: srcD.vertCount,
             format: srcD.format
@@ -1163,8 +1163,8 @@ function ensurePickGrid(layer, tri)
     }
 
     var d = layer.data;
-    var pos = d.preVerts || d.uniqVerts || d.positions;
-    var triIdx = d.preIdx || d.remap || null;
+    var pos = d.uniqVerts || d.positions;
+    var triIdx = d.remap || null;
     var mnx = Infinity, mny = Infinity, mnz = Infinity;
     var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
     var i;
@@ -1386,8 +1386,8 @@ function pickCandidates(layer, eye, dir, tri)
             if (l.kind === 'mesh')
             {
                 var ld = l.data;
-                var pos = ld.preVerts || ld.uniqVerts || ld.positions;
-                var triIdx = ld.preIdx || ld.remap || null;
+                var pos = ld.uniqVerts || ld.positions;
+                var triIdx = ld.remap || null;
                 var tri = l.gpu.triCount;
                 var cand = pickCandidates(l, eye, dir, tri);
                 var nCand = cand ? cand.length : tri;
@@ -1607,8 +1607,8 @@ function pickCandidates(layer, eye, dir, tri)
             if (l.kind === 'mesh')
             {
                 var ld = l.data;
-                var pos = ld.preVerts || ld.uniqVerts || ld.positions;
-                var triIdx = ld.preIdx || ld.remap || null;
+                var pos = ld.uniqVerts || ld.positions;
+                var triIdx = ld.remap || null;
                 var tri = l.gpu.triCount;
                 // 分块粗筛：大模型只对射线穿过的块内三角形求交
                 var cand = pickCandidates(l, eye, dir, tri);
@@ -2873,7 +2873,147 @@ function pickCandidates(layer, eye, dir, tri)
         return { mats: out, confidence: conf };
     }
 
+    /* 点云法向估计：逐点取 k 近邻，协方差最小特征向量即局部法向。
+     * opts: { k: 邻域点数(默认16), radius: 搜索半径倍数(默认0),
+     *         viewDir: [x,y,z] 定向参考(可选，使法向朝向视点),
+     *         flip: 强制统一到 +viewDir },
+     * 返回 Float32Array(n*3)；无法向（邻域退化）的点给默认 (0,0,1)。 */
+    /* 法向计算的共享上下文：KD 树 / 搜索半径 / 视向 / 输出数组一次建好，
+     * 同步版与分帧版复用同一份，保证结果与协议无关。 */
+    function pointNormalCtx(positions, count, opts)
+    {
+        var n = count || Math.floor(positions.length / 3);
+        var o = opts || {};
+        var ctx = {
+            n: n, k: Math.max(4, Math.min(256, o.k | 0 || 16)),
+            out: new Float32Array(n * 3), kd: null,
+            baseR: 1, vd: o.viewDir || null, vlen: 0
+        };
+        ctx.kd = global.MV.kdtree && global.MV.kdtree.build(positions, n);
+        if (!ctx.kd)
+        {
+            for (var z = 0; z < n; z++) { ctx.out[z * 3 + 2] = 1; }
+            return ctx;
+        }
+        var mnx = Infinity, mny = Infinity, mnz = Infinity;
+        var mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+        for (var q = 0; q < n; q++)
+        {
+            var qx = positions[q * 3], qy = positions[q * 3 + 1], qz = positions[q * 3 + 2];
+            if (qx < mnx) { mnx = qx; } if (qx > mxx) { mxx = qx; }
+            if (qy < mny) { mny = qy; } if (qy > mxy) { mxy = qy; }
+            if (qz < mnz) { mnz = qz; } if (qz > mxz) { mxz = qz; }
+        }
+        var diag = Math.sqrt((mxx - mnx) * (mxx - mnx) +
+                             (mxy - mny) * (mxy - mny) +
+                             (mxz - mnz) * (mxz - mnz));
+        var factor = o.radius > 0 ? o.radius : 2.5;
+        var baseR = n > 1 ? (diag / Math.sqrt(n)) * factor : 1;
+        ctx.baseR = (baseR > 0 && isFinite(baseR)) ? baseR : 1;
+        ctx.vlen = ctx.vd
+            ? Math.sqrt(ctx.vd[0] * ctx.vd[0] + ctx.vd[1] * ctx.vd[1] + ctx.vd[2] * ctx.vd[2]) : 0;
+        return ctx;
+    }
+
+    /* 计算 [i0, i1) 区间的法向，写入 ctx.out */
+    function pointNormalRange(positions, ctx, i0, i1)
+    {
+        if (!ctx.kd)
+        {
+            /* KD 不可用时 ctx 已填默认值 */
+            return;
+        }
+        for (var i = i0; i < i1; i++)
+        {
+            var px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
+            var r = ctx.baseR, idxs = null;
+            for (var attempt = 0; attempt < 6; attempt++)
+            {
+                idxs = ctx.kd.radius(px, py, pz, r);
+                var cnt = 0;
+                for (var a = 0; a < idxs.length; a++) { if (idxs[a] !== i) { cnt++; } }
+                if (cnt >= ctx.k) { break; }
+                r *= 2;
+            }
+            if (!idxs || idxs.length < 4)
+            {
+                ctx.out[i * 3 + 2] = 1;
+                continue;
+            }
+            var cx = 0, cy = 0, cz = 0, m = 0;
+            for (var j = 0; j < idxs.length && m < ctx.k; j++)
+            {
+                var ii = idxs[j];
+                if (ii === i) { continue; }
+                cx += positions[ii * 3]; cy += positions[ii * 3 + 1]; cz += positions[ii * 3 + 2];
+                m++;
+            }
+            if (m < 3) { ctx.out[i * 3 + 2] = 1; continue; }
+            cx /= m; cy /= m; cz /= m;
+
+            var xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+            for (var j2 = 0, m2 = 0; j2 < idxs.length && m2 < ctx.k; j2++)
+            {
+                var jj = idxs[j2];
+                if (jj === i) { continue; }
+                var dx = positions[jj * 3] - cx;
+                var dy = positions[jj * 3 + 1] - cy;
+                var dz = positions[jj * 3 + 2] - cz;
+                xx += dx * dx; xy += dx * dy; xz += dx * dz;
+                yy += dy * dy; yz += dy * dz; zz += dz * dz;
+                m2++;
+            }
+            var eig = jacobi3([[xx / m, xy / m, xz / m],
+                               [xy / m, yy / m, yz / m],
+                               [xz / m, yz / m, zz / m]]);
+            var ev = eig.values, ea = eig.axes;
+            var minIdx = 0;
+            if (ev[1] < ev[minIdx]) { minIdx = 1; }
+            if (ev[2] < ev[minIdx]) { minIdx = 2; }
+            var nx = ea[minIdx][0], ny = ea[minIdx][1], nz = ea[minIdx][2];
+            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (!(nl > 1e-12)) { ctx.out[i * 3 + 2] = 1; continue; }
+            nx /= nl; ny /= nl; nz /= nl;
+            if (ctx.vlen > 1e-12 && ctx.vd &&
+                nx * ctx.vd[0] + ny * ctx.vd[1] + nz * ctx.vd[2] < 0)
+            {
+                nx = -nx; ny = -ny; nz = -nz;
+            }
+            ctx.out[i * 3] = nx; ctx.out[i * 3 + 1] = ny; ctx.out[i * 3 + 2] = nz;
+        }
+    }
+
+    function computePointNormals(positions, count, opts)
+    {
+        var o = opts || {};
+        var ctx = pointNormalCtx(positions, count, o);
+        var onProgress = (typeof o.onProgress === 'function') ? o.onProgress : null;
+        pointNormalRange(positions, ctx, 0, ctx.n);
+        if (onProgress) { onProgress(1); }
+        return ctx.out;
+    }
+
+    /* 分帧版（file:// 主线程回退）：每 CHUNK 点让出一帧，进度条可见、不冻结界面。 */
+    function computePointNormalsChunked(positions, count, opts, onProgress, onDone)
+    {
+        var ctx = pointNormalCtx(positions, count, opts);
+        var CHUNK = 1500;
+        var i = 0;
+        function step()
+        {
+            var end = Math.min(ctx.n, i + CHUNK);
+            pointNormalRange(positions, ctx, i, end);
+            i = end;
+            if (onProgress) { onProgress(ctx.n > 0 ? i / ctx.n : 1); }
+            if (i < ctx.n) { global.setTimeout(step, 0); return; }
+            if (onDone) { onDone(ctx.out); }
+        }
+        global.setTimeout(step, 0);
+    }
+
     global.MV.icp = {
+        computePointNormals: computePointNormals,
+        computePointNormalsChunked: computePointNormalsChunked,
         symmetric: symmetric,
         createSolver: createSolver,
         createVerifier: createVerifier,

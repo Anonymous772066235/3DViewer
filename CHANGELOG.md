@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 当前版本 | `1.0.5.0` |
+| 当前版本 | `1.0.5.1` |
 | 记录范围 | 2026-10-21（项目起点）→ 2026-11-23 |
 | 版本号规则 | 在 `git` 最新提交版本的基础上**末位 +1，逢十进一**；`index.html` 的 `?v=` 同步更新以强制刷新缓存 |
 | 数据来源 | 文件创建/修改时间戳（实测）+ `index.html` 版本号 + 会话改动记录 |
@@ -72,6 +72,129 @@
 - **`js/render.js`**：`ensureBoundary` 改为单独调 `computeBoundary`，不再依赖 computeTopo 的空边界字段。
 - 效果：线框/法向从「千万级 Map + 数百 MB」降为「O(tri) 顺序数组写入」，file:// 下近实时；
   边界仅按需付费。索引 buffer 约 40 MB→81 MB（共享边不合并），以内存换零卡顿。
+- `index.html` 全部 `?v=` 同步 `1.0.5.1`。
+
+---
+
+## 1.0.5.1：点云法向计算接口 + 三处入口（2026-11-25）
+
+> 对外版本按「git HEAD `1.0.5.0` 末位 +1」= `1.0.5.1`；下面 1.0.5.4/1.0.5.3/1.0.5.2 为同一次未提交过程记录。
+
+- **`js/algo.js`**：新增 `MV.icp.computePointNormals(positions, count, opts)`——
+  逐点取 k 近邻，协方差最小特征向量作局部法向；参数 `k`(默认16)、`radius`(半径倍数)、`viewDir`(朝向视点定向)。
+  用 KD-tree `radius()` 逐步放大半径找够邻居，复用 `jacobi3` 特征分解。
+- **`js/render.js`**：`ensureNormals` 支持点云分支——从 `data.normals` 构造法向线段 VAO，
+  长度按 bbox 对角线比例；复用既有 `drawNormals` LINES 绘制，无需新程序。
+- **三处入口**：工具菜单「法向」按钮、点云图层属性「法向」勾选框（含计算按钮/长度滑块）、
+  快捷键 N（点云：无法向弹参数框，有法向直接切换显示；mesh 保持原开关行为）。
+- **参数对话框** `#normdlg`：k 近邻数、搜索半径倍数、朝向（视点/不定向）；ESC/遮罩/取消均可关闭；
+  计算后回填 `data.normals` + `normalsStamp`，失效旧 VAO 并刷新。
+- **配准 symICP 按"有无法向"判定，与数据形态无关**（`js/ui.js`）：
+  修复采样对象重建时把点云法向硬编码为 null 的缺陷；mesh 无条件按面法向加权算法向，
+  points 沿用自带法向（随图层位姿逆旋转复位），覆盖 mesh-mesh / mesh-points / points-mesh / points-points
+  四种组合；任一侧缺法向自动退化为点到点。验证器与主 ICP 均使用同一份法向。
+- **参考/目标互换**（`index.html` + `ui.js` + `css/style.css`）：N-N 与 ICP 两对下拉中间加 ⇄ 按钮，
+  点击交换两个选中值并重填；样式用 flex 固定宽度不被挤压。
+- **法向计算移入 Worker + 进度条**（`algo.js`/`worker_io.js`/`app.js`/`ui.js`）：
+  `computePointNormals` 加 `onProgress`（每 1% 回调）；`worker_io.js` importScripts algo.js 并新增
+  `cmd:'pointNormals'`（进度消息 + 结果 transfer）；`app.js` 新增 `computePointNormalsAsync`
+  （http 走 Worker 传顶点副本，file:// 同步回退）；UI 计算时显示「计算点云法向 · N%」进度条，
+   Worker 异常时结掉 pending 避免卡住。
+- **file:// 全 Worker 单线程回退审查与修复**：确认全部 3 处 Worker 创建点（预处理/拾取网格/ICP）
+  均有协议判断，所有实际在用的命令（parse/pickgrid/pointNormals/coarseInit/solve）都有等价同步路径。
+  修复：`algo.js` 法向计算重构为 ctx+range 模式并新增 `computePointNormalsChunked`（file:// 分帧回退，
+  进度条可见、不冻结）；`app.js` Worker onerror 补清 `parsePending`，避免导入 Promise 永久挂起。
+- **清理死代码**：删除 `worker_io.js` 的 `topo` 命令分支（拓扑已统一走主线程分帧）、
+  同步版 `computeTopo`/`computeBoundary`（仅分帧版在用）及 Worker 内无用局部变量；
+  删除 `worker_align.js` 的 `verifyInit`/`score`/`screen` 三个无调用方命令与函数（候选验证在主线程）。
+- **修复点云法向勾选后无显示**（`js/render.js`）：`renderFrame` 的点云分支只调 `drawPoints`，
+  从未调用 `ensureNormals`/`drawNormals`（该调用只在 mesh 的 `drawMeshLayer` 内）→ 点云法向 VAO 永远不建。
+  在非 ghost 点云绘制后补上 `[if (lay.showNormals) ensureNormals + drawNormals]`，与 mesh 一致。
+- **修复参考/目标互换按钮无效**（`js/ui.js`）：两个下拉互相排除了对方的 option，
+  原实现直接 `r.value=dv; d.value=rv` 时 option 不存在、赋值落空，重填后又恢复原状。
+  改为 `fillLayerSelects` 支持 `forced={ref,dst}` 覆盖选中值，互换时用 forced 重填。
+- **修复 ICP 后做 N-N 越来越歪**（`js/ui.js`）：`rayPickLayer` 用世界射线对 CPU `data.positions`
+  求交，返回的已是数据空间点；但 `pickToData` 在预览态又乘 `inv(previewMat)` 二次变换，
+  污染选点。`regSolve` 算出矩阵后只挂 GPU 预览、不退出选点，用户继续点选时每个新点都被污染，
+  重复求解误差逐级累积。修复：`pickToData` 直接返回交点（标签显示仍由 `pickDisplayPos` 正变换）；
+  `regSolve` 求解前补 `syncPickPts()` 消除一帧滞后。
+  注：N-N 输出是「世界增量」，与 ICP 的「绝对位姿」语义不同，**不能**给 N-N 加 `×inv(xformMat)`。
+- **二次修复 N-N 计算后不对齐**（`js/ui.js`）：
+  ① `xformTargetLayer` 在 N-N 选点模式（`regMode`）下优先 `reg-dst`——此前总优先 `icp-dst`，
+  两个面板目标层不同时，N-N 矩阵被预览到错误图层，看起来"完全没对齐"。
+  ② `regPick` 在矩阵框有非零待应用矩阵时拒绝继续选点并给提示——预览态画面是 `previewMat×数据`，
+  而 `rayPickLayer` 对未变换的 CPU 顶点求交，两者坐标系不一致，继续选点必然漂移。
+  用户需先应用或丢弃再继续选点，以正确性优先。
+- **法向计算弹窗与按钮优化**：弹窗从复用内存预估样式改为专用紧凑布局——
+  「标签 / 滑块 / 数值」同一行，朝向从下拉框改为分段按钮并**默认不定向**；
+  每次打开重置为默认参数（k=16、半径 2.5×、不定向）。滑块数值带 `×` 单位。
+- **法向弹窗尺寸与定位再优化**：属性面板「计算…」按钮固定宽度靠左，不再撑满整行；
+  弹窗宽度 400→320px、参数行与分段按钮/底部按钮全面收紧；
+  遮罩改为按 `#view-area` 矩形定位，在三维视口内居中（不再相对整个窗口，侧栏宽时不再偏移）。
+- `index.html` 全部 `?v=` 与 CHANGELOG 表头统一 `1.0.5.1`。
+
+---
+
+## 1.0.5.4：精简顶点表别名字段（2026-11-25）
+
+审查确认：当前实际数据路径（OBJ/PLY 索引格式）中 `positions`/`uniqVerts`/`preVerts` 已是同一 buffer 的别名，无重复分配；真正冗余的是三个同值字段名本身，且读取优先级不一致（`preVerts‖uniqVerts‖positions` 在各模块顺序不同，易出错）。
+
+- 删除 `data.preVerts`/`data.preIdx`/`data.preVcount` 三个别名字段（及新增后又删除的 `vcount`），
+  顶点/索引统一为 `data.uniqVerts`/`data.remap`；`data.positions` 保留原始 soup 语义供 STL 导出保真。
+- 更新全部读取点：`render.js`（uploadLayer/ensureTopoAsync/ensureBoundary）、`app.js`（pickGrid/字段写入）、
+  `ui.js`（icpSample/xformOnce）、`algo.js`（splitMesh/undo/pickGrid/双视口拾取），共 10 处。
+- 保留 `preOrderedIdx`（分块重排索引）、`preChunks`（分块 AABB）、`preLods`（LOD 兼容层）——语义独立，非别名。
+- `index.html` 全部 `?v=` 同步 `1.0.5.4`。
+
+---
+
+## 1.0.5.3：修复 ICP 应用后渲染弹回变换前（2026-11-25）
+
+现象：配准结束时预览位姿正确，点击应用后画面却回到变换前的位置/结构。
+根因：`js/ui.js` 的 `applyXformToLayer` 只变换 `d.positions`/`d.uniqVerts`/`d.normals`，
+而渲染层 `uploadLayer` 优先用 `d.preVerts`（Worker 预处理顶点表）上传 GPU —— 它没被变换，
+清掉 `previewMat` 后画的是旧顶点。
+
+修复（`js/ui.js`）：
+- 三份顶点表（`positions`/`uniqVerts`/`preVerts`）统一走 `xformOnce`（对象去重，防共享 buffer 被变换两次）；
+- `d.preChunks` 的 64 个分块 AABB 用 8 角点随刚体矩阵变换后重算，避免视锥剔除误剔已移动的面。
+
+`index.html` 全部 `?v=` 同步 `1.0.5.3`。
+
+---
+
+## 1.0.5.2：移除收尾轮 + mesh-mesh 统一走 symICP（2026-11-25）
+
+问题：对齐 `0.5-孔位工件_oh.obj` 与 `0.5-手持-孔位工件-0.9-4k_oh.obj` 时，
+4PCS 给出好位姿、ICP 第一轮已收敛，后续收紧容差的"收尾轮"却把结果配歪；
+实测收尾轮无收益，最终**彻底移除**。
+
+1. **移除收尾轮**（`js/ui.js`，主线程 + Worker 两路径）：
+   删除 `refineCount`/`preRefineRms`/`preRefineMat`/`preRefineUsed`/`refineReverted` 相关状态、
+   第二轮求解与回退逻辑、文案中的"含 N 轮收紧容差"。
+   ICP 收敛后**直接采用该矩阵**，不再有任何后续轮次干扰。
+   历史根因记录：旧版收尾轮 `diag*0.008` 反而比好初值第一轮的 `bestRms*3` 更宽，
+   且 RMS 口径随参与点变化不可比 —— 这些正是移除而非修补的理由。
+2. **mesh-mesh 统一走 symICP**（`js/ui.js`）：采样后若两侧都是 mesh，
+   按「面法向加权」算顶点法向写回 `moving.nrm`/`fixed.nrm`，
+   4PCS 候选验证与主 ICP 都走有法向的 symICP；点云输入仍退化为点到点。
+
+`index.html` 全部 `?v=` 同步 `1.0.5.2`。
+
+---
+
+## 1.0.5.1：4PCS 移入 Worker，文件更名 worker_align.js，丢弃 PCA（2026-11-25）
+
+- **`js/worker_icp.js` → `js/worker_align.js`**：统一承担 Super4PCS 粗配准 + 候选验证 + ICP 精配准。
+  新增 `coarseInit` / `coarseStep` 命令：4PCS 分步求解在 Worker 内跑，主线程只接收每步矩阵写 GPU 预览，
+  配准期间不再阻塞渲染。`cancel` 同时取消粗配准。
+- **4PCS 无需初始位姿、无约束**：UI 侧只准备采样参数，搜索解由 Worker 返回；
+  `file://` 下 Worker 不可用时**在主线程分步跑 4PCS**（每帧一步 + 进度条，不整体阻塞），
+  并给 warn 提示建议改用 serve.bat。
+- **丢弃 PCA 多假设与质心对齐候选**：候选集只剩 4PCS 搜索解一个；验证阶段按 ICP 残差判断可否作初值。
+  `MV.icp.pcaCandidates` 作为工具函数保留在 algo.js，配准流程不再调用。
+- 预算适中提升：`maxTrials` 30→60、`pairLimit` 8000→10000、`maxCongruent` 300→400（进 Worker 后不再卡帧）。
+- 文档：README / GUIDE 的线程职责、目录树、三阶段示例同步更新。
 - `index.html` 全部 `?v=` 同步 `1.0.5.1`。
 
 ---

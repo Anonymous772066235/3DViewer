@@ -9,12 +9,12 @@
 <title>3D Viewer</title>
 <!-- 图标：SVG 优先（矢量、跟随系统深/浅色），ICO 兜底。
      缓存戳跟随版本号，避免浏览器长期用旧图标。 -->
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.5.0" media="(prefers-color-scheme: dark)" />
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-light.svg?v=1.0.5.0" media="(prefers-color-scheme: light)" />
-<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.5.0" />
-<link rel="shortcut icon" href="assets/icons/favicon.ico?v=1.0.5.0" sizes="16x16 32x32 48x48" />
-<link rel="apple-touch-icon" href="assets/icons/app-icon-dark-256.png?v=1.0.5.0" />
-<link rel="stylesheet" href="css/style.css?v=1.0.5.0" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.5.1" media="(prefers-color-scheme: dark)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-light.svg?v=1.0.5.1" media="(prefers-color-scheme: light)" />
+<link rel="icon" type="image/svg+xml" href="assets/icons/app-icon-dark.svg?v=1.0.5.1" />
+<link rel="shortcut icon" href="assets/icons/favicon.ico?v=1.0.5.1" sizes="16x16 32x32 48x48" />
+<link rel="apple-touch-icon" href="assets/icons/app-icon-dark-256.png?v=1.0.5.1" />
+<link rel="stylesheet" href="css/style.css?v=1.0.5.1" />
 <script>
 /* 主题必须在**首帧之前**生效。
  *
@@ -98,6 +98,7 @@
                 <div id="tools-menu" class="menu hidden">
                     <button id="btn-pick" title="在数据上取点并测量距离 / 角度（快捷键 P）">拾取<span class="kbd">P</span></button>
                     <button id="btn-xform" title="手动编辑 4×4 矩阵并应用，可用逆矩阵回退">变换</button>
+                    <button id="btn-normals" title="计算选中点云的法向（快捷键 N）">法向<span class="kbd">N</span></button>
                     <!-- ===== 三维编辑 BEGIN（注释掉这一行即关闭裁剪入口） ===== -->
                     <button id="btn-seg" title="矩形 / 多边形选面并拆分图层（快捷键 C）">裁剪</button>
                     <!-- ===== 三维编辑 END ===== -->
@@ -257,6 +258,20 @@
                             <label class="inline"><span>显示</span><input type="checkbox" id="p-normals" /></label>
                             <input type="range" id="p-normallen" min="0.1" max="6" step="0.1" title="法向长度（相对平均边长）" />
                             <span class="val" id="p-normallen-val">1.0</span>
+                        </div>
+                    </div>
+
+                    <div class="prop-group">
+                        <div class="group-title">显示（点云）</div>
+                        <div class="prop-row inline3" data-prop="points">
+                            <label>法向</label>
+                            <label class="inline"><span>显示</span><input type="checkbox" id="p-points-normals" /></label>
+                            <button id="p-points-calc-normals" class="mini" title="计算点云法向">计算</button>
+                        </div>
+                        <div class="prop-row inline3" data-prop="points">
+                            <label>法向长度</label>
+                            <input type="range" id="p-points-normallen" min="0.1" max="6" step="0.1" title="法向长度（相对包围盒）" />
+                            <span class="val" id="p-points-normallen-val">1.0</span>
                         </div>
                     </div>
 
@@ -466,6 +481,7 @@
             <div class="xform-reg-title">N-N 配准（手动选点）</div>
             <div class="xform-reg-row">
                 <span>参考</span><select id="reg-ref" title="固定不动的图层"></select>
+                <button id="reg-swap" class="mini" title="互换参考与目标">⇄</button>
                 <span>目标</span><select id="reg-dst" title="将被移动的图层"></select>
             </div>
             <div class="xform-actions xform-actions-split">
@@ -483,6 +499,7 @@
         <div class="xform-reg xform-icp">
             <div class="xform-reg-row">
                 <span>参考</span><select id="icp-ref" title="固定不动的图层"></select>
+                <button id="icp-swap" class="mini" title="互换参考与目标">⇄</button>
                 <span>目标</span><select id="icp-dst" title="将被移动的图层"></select>
             </div>
             <div class="xform-icp-checks">
@@ -676,6 +693,37 @@
     </div>
 </div>
 
+<!-- 点云法向计算参数 -->
+<div id="normdlg" class="modal hidden">
+    <div class="modal-box norm-box">
+        <div class="modal-title">计算点云法向<button id="norm-close" class="mini" title="关闭">×</button></div>
+        <div class="norm-body">
+            <label class="norm-row" for="norm-k">
+                <span class="norm-label">邻域点数</span>
+                <input type="range" id="norm-k" min="4" max="64" step="1" value="16" />
+                <b id="norm-k-val" class="norm-val">16</b>
+            </label>
+            <label class="norm-row" for="norm-r">
+                <span class="norm-label">搜索半径</span>
+                <input type="range" id="norm-r" min="0.5" max="8" step="0.5" value="2.5" />
+                <b id="norm-r-val" class="norm-val">2.5×</b>
+            </label>
+            <div class="norm-row norm-orient">
+                <span class="norm-label">法向朝向</span>
+                <div class="norm-seg">
+                    <label><input type="radio" name="norm-orient" value="none" checked /><span>不定向</span></label>
+                    <label><input type="radio" name="norm-orient" value="view" /><span>朝向视点</span></label>
+                </div>
+            </div>
+            <div class="norm-hint" id="norm-info">基于 k 近邻协方差的最小特征向量估计</div>
+        </div>
+        <div class="modal-actions">
+            <button id="norm-cancel">取消</button>
+            <button id="norm-ok" class="primary">计算</button>
+        </div>
+    </div>
+</div>
+
 <!-- 载入前内存预估 / 下采样 -->
 <div id="memdlg" class="modal hidden">
     <div class="modal-box mem-box">
@@ -733,14 +781,14 @@
 </div>
 
 <!-- ?v= 变更时强制刷新缓存 -->
-    <script src="js/core.js?v=1.0.5.0"></script>
-    <script src="js/worker_io.js?v=1.0.5.0"></script>
-    <script src="js/algo.js?v=1.0.5.0"></script>
-    <script src="js/render.js?v=1.0.5.0"></script>
+    <script src="js/core.js?v=1.0.5.1"></script>
+    <script src="js/worker_io.js?v=1.0.5.1"></script>
+    <script src="js/algo.js?v=1.0.5.1"></script>
+    <script src="js/render.js?v=1.0.5.1"></script>
     <!-- 插件：注释掉哪一行就关闭哪个插件（主程序不受影响） -->
-    <script src="js/optimize.js?v=1.0.5.0"></script>
-    <script src="js/ui.js?v=1.0.5.0"></script>
-    <script src="js/app.js?v=1.0.5.0"></script>
+    <script src="js/optimize.js?v=1.0.5.1"></script>
+    <script src="js/ui.js?v=1.0.5.1"></script>
+    <script src="js/app.js?v=1.0.5.1"></script>
 <!-- ===== 本地扩展 BEGIN（注释掉即关闭） ===== -->
 <!-- ===== 三维编辑 BEGIN ===== -->
 <!-- ===== 三维编辑 END ===== -->

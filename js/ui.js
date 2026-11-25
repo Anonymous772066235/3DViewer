@@ -138,8 +138,8 @@
 
         /* 网格：pos 恒为顶点表，remap 恒为面顶点索引（无索引 soup 时为 null）。
          * 法向由 Worker 内 computeVertexNormals 按同一套数据计算。 */
-        var verts = d.uniqVerts || d.preVerts || d.positions;
-        var triIdx = d.remap || d.preIdx || null;
+        var verts = d.uniqVerts || d.positions;
+        var triIdx = d.remap || null;
         var nv = d.vertCount || (triIdx ? 0 : Math.floor(verts.length / 3));
         return {
             kind: 'mesh', pos: verts,
@@ -1568,6 +1568,9 @@
         $('p-normals').checked = !!layer.showNormals;
         $('p-normallen').value = layer.normalLen;
         $('p-normallen-val').textContent = Number(layer.normalLen).toFixed(1);
+        $('p-points-normals').checked = !!(layer.showNormals && layer.data && layer.data.normals);
+        $('p-points-normallen').value = layer.normalLen;
+        $('p-points-normallen-val').textContent = Number(layer.normalLen).toFixed(1);
 
         var d = layer.data;
         var txt;
@@ -2178,7 +2181,10 @@
     {
         if (!app) { return null; }
 
-        var sels = [$('icp-dst'), $('reg-dst')];
+        /* N-N 选点模式下以 reg-dst 为准：否则两个面板目标层不同时，
+         * N-N 算出的矩阵会被预览到 ICP 的目标层上，看起来"完全没对齐"。 */
+        var sels = regMode ? [$('reg-dst'), $('icp-dst')]
+                           : [$('icp-dst'), $('reg-dst')];
         for (var i = 0; i < sels.length; i++)
         {
             if (!sels[i]) { continue; }
@@ -2664,11 +2670,53 @@
          * 选中图层回显矩阵、判断「应用」是否需要高亮，都依赖它。 */
         layer.xformMat = mat4Mul(m, layer.xformMat || IDENT4);
 
-        xformPositions(d.positions, m);
-        if (d.uniqVerts) { xformPositions(d.uniqVerts, m); }
+        /* positions（原始 soup，导出保真）与 uniqVerts（焊接后唯一顶点，渲染/GPU 源）
+         * 可能是同一 buffer 的别名，去重避免 M² 双重变换。
+         * 两者必须同步变换，否则配准预览对、应用后渲染弹回。 */
+        var xformedArrays = [];
+        function xformOnce(arr)
+        {
+            if (!arr || xformedArrays.indexOf(arr) >= 0) { return; }
+            xformedArrays.push(arr);
+            xformPositions(arr, m);
+        }
+        xformOnce(d.positions);
+        xformOnce(d.uniqVerts);
         if (d.normals) { xformNormals(d.normals, m); }
 
         d.bbox = bboxOfPositions(d.positions) || d.bbox;
+
+        /* 分块 AABB 基于顶点坐标，刚体变换后必须同步更新，
+         * 否则视锥剔除用旧包围盒，会把已 moved 的块误剔除。 */
+        if (d.preChunks && d.preChunks.length)
+        {
+            for (var ck = 0; ck < d.preChunks.length; ck++)
+            {
+                var ch = d.preChunks[ck];
+                if (!isFinite(ch.mnx)) { continue; }
+                var c8 = [
+                    [ch.mnx, ch.mny, ch.mnz], [ch.mxx, ch.mny, ch.mnz],
+                    [ch.mnx, ch.mxy, ch.mnz], [ch.mxx, ch.mxy, ch.mnz],
+                    [ch.mnx, ch.mny, ch.mxz], [ch.mxx, ch.mny, ch.mxz],
+                    [ch.mnx, ch.mxy, ch.mxz], [ch.mxx, ch.mxy, ch.mxz]
+                ];
+                var ax0 = Infinity, ay0 = Infinity, az0 = Infinity;
+                var ax1 = -Infinity, ay1 = -Infinity, az1 = -Infinity;
+                for (var ci = 0; ci < 8; ci++)
+                {
+                    var cv = c8[ci];
+                    var wx = m[0] * cv[0] + m[1] * cv[1] + m[2] * cv[2] + m[3];
+                    var wy = m[4] * cv[0] + m[5] * cv[1] + m[6] * cv[2] + m[7];
+                    var wz = m[8] * cv[0] + m[9] * cv[1] + m[10] * cv[2] + m[11];
+                    if (wx < ax0) { ax0 = wx; } if (wx > ax1) { ax1 = wx; }
+                    if (wy < ay0) { ay0 = wy; } if (wy > ay1) { ay1 = wy; }
+                    if (wz < az0) { az0 = wz; } if (wz > az1) { az1 = wz; }
+                }
+                ch.mnx = ax0; ch.mxx = ax1;
+                ch.mny = ay0; ch.mxy = ay1;
+                ch.mnz = az0; ch.mxz = az1;
+            }
+        }
 
         /* GPU 缓冲依赖顶点，必须重建。
          *
@@ -3001,13 +3049,14 @@
         return out;
     }
 
+    /* rayPickLayer 用世界射线对 CPU data.positions 求交，返回的已是数据空间坐标。
+     * 预览态下 GPU 画的是 previewMat×数据，但 CPU 顶点没动 —— 交点仍是求解要用的
+     * 数据空间点（应用矩阵后 previewMat×P ≈ 参考点）。此处绝不能再乘 inv(previewMat)，
+     * 否则选点被污染、连续求解会逐级跑偏（ICP 后做 N-N 越来越歪的根因）。
+     * 标签显示用 pickDisplayPos 正变换到视觉位置，两件事分开。 */
     function pickToData(p, lay)
     {
-        if (!lay || !lay.previewMat) { return p.slice(); }
-
-        var out = new Float64Array(3);
-        xformPoints([p[0], p[1], p[2]], mat4Invert(lay.previewMat), out);
-        return [out[0], out[1], out[2]];
+        return p.slice();
     }
 
     /* 该点所属图层是否还在、是否可见 */
@@ -3130,7 +3179,9 @@
      *
      * 之前两个下拉填充完全相同的候选列表，默认值又都落在第一项，
      * 于是只导入一个图层时两边指向同一层。 */
-    function fillLayerSelects(refSel, dstSel)
+    /* forced 可选：{ref, dst} 强制指定选中值（参考/目标互换时用），
+     * 绕过"各自排除对方当前值"造成的 option 缺失。 */
+    function fillLayerSelects(refSel, dstSel, forced)
     {
         if (!refSel || !dstSel || !app) { return; }
 
@@ -3146,8 +3197,8 @@
             cands.push(L);
         }
 
-        var prevRef = refSel.value;
-        var prevDst = dstSel.value;
+        var prevRef = (forced && forced.ref) || refSel.value;
+        var prevDst = (forced && forced.dst) || dstSel.value;
 
         /* 少于两个图层时无法配对：两个下拉都清空，
          * 配合 CSS 的 select:empty 隐藏箭头，视觉上就是空白。 */
@@ -3229,8 +3280,8 @@
         if (dstSel.value !== dstId && dstId) { dstSel.value = dstId; }
     }
 
-    function regFillSelects() { fillLayerSelects($('reg-ref'), $('reg-dst')); }
-    function icpFillSelects() { fillLayerSelects($('icp-ref'), $('icp-dst')); }
+    function regFillSelects(forced) { fillLayerSelects($('reg-ref'), $('reg-dst'), forced); }
+    function icpFillSelects(forced) { fillLayerSelects($('icp-ref'), $('icp-dst'), forced); }
 
     /* 参考 / 目标 是一对互斥下拉：各自排除对方的当前值。
      *
@@ -3241,8 +3292,8 @@
     function bindPairSelects()
     {
         var pairs = [
-            { ref: 'reg-ref', dst: 'reg-dst', fill: regFillSelects },
-            { ref: 'icp-ref', dst: 'icp-dst', fill: icpFillSelects }
+            { ref: 'reg-ref', dst: 'reg-dst', swap: 'reg-swap', fill: regFillSelects },
+            { ref: 'icp-ref', dst: 'icp-dst', swap: 'icp-swap', fill: icpFillSelects }
         ];
 
         for (var i = 0; i < pairs.length; i++)
@@ -3262,8 +3313,22 @@
                     refreshXformTargetLabel();
                 }
 
-                r.addEventListener('change', onChange);
-                d.addEventListener('change', onChange);
+                r.addEventListener('change', function () { onChange(); });
+                d.addEventListener('change', function () { onChange(); });
+
+                var sw = p.swap ? $(p.swap) : null;
+                if (sw)
+                {
+                    sw.addEventListener('click', function ()
+                    {
+                        var rv = r.value, dv = d.value;
+                        if (rv === dv || !rv || !dv) { return; }
+                        /* 不能用 r.value=dv：两个下拉互相排除了对方的 option，
+                         * 直接赋值会落空。用 forced 重填，让交换后的值进入各自的候选。 */
+                        p.fill({ ref: dv, dst: rv });
+                        refreshXformTargetLabel();
+                    });
+                }
             })(pairs[i]);
         }
     }
@@ -3842,6 +3907,15 @@
     {
         if (!app) { return; }
 
+        /* 已有待应用预览时禁止继续选点：画面上的点是 previewMat 变换后的位置，
+         * 而 rayPick 对未变换的 CPU 顶点求交，两者不同坐标系，继续选点必歪。
+         * 让用户先「应用」或「丢弃」再重新进入选点。 */
+        if (peekXformMat() && !isIdentityMat(peekXformMat()))
+        {
+            setInfo('已有待应用矩阵：请先点「应用」或「丢弃」，再继续 N-N 选点', false, 'warn');
+            return;
+        }
+
         var refId = parseInt($('reg-ref').value, 10);
         var dstId = parseInt($('reg-dst').value, 10);
         var refLay = findLayerById(refId);
@@ -3962,6 +4036,9 @@
 
     function regSolve()
     {
+        /* 位姿可能在选点后变化（如刚应用了另一个矩阵），先把老点同步到当前位姿，
+         * 避免用滞后一帧的点求解。 */
+        if (syncPickPts) { syncPickPts(); }
         var pairs = regBuildPairs();
 
         if (pairs.length < 3)
@@ -4058,10 +4135,10 @@
      * 把 ICP 迭代搬到 Web Worker：主线程只收进度、写一个预览 uniform，
      * 配准期间保持 60fps 可拖视角。
      *
-     * 此前 ICP 单轮 ~215ms、收尾轮再 20 轮，全在主线程就是一串 200ms 级冻结
+     * 此前 ICP 单轮 ~215ms 全在主线程就是一串 200ms 级冻结
      * （实测最大帧间隔 933ms）。搬过去之后这些计算不再占主线程。
      *
-     * 详见 js/worker_icp.js。Worker 不可用（老浏览器 / 创建失败）时自动退回
+     * 详见 js/worker_align.js。Worker 不可用（老浏览器 / 创建失败）时自动退回
      * 原来的 tick 主线程推进 —— 两条路径的收敛判据与烘焙逻辑完全一致。
      */
     var icpWorkerInst = null;
@@ -4111,7 +4188,7 @@
         try
         {
             var v = scriptVersionTag();
-            icpWorkerInst = new global.Worker('js/worker_icp.js' + (v ? ('?v=' + v) : ''));
+            icpWorkerInst = new global.Worker('js/worker_align.js' + (v ? ('?v=' + v) : ''));
 
             /* 脚本加载失败 / Worker 内未捕获异常。
              * 没有这一层，importScripts 被 MIME 拒绝时是「静默失效」：
@@ -4287,21 +4364,50 @@
          * 于是重复点击「运行 ICP」得到零增量。 */
         var invPose = mat4Invert(srcPose);
         var mPos = xformPosCopy(moving.pos, invPose);
+        /* 保留 icpSample 透传的法向（点云自带法向时非 null）；
+         * 刚体旋转后的点复位到原始位姿，法向也要用同一逆变换转回去。 */
+        var mNrm0 = moving.nrm ? xformDirCopy(moving.nrm, invPose) : null;
         moving = {
             kind: moving.kind, pos: mPos,
             positions: mPos,                  // Worker 的 normalsOf 用这份算面法向
             remap: moving.remap || null,
             vertCount: moving.vertCount || null,
-            nrm: null, count: moving.count
+            nrm: mNrm0, count: moving.count
         };
         var fPos = new Float32Array(fixed.pos);
+        var fNrm0 = fixed.nrm ? xformDirCopy(fixed.nrm, mat4Invert(refLay.xformMat || IDENT_POSE)) : null;
         fixed = {
             kind: fixed.kind, pos: fPos,
             positions: fPos,
             remap: fixed.remap || null,
             vertCount: fixed.vertCount || null,
-            nrm: null, count: fixed.count
+            nrm: fNrm0, count: fixed.count
         };
+
+        /* symICP 的前提：两侧都有法向。数据形态无关——
+         *   mesh：默认值有，按「面法向加权」逐点算（与 three.js 同口径）；
+         *   points：沿用数据自带法向（icpSample 已透传并由上面逆变换复位），没有就 null。
+         * 四种组合（mesh-mesh / mesh-points / points-mesh / points-points）统一按此规则，
+         * 任一侧缺法向时求解器自动退化为点到点。 */
+        if (global.MV.icp && global.MV.icp.computeVertexNormals)
+        {
+            try
+            {
+                if (moving.kind === 'mesh')
+                {
+                    var _mn = global.MV.icp.computeVertexNormals(
+                        moving.pos, moving.remap || null, moving.vertCount || null);
+                    if (_mn && _mn.normals) { moving.nrm = _mn.normals; }
+                }
+                if (fixed.kind === 'mesh')
+                {
+                    var _fn = global.MV.icp.computeVertexNormals(
+                        fixed.pos, fixed.remap || null, fixed.vertCount || null);
+                    if (_fn && _fn.normals) { fixed.nrm = _fn.normals; }
+                }
+            }
+            catch (eNrm) { /* 法向计算失败则保留透传值或 null，走点到点兜底 */ }
+        }
 
         var maxIter = clampInt($('icp-iter').value, 1, 200, 50);
         /* 把实际生效值写回输入框：输入超出范围时被钳制，界面显示的就是真实值 */
@@ -4325,8 +4431,8 @@
          * 12 万在 24.7 万点的数据上取到 49%（约 10.9 万参与点），
          * 单轮实测 317ms —— 这一块是配准期间最大的帧冻结来源
          * （实测最大帧间隔 833ms、p95 300ms）。
-         * 收紧到 7.4 万（约 30%）后单轮降到 ~215ms，而精度由后面两轮
-         * 收紧容差补回来（历史数据：参与点 1774 → 1750 时最终 RMS 仅差 0.01）。
+         * 收紧到 7.4 万（约 30%）后单轮降到 ~215ms，精度实测基本不变
+         * （历史数据：参与点 1774 → 1750 时最终 RMS 仅差 0.01）。
          *
          * 用户显式设过比例（<100%）时不会被这里覆盖，见下面的 if 条件。 */
         var AUTO_SAMPLE_MAX = 74000;
@@ -4367,13 +4473,13 @@
         var coarseNote = '';
         var previewTagRef = null;   // 上一个已预览的粗配准矩阵，避免重复重传
         var coarsePreviewTick = 0;  // 粗配准预览节流计数
-        var coarseSolver = null;
+        var coarseSolver = null;    // file:// 无 Worker 时的主线程 4PCS 求解器
         var cands = [];
         var verifyIdx = 0;             // 验证进度（逐帧推进，见 stepVerify）
         var verifyPlan = null;         // 粗筛后的验证名单
         var curProbe = null;
         var verifier = null;           // 候选验证器（在子集上跑）
-        var fullKd = null;             // 全量固定点集的 KD 树（主 ICP / 收尾轮共用）
+        var fullKd = null;             // 全量固定点集的 KD 树（主 ICP 使用）
         var lastPreviewAt = 0;         // 上次预览上传的时刻（按时间节流）
         var bestInit = null;
         var bestRms = Infinity;
@@ -4385,53 +4491,28 @@
 
         var coarseOn = $('icp-coarse') ? $('icp-coarse').checked : true;
 
+        /* 4PCS 在 worker_align.js 里跑（无需初始位姿 / 无约束）。
+         * 主线程只保存参数，coarseInit 时随点集一起发给 Worker；
+         * 每一步 coarseStep 由 tick 驱动，矩阵回传后写 GPU 预览。 */
+        var coarseOpts = null;
         if (coarseOn && global.MV.super4pcs && global.MV.super4pcs.createRegistration)
         {
-            /* 自动粗配准：algo.js 中 Super4PCS 段的官方忠实实现。
-             * 参数与 Match4PCSOptions 对应：
-             *   sample_size         每侧均匀采样点数
-             *   delta               LCP 命中的距离容差（绝对单位）
-             *   overlap_estimation  推导 RANSAC 迭代数
-             *   terminate_threshold LCP 达到即停
-             *   maxTrials           迭代数上限（官方算到 2 万量级，浏览器里截断）
-             */
-            coarseSolver = global.MV.super4pcs.createRegistration(
-                { positions: moving.pos, count: moving.count },
-                { positions: fixed.pos, count: fixed.count },
-                {
-                    /* sample_size 与 delta 必须匹配，这是 4PCS 的硬约束：
-                     *   ExtractPairs 的球壳半宽是 2·delta，
-                     *   而抽样点在归一化空间里的间距约为 1/√sample_size，
-                     *   球壳比间距还薄时就一个点对都找不到（算法空转）。
-                     *
-                     * delta 曾写死 3.0mm，对 300mm 的工件合适，但换成 844mm 的
-                     * 数据集就完全失效（LCP 卡在基准 2.6%，等于没搜）。实测：
-                     *   delta=3  → LCP 2.6%（失败）
-                     *   delta=10 → LCP 12.4%（失败）
-                     *   delta=25 → LCP 63.7% / 80.0%（成功）
-                     * 所以按数据尺度给：diag × 0.02（844mm → 16.9mm）。 */
-                    sample_size: 2500,
-                    delta: Math.max(1, Math.min(60, (diag > 0 ? diag * 0.02 : 3.0))),
-                    overlap_estimation: 0.2,
-                    /* 0.85 在薄板 / 近似对称件上会被"翻 180° 也贴合 85%"骗停，
-                     * 抬到 0.98；真正的裁决交给候选残差验证。 */
-                    terminate_threshold: 0.98,
-                    /* 一轮尝试约 130~200ms（12k 点对 + 40 次 LCP 打分），30 轮 ≈ 4~7s，
-                     * 8s 是硬上限。实测 137°/180° 两个用例 2~8 轮就命中，
-                     * 真实一对扫描件跑满 30 轮也能拿到 LCP 0.77（基准 0.26）。 */
-                    max_time_seconds: 8,
-                    maxTrials: 30,
-                    /* 点对上限：每轮点对同时进索引和查询，翻倍开销。
-                     *
-                     * 1.2 万 → 8 千：2500 点的采样云两两组合约 300 万对，
-                     * 取前 1.2 万与 8 千的**覆盖度差异很小**（都是均匀抽样后的子集），
-                     * 但单轮耗时从 ~300ms 降到 ~200ms —— 这是配准期间帧冻结的第二大来源。
-                     * 实测 137° 用例仍在 2 轮内命中。 */
-                    pairLimit: 8000,
-                    maxCongruent: 300,
-                    batch: 1,
-                    preview: true
-                });
+            /* sample_size 与 delta 必须匹配：球壳半宽 2·delta 要大于采样间距 1/√sample_size，
+             * 否则点对为空、算法空转。delta 按数据尺度 diag×0.02（实测 844mm→16.9mm 成功）。 */
+            coarseOpts = {
+                sample_size: 2500,
+                delta: Math.max(1, Math.min(60, (diag > 0 ? diag * 0.02 : 3.0))),
+                overlap_estimation: 0.2,
+                /* 0.85 会被 180° 翻转载具骗停；0.98 更严格。 */
+                terminate_threshold: 0.98,
+                max_time_seconds: 8,
+                /* 预算：进入 Worker 后不再阻塞渲染，仍保持适中值避免无谓耗时。 */
+                maxTrials: 60,
+                pairLimit: 10000,
+                maxCongruent: 400,
+                batch: 1,
+                preview: true
+            };
             phase = 'coarse';
         }
 
@@ -4575,11 +4656,9 @@
         /* 另起一个 performance 时钟：粗配准与迭代分开计时，dt 仍用原来的 Date.now */
         var tRun = nowMs();
         var tCoarseEnd = 0;
-        var refineCount = 0;           // 已做过的「收紧容差」收尾轮数（最多 2 轮）
-
         /* 未勾粗配准：进函数时 phase 就是 'icp'，这里直接启动求解。
          *
-         * ⚠ 必须放在 icpRunning / icpRunSeq / refineCount 都就位之后。
+         * ⚠ 必须放在 icpRunning / icpRunSeq 都就位之后。
          * 曾经放在上面（第一次 `if (phase === 'icp')` 处），后果是：
          *   1) icpRunning 还是 false —— 按钮不变「终止」，Esc 也停不掉，
          *      用户再点一次就是第二次启动；
@@ -4591,8 +4670,35 @@
         {
             if (bootMainIcp()) { return; }
         }
+        else if (phase === 'coarse')
+        {
+            /* 4PCS 无需初始位姿、无约束。优先走 worker_align.js；
+             * file:// 无 Worker 时在主线程分步跑（每帧一步 + 进度条，仍不整体阻塞）。 */
+            if (getIcpWorker())
+            {
+                startWorkerCoarse();
+            }
+            else
+            {
+                coarseSolver = global.MV.super4pcs.createRegistration(
+                    { positions: moving.pos, count: moving.count },
+                    { positions: fixed.pos, count: fixed.count },
+                    coarseOpts);
+                if (!coarseSolver)
+                {
+                    phase = 'icp';
+                    coarseOpts = null;
+                    setInfo('4PCS 求解器创建失败，跳过粗配准', false, 'warn');
+                    if (bootMainIcp()) { return; }
+                }
+                else
+                {
+                    setInfo('file:// 下 4PCS 在主线程分步运行（建议用 serve.bat 启用 Worker）', false, 'warn');
+                }
+            }
+        }
 
-        /* ICP 迭代走 Worker（粗配准 / 候选验证仍在主线程，它们单块已压到 75~200ms）。
+        /* ICP 迭代走 Worker（粗配准已移入 worker_align.js，候选验证仍在主线程）。
          * 注意：这里**不能**提前判断 —— 勾了 4PCS 时 phase 先是 'coarse'，
          * 真正的入口在 stepVerify 结尾（phase 变 'icp' 处），由 bootMainIcp() 统一决定。 */
 
@@ -4605,49 +4711,38 @@
          * 仍留在 icpRun 内部是为了共用闭包状态（solver / cands / phase…），
          * 改成对象字段反而要传一堆参数，更容易出错。 */
 
-        var coarseQuickDone = false;   // 快速通道只判一次
-        var coarseSkipped = false;     // 是否因"原始位姿已对齐"跳过了搜索
-        var coarseBaseLcp = 0;         // 快速通道用到的基准 LCP（step() 不返回它）
-
-        function stepCoarse()
+        /* 4PCS 在 worker_align.js 里按帧步进：每条 coarseStep 消息回传进度/矩阵，
+         * done 时回传 result。主线程只做预览，不跑任何搜索计算。 */
+        function startWorkerCoarse()
         {
-            /* 快速通道：原始位姿（质心对齐）的覆盖率已经很高时，不必再全局搜索。
-             *
-             * 典型场景就是用户自己先做 N-N / 矩阵对齐，然后忘了取消「自动粗配准」：
-             * 搜索要空跑几秒才有结论，而结论注定是"没有候选能超过基准"。
-             * 判据用 0.9：源点九成都落在目标表面 delta 内，已经是"对齐"状态；
-             * 万一这是薄板翻面的伪高 LCP，后面的主轴假设 + 残差验证仍然会跑，
-             * 所以跳过搜索不会把好位姿换成坏位姿（实测 RMS 0.0477 → 0.0478）。 */
-            if (!coarseQuickDone)
+            if (info) { info.textContent = '准备粗配准（4PCS）…'; }
+            icpWorkerCall({
+                cmd: 'coarseInit',
+                moving: { pos: moving.pos, count: moving.count },
+                fixed: { pos: fixed.pos, count: fixed.count },
+                opts: coarseOpts
+            }).then(function ()
             {
-                coarseQuickDone = true;
+                if (myRun !== icpRunSeq) { return; }
+                requestCoarseStep();
+            }).catch(workerFail);
+        }
 
-                var pre = null;
-                try { pre = coarseSolver.result(); } catch (e0) { pre = null; }
+        function requestCoarseStep()
+        {
+            if (myRun !== icpRunSeq) { return; }
+            icpWorkerCall({ cmd: 'coarseStep' }).then(onCoarseStep).catch(workerFail);
+        }
 
-                if (pre && pre.baselineLcp >= 0.9)
-                {
-                    coarseSolver.cancel();
-                    coarseSkipped = true;
-                    coarseBaseLcp = pre.baselineLcp;
-                }
-            }
+        function onCoarseStep(m)
+        {
+            if (myRun !== icpRunSeq) { return; }
 
-            var cs = coarseSolver.step();
-
-            /* 预览降频到每 4 步一次。
-             *
-             * 预览本身很便宜（`setGpuPreview` 只写一个 uniform，数据不动），
-             * 但它会触发一次整帧重绘 —— 这一帧要画 80 多万个点，才是真正的开销。
-             * 每步都重绘会把渲染线程压满，连拖视角都发涩；每 4 步一次
-             * 视觉上仍是连续变化，且不拖慢计算。 */
-            if (target && cs.matrix)
+            /* 预览降频：每 4 步一次，避免整帧重绘压满渲染线程 */
+            if (target && m.matrix)
             {
-                /* 每步返回的 matrix 都是新数组，用 !== 比引用恒为真，
-                 * 节流等于没生效。改成按数值比。 */
+                var csNow = toDelta(m.matrix);
                 var sameAsLast = false;
-                var csNow = toDelta(cs.matrix);
-
                 if (previewTagRef)
                 {
                     var mdiff = 0;
@@ -4657,7 +4752,52 @@
                     }
                     sameAsLast = (mdiff < 1e-9);
                 }
+                if ((m.done || (coarsePreviewTick % 4) === 0) && !sameAsLast)
+                {
+                    previewTagRef = new Float64Array(csNow);
+                    setGpuPreview(target, csNow);
+                }
+                coarsePreviewTick++;
+            }
 
+            if (info)
+            {
+                info.textContent = '粗配准（4PCS）' + Math.round(m.progress * 100) + '%' +
+                    '   尝试 ' + m.trial + '/' + m.trials +
+                    '   LCP ' + (m.lcp * 100).toFixed(0) + '%';
+            }
+
+            if (m.done)
+            {
+                finishCoarse(m.result);
+                return;
+            }
+            /* 用 rAF 发下一步，保证每步之间渲染一帧可见 */
+            nextIteration(tick, 0);
+            requestCoarseStep();
+        }
+
+        /* file:// 无 Worker 时的主线程分步驱动（有 Worker 时 coarse 阶段由消息链驱动，
+         * tick 不会走到这里）。每帧一步 + 预览节流，不整体阻塞。 */
+        function stepCoarse()
+        {
+            if (!coarseSolver) { nextIteration(tick, 0); return; }
+
+            var cs = coarseSolver.step();
+
+            if (target && cs.matrix)
+            {
+                var csNow = toDelta(cs.matrix);
+                var sameAsLast = false;
+                if (previewTagRef)
+                {
+                    var mdiff2 = 0;
+                    for (var mi3 = 0; mi3 < 16; mi3++)
+                    {
+                        mdiff2 += Math.abs(csNow[mi3] - previewTagRef[mi3]);
+                    }
+                    sameAsLast = (mdiff2 < 1e-9);
+                }
                 if ((cs.done || (coarsePreviewTick % 4) === 0) && !sameAsLast)
                 {
                     previewTagRef = new Float64Array(csNow);
@@ -4668,18 +4808,20 @@
 
             if (info)
             {
-                info.textContent = coarseSkipped
-                    ? ('原始位姿已对齐（LCP ' + Math.round(coarseBaseLcp * 100) +
-                       '%），跳过全局搜索，准备验证候选…')
-                    : ('粗配准 ' + Math.round(cs.progress * 100) + '%' +
-                       '   尝试 ' + cs.trial + '/' + cs.trials +
-                       '   LCP ' + (cs.lcp * 100).toFixed(0) + '%');
+                info.textContent = '粗配准（4PCS，主线程）' + Math.round(cs.progress * 100) + '%' +
+                    '   尝试 ' + cs.trial + '/' + cs.trials +
+                    '   LCP ' + (cs.lcp * 100).toFixed(0) + '%';
             }
 
             if (!cs.done) { nextIteration(tick, 0); return; }
 
             var cr = coarseSolver.result();
             coarseSolver = null;
+            finishCoarse(cr);
+        }
+
+        function finishCoarse(cr)
+        {
             coarseMat = (cr && cr.matrix) ? cr.matrix : null;
             phase = 'verify';
 
@@ -4701,72 +4843,21 @@
             }
             else
             {
-                /* 候选集里同时放「搜索解」和「质心对齐」。
-                 *
-                 * 只信搜索解会踩对称件的坑：实测 844mm 的数据集里，
-                 * 4PCS 找过一个 LCP 48% 的候选，ICP 从它出发 RMS 反而是 21.4mm，
-                 * 而从质心对齐出发只有 3.4mm。谁更好不能看 LCP，要看 ICP 残差 ——
-                 * 所以两个都当候选，交给下面 verify 阶段用残差择优。 */
+                /* 唯一候选：4PCS 搜索解。无初始位姿、无约束、无 PCA 假设、无质心对齐兜底。 */
                 cands = [];
-
                 if (!cr.usedBaseline && cr.matrix)
                 {
-                    cands.push({ mat: cr.matrix, score: cr.lcp, src: '搜索解' });
-                }
-
-                if (cr.baselineMatrix)
-                {
-                    var dup = false;
-                    if (cands.length)
-                    {
-                        var dd2 = 0;
-                        for (var dk = 0; dk < 16; dk++)
-                        {
-                            dd2 += Math.abs(cands[0].mat[dk] - cr.baselineMatrix[dk]);
-                        }
-                        dup = (dd2 < 1e-9);
-                    }
-                    if (!dup) { cands.push({ mat: cr.baselineMatrix, score: cr.lcp, src: '质心对齐' }); }
-                }
-
-                /* 第三类候选：主轴（PCA）多假设。
-                 *
-                 * 4PCS 终究是"随机采样共面 4 点 + 离散匹配"的搜索，姿态差越大
-                 * 越吃粒度；而同一零件的两次测量、CAD 与实测，主轴是稳定可用的。
-                 * 两侧主轴对齐只有 24 种真旋转，一次 PCA 全给出来，
-                 * 交给廉价粗筛 + 残差验证挑选即可。 */
-                if (global.MV.icp.pcaCandidates)
-                {
-                    var pca = null;
-                    try
-                    {
-                        pca = global.MV.icp.pcaCandidates(moving.pos, moving.count,
-                                                          fixed.pos, fixed.count, {});
-                    }
-                    catch (e1) { pca = null; }
-
-                    if (pca && pca.mats)
-                    {
-                        for (var pi2 = 0; pi2 < pca.mats.length; pi2++)
-                        {
-                            cands.push({ mat: pca.mats[pi2], score: 0, src: '主轴假设', pca: true });
-                        }
-                    }
+                    cands.push({ mat: cr.matrix, score: cr.lcp, src: '4PCS 搜索解' });
                 }
 
                 if (cands.length)
                 {
-                    coarseNote = coarseSkipped
-                        ? ('\n原始位姿已对齐（LCP ' + pct(cr.baselineLcp) +
-                           '），跳过全局搜索 · ' + cands.length + ' 个候选待验证')
-                        : ('\n粗配准 ' + pct(cr.lcp) +
-                           '（基准 ' + pct(cr.baselineLcp) + '，' +
-                           cr.trial + '/' + cr.trials + ' 次尝试）· ' +
-                           cands.length + ' 个候选待验证');
+                    coarseNote = '\n粗配准 LCP ' + pct(cr.lcp) +
+                        '（' + cr.trial + '/' + cr.trials + ' 次尝试）· 1 个候选待验证';
                 }
                 else
                 {
-                    coarseNote = '\n粗配准未得到可用位姿';
+                    coarseNote = '\n4PCS 未得到解，保持原始位姿';
                     bestInit = null;
                 }
             }
@@ -4851,38 +4942,10 @@
                     verifyPlan.sort(function (a, b) { return (b.hit || 0) - (a.hit || 0); });
                     verifyPlan = verifyPlan.slice(0, 5);
 
-                    /* 「质心对齐」永远留在验证名单里：数据本来就大致对齐
-                     * （或用户刚用 N-N 对过）时它才是最稳的初值；
-                     * 二十几个主轴假设里总有几个在"薄板翻面"上命中率虚高，
-                     * 只按命中率截前 5 有可能把基准挤出去，反而把好位姿换掉。 */
-                    var keptBase = false;
-                    for (var ki2 = 0; ki2 < verifyPlan.length; ki2++)
-                    {
-                        if (verifyPlan[ki2].src === '质心对齐') { keptBase = true; break; }
-                    }
-
-                    if (!keptBase)
-                    {
-                        for (var kb2 = 0; kb2 < cands.length; kb2++)
-                        {
-                            if (cands[kb2].src === '质心对齐')
-                            {
-                                verifyPlan[verifyPlan.length - 1] = cands[kb2];
-                                break;
-                            }
-                        }
-                    }
-
                     if (info)
                     {
-                        /* 快速通道只在 stepCoarse 里设一次文案，紧接着就被这一句覆盖 ——
-                         * 用户看不到"为什么没搜索"。这里带上那句话。 */
-                        info.textContent = (coarseSkipped
-                                ? ('原始位姿已对齐（LCP ' + Math.round(coarseBaseLcp * 100) +
-                                   '%），跳过全局搜索 · ')
-                                : '') +
-                            '粗筛 ' + cands.length + ' 个候选，取命中率前 ' +
-                            verifyPlan.length + ' 个（含质心对齐）做残差验证…';
+                        info.textContent = '粗筛 ' + cands.length + ' 个候选，取命中率前 ' +
+                            verifyPlan.length + ' 个做残差验证…';
                     }
                 }
             }
@@ -4923,14 +4986,7 @@
             {
                 coarseNote = '\n粗配准 ' + cands.length + ' 个候选，采用「' +
                              (bestSrc || '搜索解') + '」，残差 ' +
-                             bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿' +
-                             /* 这里原本会把早前那句"跳过全局搜索"整段覆盖掉，
-                              * 于是已对齐的场景看起来像"搜索跑了但没找到" */
-                             (coarseSkipped ? '（原始位姿已对齐，全局搜索已跳过）' : '');
-            }
-            else if (coarseSkipped)
-            {
-                coarseNote = '\n原始位姿已对齐，全局搜索已跳过；候选残差都不优于原状，保持不动';
+                             bestRms.toFixed(2) + 'mm，已作为 ICP 初始位姿';
             }
 
             if (info)
@@ -5011,47 +5067,6 @@
             return;
         }
 
-        /* 收尾轮：第一轮 ICP 用的是「容纳粗配准残差」的大容差，
-         * 参与点够多但 RMS 仍偏大时，收紧容差再跑一轮能显著降误差
-         * （实测 844mm 的数据集：3.39 → 1.50 → 0.56 mm）。
-         * 只在结果非发散、参与点足够时才做，避免把噪声当信号。 */
-        if (refineCount < 2 && isFinite(res.rms) && res.used >= 500 &&
-            diag > 0 && res.rms > diag * 0.001)
-        {
-            refineCount++;
-
-            var tightDist = Math.max(1, diag * (refineCount === 1 ? 0.008 : 0.003));
-
-            var rs = null;
-            try
-            {
-                rs = global.MV.icp.createSolver(moving.pos, moving.nrm, fixed.pos, fixed.nrm,
-                    {
-                        maxIter: 20,
-                        sampleRatio: sampleRatio,
-                        normalThresh: thresh,
-                        tol: tol,
-                        maxDist: tightDist,
-                        /* 收尾轮就是要"只保留贴合的对应点"，不能再放大容差 */
-                        trimBoost: 0,
-                        initMat: res.mat,
-                        kd: fullKd
-                    });
-            }
-            catch (e4) { rs = null; }
-
-            if (rs)
-            {
-                solver = rs;
-                if (info)
-                {
-                    info.textContent = '容差收紧到 ' + tightDist.toFixed(1) + ' mm，收尾迭代…';
-                }
-                nextIteration(tick);
-                return;
-            }
-        }
-
         /* 收敛后**直接烘焙进数据**，不只挂预览 / 矩阵框。
          *
          * 挂预览会留下三个坑：`data.bbox` 还是旧的（fitAll / 剔除 / 统计全不对）；
@@ -5100,7 +5115,7 @@
          * 看起来就像"页面上显示的和算法内部不是同一个矩阵"。 */
         if (baked && app.selectLayer) { app.selectLayer(dstLay.id); }
 
-        var txt = '迭代 ' + res.iters + ' 次' + (refineCount ? '（含 ' + refineCount + ' 轮收紧容差）' : '') +
+        var txt = '迭代 ' + res.iters + ' 次' +
                   '，RMS = ' + res.rms.toFixed(4) +
                   '\n参与点 ' + res.used + '，' +
                   (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
@@ -5225,38 +5240,6 @@
                 return;
             }
 
-            /* 收尾轮：收紧容差再跑一轮，仍然交给 Worker */
-            if (refineCount < 2 && isFinite(res.rms) && res.used >= 500 &&
-                diag > 0 && res.rms > diag * 0.001)
-            {
-                refineCount++;
-                var tightDist = Math.max(1, diag * (refineCount === 1 ? 0.008 : 0.003));
-
-                if (info)
-                {
-                    info.textContent = '容差收紧到 ' + tightDist.toFixed(1) + ' mm，收尾迭代…';
-                }
-
-                return icpWorkerCall({
-                    cmd: 'solve',
-                    moving: { pos: moving.pos, nrm: moving.nrm },
-                    opts: {
-                        maxIter: 20,
-                        sampleRatio: sampleRatio,
-                        normalThresh: thresh,
-                        tol: tol,
-                        maxDist: tightDist,
-                        trimBoost: 0,
-                        initMat: res.mat
-                    }
-                }, onWorkerStep)
-                .then(function (r2)
-                {
-                    if (myRun !== icpRunSeq) { return null; }
-                    return afterWorkerSolve(r2);
-                });
-            }
-
             /* 收敛：与同步路径完全相同的烘焙逻辑 */
             /* 同主线程：绝对位姿 → 增量，再判是否几乎没动 */
             var deltaMat = res.mat ? mat4Mul(res.mat, mat4Invert(srcPose)) : null;
@@ -5288,7 +5271,6 @@
             if (baked && app.selectLayer) { app.selectLayer(dstLay.id); }
 
             var txt = '迭代 ' + res.iters + ' 次' +
-                      (refineCount ? '（含 ' + refineCount + ' 轮收紧容差）' : '') +
                       '，RMS = ' + res.rms.toFixed(4) +
                       '\n参与点 ' + res.used + '，' +
                       (res.hasNormals ? '法向已启用（对称目标）' : '无法向，退化为点到点') +
@@ -5596,6 +5578,52 @@
     {
         $('modal').classList.add('hidden');
         confirmCb = null;
+    }
+
+    /* ---------------- 点云法向计算参数 ---------------- */
+    var normalsTarget = null;
+    var normalsOkCb = null;
+
+    function showNormalsDialog(layer, onOk)
+    {
+        normalsTarget = layer;
+        normalsOkCb = onOk || null;
+        var pts = layer && layer.data ? (layer.data.count || 0) : 0;
+        var hasNrm = !!(layer && layer.data && layer.data.normals);
+        var info = $('norm-info');
+        if (info)
+        {
+            info.textContent = (hasNrm ? '已有法向，重新计算将覆盖。' : '') +
+                '基于 k 近邻协方差的最小特征向量；' + formatCount(pts) + ' 点。';
+        }
+        /* 每次打开都回到默认参数：不定向、k=16、半径 2.5× */
+        $('norm-k').value = '16';
+        $('norm-r').value = '2.5';
+        var none = document.querySelector('input[name="norm-orient"][value="none"]');
+        if (none) { none.checked = true; }
+        $('norm-k-val').textContent = '16';
+        $('norm-r-val').textContent = '2.5×';
+
+        /* 遮罩与弹窗限制在三维视口（#view-area）内居中，而不是整个窗口 ——
+         * 侧栏很宽时整窗居中会让弹窗偏到侧栏上方，与正在编辑的模型脱节。 */
+        var dlg = $('normdlg');
+        var area = document.getElementById('view-area');
+        if (dlg && area && area.getBoundingClientRect)
+        {
+            var r = area.getBoundingClientRect();
+            dlg.style.left = r.left + 'px';
+            dlg.style.top = r.top + 'px';
+            dlg.style.width = r.width + 'px';
+            dlg.style.height = r.height + 'px';
+        }
+        dlg.classList.remove('hidden');
+    }
+
+    function hideNormalsDialog()
+    {
+        $('normdlg').classList.add('hidden');
+        normalsTarget = null;
+        normalsOkCb = null;
     }
 
     /* ---------------- 点云列含义确认 ---------------- */
@@ -6739,6 +6767,93 @@
                 hideConfirm();
             }
         });
+
+        /* 点云法向参数对话框 */
+        function syncNormSlider()
+        {
+            $('norm-k-val').textContent = $('norm-k').value;
+            $('norm-r-val').textContent = $('norm-r').value + '×';
+        }
+        syncNormSlider();
+        $('norm-k').addEventListener('input', syncNormSlider);
+        $('norm-r').addEventListener('input', syncNormSlider);
+        $('norm-cancel').addEventListener('click', hideNormalsDialog);
+        $('norm-close').addEventListener('click', hideNormalsDialog);
+        $('normdlg').addEventListener('click', function (ev)
+        {
+            if (ev.target === this) { hideNormalsDialog(); }
+        });
+        $('norm-ok').addEventListener('click', function ()
+        {
+            var layer = normalsTarget;
+            var cb = normalsOkCb;
+            var k = parseInt($('norm-k').value, 10) || 16;
+            var r = parseFloat($('norm-r').value) || 2.5;
+            var orientEl = document.querySelector('input[name="norm-orient"]:checked');
+            var orient = orientEl ? orientEl.value : 'none';
+            hideNormalsDialog();
+            if (!layer || !layer.data || !MV.icp || !MV.icp.computePointNormals) { return; }
+
+            var d = layer.data;
+            var viewDir = null;
+            if (orient === 'view' && app.views && app.views.length)
+            {
+                var cam = app.views[0].camera;
+                if (cam && cam.getPosition)
+                {
+                    var eye = cam.getPosition();
+                    var bb = d.bbox;
+                    var tx = bb ? (bb.min[0] + bb.max[0]) * 0.5 : 0;
+                    var ty = bb ? (bb.min[1] + bb.max[1]) * 0.5 : 0;
+                    var tz = bb ? (bb.min[2] + bb.max[2]) * 0.5 : 0;
+                    var vx = eye[0] - tx, vy = eye[1] - ty, vz = eye[2] - tz;
+                    var vl = Math.sqrt(vx * vx + vy * vy + vz * vz);
+                    if (vl > 1e-9) { viewDir = [vx / vl, vy / vl, vz / vl]; }
+                }
+            }
+            var t0 = nowMs();
+            var computing = true;
+            setProgress(true, '计算点云法向', 0);
+            app.computePointNormalsAsync(d.positions, d.count,
+                { k: k, radius: r, viewDir: viewDir },
+                function (frac)
+                {
+                    if (computing)
+                    {
+                        setProgress(true,
+                            '计算点云法向 · ' + Math.round(frac * 100) + '%', frac);
+                    }
+                }).then(function (nrm)
+                {
+                    computing = false;
+                    setProgress(false, '');
+                    if (!nrm)
+                    {
+                        setInfo('点云法向计算失败', false, 'fail');
+                        return;
+                    }
+                    d.normals = nrm;
+                    d.normalsStamp = String(Date.now());
+                    layer.showNormals = true;
+                    if (layer.gpu && app.renderer)
+                    {
+                        app.renderer.releaseLayer(layer);
+                        layer.gpu = null;
+                        app.renderer.uploadLayer(layer);
+                    }
+                    setInfo('点云法向已计算：' + formatCount(d.count) + ' 点 · k=' + k +
+                        ' · ' + Math.round(nowMs() - t0) + ' ms', true);
+                    if (app.markDirty) { app.markDirty(); }
+                    renderProps();
+                    renderTree();
+                    if (cb) { cb(); }
+                }).catch(function (err)
+                {
+                    computing = false;
+                    setProgress(false, '');
+                    setInfo('点云法向计算失败：' + ((err && err.message) || err), false, 'fail');
+                });
+        });
         $('col-ok').addEventListener('click', function ()
         {
             var err = validateLabels();
@@ -7075,6 +7190,42 @@
             $('p-normallen-val').textContent = Number(l.normalLen).toFixed(1);
             app.markDirty();
         });
+
+        /* 点云法向：勾选框若有法向直接切换显示，否则弹参数框；计算按钮始终弹参数框 */
+        $('p-points-normals').addEventListener('change', function ()
+        {
+            var l = app.getSelected();
+            if (!l || l.kind !== 'points') { return; }
+            if (!this.checked)
+            {
+                l.showNormals = false;
+                app.markDirty();
+                return;
+            }
+            if (l.data && l.data.normals)
+            {
+                l.showNormals = true;
+                app.markDirty();
+            }
+            else
+            {
+                this.checked = false;
+                showNormalsDialog(l);
+            }
+        });
+        $('p-points-calc-normals').addEventListener('click', function ()
+        {
+            var l = app.getSelected();
+            if (l && l.kind === 'points') { showNormalsDialog(l); }
+        });
+        $('p-points-normallen').addEventListener('input', function ()
+        {
+            var l = app.getSelected();
+            if (!l || l.kind !== 'points') { return; }
+            l.normalLen = parseFloat(this.value);
+            $('p-points-normallen-val').textContent = Number(l.normalLen).toFixed(1);
+            app.markDirty();
+        });
     }
 
     /* ---- bindViewOpts ---- */
@@ -7135,6 +7286,13 @@
         {
             app.settings.axes = this.checked;
             app.markDirty();
+        });
+
+        $('btn-normals').addEventListener('click', function ()
+        {
+            var l = app.getSelected();
+            if (l && l.kind === 'points') { showNormalsDialog(l); }
+            else { setInfo('请先选中一个点云图层', false, 'warn'); }
         });
 
         $('btn-pick').addEventListener('click', function ()
@@ -8206,6 +8364,7 @@
         solveRigid: solveRigid,
         setStats: setStats,
         showConfirm: showConfirm,
+        showNormalsDialog: showNormalsDialog,
         cancelICP: cancelICP,
         isIcpRunning: isIcpRunning,
         beginRenameSelected: beginRenameSelected,

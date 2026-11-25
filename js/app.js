@@ -183,7 +183,33 @@
             { a.setSplitRatio(a.settings.splitRatio + 0.05); } },
 
         { k: 'w', g: '显示', label: '线框', run: function (a) { toggleFlag(a, 'showWire', true); } },
-        { k: 'n', g: '显示', label: '法向', run: function (a) { toggleFlag(a, 'showNormals', true); } },
+        { k: 'n', g: '显示', label: '法向', run: function (a)
+            {
+                var l = a.getSelected && a.getSelected();
+                if (l && l.kind === 'points')
+                {
+                    /* 点云：无法向时弹参数框；已有法向时直接切换显示 */
+                    if (!l.data || !l.data.normals)
+                    {
+                        if (global.MV.ui && global.MV.ui.showNormalsDialog)
+                        {
+                            global.MV.ui.showNormalsDialog(l);
+                        }
+                    }
+                    else
+                    {
+                        l.showNormals = !l.showNormals;
+                        if (global.MV.ui)
+                        {
+                            if (global.MV.ui.renderProps) { global.MV.ui.renderProps(); }
+                            if (global.MV.ui.renderTree) { global.MV.ui.renderTree(); }
+                        }
+                        a.markDirty();
+                    }
+                    return;
+                }
+                toggleFlag(a, 'showNormals', true);
+            } },
         { k: 'v', g: '显示', label: '顶点', run: function (a) { toggleFlag(a, 'showVerts', true); } },
         { k: 'b', g: '显示', label: '边界', run: function (a) { toggleFlag(a, 'showBoundary', true); } },
         { k: 'g', g: '显示', label: '地面网格', run: function () { click('opt-grid'); } },
@@ -217,6 +243,7 @@
         var a = app();
 
         if (visible('modal')) { click('modal-cancel'); return true; }
+        if (visible('normdlg')) { click('norm-cancel'); return true; }
 
         if (global.document.querySelector('.menu:not(.hidden)')) { global.document.body.click(); return true; }
 
@@ -353,7 +380,7 @@
 
         /* 按住不放不重复触发；确认框打开时快捷键一律不响应 */
         if (e.repeat) { return; }
-        if (visible('modal')) { return; }
+        if (visible('modal') || visible('normdlg')) { return; }
         if (inEditable(e)) { return; }
 
         for (var i = 0; i < KEYS.length; i++)
@@ -1298,6 +1325,51 @@
     var preprocessWorker = null;
     var preprocessReqId = 0;
     var preprocessPending = Object.create(null);
+    var normalsPending = Object.create(null);
+    var normalsReqId = 0;
+
+    /* 点云法向计算：http 下走 worker_io.js（带进度），file:// 回退主线程同步。
+     * 返回 Promise<Float32Array|null>。 */
+    App.prototype.computePointNormalsAsync = function (positions, count, opts, onProgress)
+    {
+        var o = opts || {};
+        /* Worker 的 onProgress 通过消息回传，不能传函数（不可结构化克隆） */
+        var wOpts = { k: o.k, radius: o.radius, viewDir: o.viewDir };
+        var W = canUseWorker() ? getPreprocessWorker() : null;
+        if (!W || !global.MV.icp || !global.MV.icp.computePointNormals)
+        {
+            /* file:// 回退：分帧计算，每批让出主线程，进度条可实时刷新、界面不冻结 */
+            return new Promise(function (resolve)
+            {
+                global.MV.icp.computePointNormalsChunked(
+                    positions, count, wOpts, onProgress, function (local)
+                    {
+                        resolve(local || null);
+                    });
+            });
+        }
+        var id = ++normalsReqId;
+        return new Promise(function (resolve)
+        {
+            normalsPending[id] = { done: resolve, onProgress: onProgress };
+            try
+            {
+                /* 传副本：transfer 原始 buffer 会清空主线程 d.positions */
+                var copy = new Float32Array(positions);
+                W.postMessage({ id: id, cmd: 'pointNormals',
+                    positions: copy, count: count, opts: wOpts }, [copy.buffer]);
+            }
+            catch (e)
+            {
+                delete normalsPending[id];
+                global.MV.icp.computePointNormalsChunked(
+                    positions, count, wOpts, onProgress, function (local2)
+                    {
+                        resolve(local2 || null);
+                    });
+            }
+        });
+    };
 
     /* file:// 下 new Worker 会跨域抛错，不能只看构造器是否存在。 */
     function canUseWorker()
@@ -1328,6 +1400,20 @@
                     pp.done(m);
                     return;
                 }
+                /* 点云法向：进度 / 结果走独立 pending 表 */
+                if (m && normalsPending[m.id])
+                {
+                    var np = normalsPending[m.id];
+                    if (m.cmd === 'progress')
+                    {
+                        if (np.onProgress) { np.onProgress(m.frac, m.text); }
+                        return;
+                    }
+                    delete normalsPending[m.id];
+                    if (m.cmd === 'pointNormals' && m.normals) { np.done(m.normals); }
+                    else { np.done(null); }
+                    return;
+                }
                 var resolve = preprocessPending[m.id];
                 delete preprocessPending[m.id];
                 if (!resolve) { return; }
@@ -1347,6 +1433,18 @@
                     preprocessPending[k](null);
                 }
                 preprocessPending = Object.create(null);
+                for (var nk in normalsPending)
+                {
+                    normalsPending[nk].done(null);
+                }
+                normalsPending = Object.create(null);
+                /* parse 也要结掉，否则导入进度条永远停留（Promise 永不 settle） */
+                for (var pk in parsePending)
+                {
+                    var pp2 = parsePending[pk];
+                    if (pp2.done) { pp2.done(null); }
+                }
+                parsePending = Object.create(null);
                 try { preprocessWorker.terminate(); } catch (e) { /* ignore */ }
                 preprocessWorker = null;
             };
@@ -1452,9 +1550,6 @@
                 data.vertCount = r.vertCount;
                 data.uniqVerts = r.uniqVerts;
                 data.remap = r.remap;
-                data.preVerts = r.verts;
-                data.preIdx = r.idx;
-                data.preVcount = r.vcount;
                 data.preChunks = r.chunks;
                 data.preLods = r.lods;
                 data.preOrderedIdx = r.orderedIdx;
@@ -1494,9 +1589,6 @@
             data.bbox = r.bbox;
             data.uniqVerts = r.uniqVerts;
             data.remap = r.remap;
-            data.preVerts = r.verts;
-            data.preIdx = r.idx;
-            data.preVcount = r.vcount;
             data.preChunks = r.chunks;
             data.preLods = r.lods || null;
             data.preOrderedIdx = r.orderedIdx;
@@ -1518,8 +1610,8 @@
          * 默认跳过，首次点选时走全量拾取。?pickgrid=1 可强制预建。 */
         if (tri > 2000000 && !(global.MV.config && global.MV.config.pickgrid)) { return; }
 
-        var verts = d.preVerts || d.uniqVerts || d.positions;
-        var triIdx = d.preIdx || d.remap || null;
+        var verts = d.uniqVerts || d.positions;
+        var triIdx = d.remap || null;
         var copy = new Float32Array(verts);
         var idxCopy = triIdx ? new Uint32Array(triIdx) : null;
         var id = layer.id;

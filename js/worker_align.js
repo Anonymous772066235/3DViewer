@@ -1,5 +1,5 @@
-/* [W·后台] worker_icp.js — 配准迭代 / 候选验证
- * 协议：{cmd:'init'|'solve'|'verifyInit'|'score'|'cancel', ...}
+/* [W·后台] worker_align.js — Super4PCS 粗配准 / ICP 精配准
+ * 协议：{cmd:'coarseInit'|'coarseStep'|'init'|'solve'|'cancel', ...}
  * 依赖：core.js / algo.js（importScripts）
  */
 /* core.js / algo.js 的 IIFE 都用 (window) 收尾，而 Worker 里没有 window ——
@@ -13,7 +13,6 @@ var fixedPos = null;
 var fixedNrm = null;
 var kdFixed = null;
 
-var verifier = null;
 var cancelled = false;
 
 function post(m)
@@ -33,6 +32,7 @@ self.onmessage = function (e)
     {
         cancelled = true;
         if (activeSolver && activeSolver.cancel) { activeSolver.cancel(); }
+        if (activeCoarse && activeCoarse.cancel) { activeCoarse.cancel(); }
         return;
     }
 
@@ -40,17 +40,80 @@ self.onmessage = function (e)
 
     try
     {
+        if (msg.cmd === 'coarseInit') { doCoarseInit(msg); return; }
+        if (msg.cmd === 'coarseStep') { doCoarseStep(msg); return; }
         if (msg.cmd === 'init') { doInit(msg); return; }
         if (msg.cmd === 'solve') { doSolve(msg); return; }
-        if (msg.cmd === 'verifyInit') { doVerifyInit(msg); return; }
-        if (msg.cmd === 'score') { doScore(msg); return; }
-        if (msg.cmd === 'screen') { doScreen(msg); return; }
     }
     catch (err)
     {
         post({ type: 'error', message: String((err && err.message) || err) });
     }
 };
+
+/* ---------------- Super4PCS 粗配准（无需初始位姿 / 无约束） ---------------- */
+var activeCoarse = null;
+
+function doCoarseInit(msg)
+{
+    if (!self.MV.super4pcs || !self.MV.super4pcs.createRegistration)
+    {
+        post({ type: 'error', message: 'Super4PCS 不可用' });
+        return;
+    }
+    activeCoarse = self.MV.super4pcs.createRegistration(
+        { positions: msg.moving.pos, count: msg.moving.count },
+        { positions: msg.fixed.pos, count: msg.fixed.count },
+        msg.opts || {});
+    if (!activeCoarse)
+    {
+        post({ type: 'error', message: '粗配准求解器创建失败' });
+        return;
+    }
+    post({ type: 'coarseReady' });
+}
+
+function doCoarseStep(msg)
+{
+    if (!activeCoarse)
+    {
+        post({ type: 'error', message: '尚未 coarseInit' });
+        return;
+    }
+    if (cancelled)
+    {
+        post({ type: 'cancelled' });
+        return;
+    }
+    try
+    {
+        var cs = activeCoarse.step();
+        var out = {
+            type: 'coarseStep',
+            progress: cs.progress, trial: cs.trial, trials: cs.trials,
+            lcp: cs.lcp, done: cs.done,
+            matrix: cs.matrix ? Array.prototype.slice.call(cs.matrix) : null
+        };
+        if (cs.done)
+        {
+            var r = activeCoarse.result();
+            out.result = r ? {
+                matrix: r.matrix ? Array.prototype.slice.call(r.matrix) : null,
+                lcp: r.lcp, usedBaseline: !!r.usedBaseline,
+                baselineLcp: r.baselineLcp || 0,
+                baselineMatrix: r.baselineMatrix ? Array.prototype.slice.call(r.baselineMatrix) : null,
+                trial: r.trial, trials: r.trials
+            } : null;
+            activeCoarse = null;
+        }
+        post(out);
+    }
+    catch (err)
+    {
+        post({ type: 'error', message: String((err && err.message) || err) });
+        activeCoarse = null;
+    }
+}
 
 /* ---------------- 固定点集：只传一次，KD 只建一次 ---------------- */
 
@@ -162,52 +225,3 @@ function stepLoop()
     setTimeout(stepLoop, 0);
 }
 
-/* ---------------- 候选验证器 ---------------- */
-
-function doVerifyInit(msg)
-{
-    if (!fixedPos) { post({ type: 'error', message: '尚未 init 固定点集' }); return; }
-
-    verifier = self.MV.icp.createVerifier(
-        msg.moving.pos, normalsOf(msg.moving), fixedPos, fixedNrm, msg.opts || {});
-
-    if (!verifier) { post({ type: 'error', message: '验证器创建失败' }); return; }
-
-    post({ type: 'ready', ms: 0 });
-}
-
-function doScore(msg)
-{
-    if (!verifier) { post({ type: 'error', message: '尚未 verifyInit' }); return; }
-
-    var mats = msg.mats || [];
-    var out = [];
-
-    for (var i = 0; i < mats.length; i++)
-    {
-        if (cancelled) { post({ type: 'cancelled' }); return; }
-
-        var sc = verifier.score(mats[i]);
-        out.push({ rms: sc.rms, used: sc.used });
-    }
-
-    post({ type: 'mats', list: out });
-}
-
-function doScreen(msg)
-{
-    if (!verifier) { post({ type: 'error', message: '尚未 verifyInit' }); return; }
-
-    var mats = msg.mats || [];
-    var out = [];
-
-    for (var i = 0; i < mats.length; i++)
-    {
-        if (cancelled) { post({ type: 'cancelled' }); return; }
-
-        var sn = verifier.screen(mats[i]);
-        out.push({ hit: sn.hit, med: sn.med });
-    }
-
-    post({ type: 'mats', list: out });
-}

@@ -754,9 +754,9 @@
             var doWeld = WELD_VERTICES && !!d.format && d.format.indexOf('STL') === 0;
             var ix, sc, badIdx;
 
-            if (d.preVerts && d.preIdx && d.preOrderedIdx)
+            if (d.uniqVerts && d.remap && d.preOrderedIdx)
             {
-                ix = { verts: d.preVerts, idx: d.preIdx, vcount: d.preVcount };
+                ix = { verts: d.uniqVerts, idx: d.remap, vcount: d.vertCount };
                 sc = { idx: d.preOrderedIdx, chunks: d.preChunks };
                 if (!sc.chunks)
                 {
@@ -1130,8 +1130,62 @@
     /* ---------------- 法向线段 ---------------- */
     Renderer.prototype.ensureNormals = function (layer, lengthScale)
     {
-        if (!layer.gpu || layer.data.kind !== 'mesh') { return; }
+        if (!layer.gpu) { return; }
         var g = layer.gpu;
+
+        /* 点云：从 data.normals 直接构造线段（起点=点，终点=点+法向×长度）。
+         * 长度按 bbox 对角线比例，与点数无关。 */
+        if (layer.data.kind === 'points')
+        {
+            var pn = layer.data.normals;
+            if (!pn || !g.count) { return; }
+            var pkey = 'pts|' + String(lengthScale) + '|' + layer.data.normalsStamp;
+            if (g.normalVao && g.normalKey === pkey) { return; }
+            if (g.normalVao)
+            {
+                this.gl.deleteVertexArray(g.normalVao);
+                this.gl.deleteBuffer(g.normalBuffer);
+                g.normalVao = null; g.normalBuffer = null;
+            }
+            var bb = layer.data.bbox;
+            var pd = bb ? Math.sqrt((bb.max[0] - bb.min[0]) * (bb.max[0] - bb.min[0]) +
+                                    (bb.max[1] - bb.min[1]) * (bb.max[1] - bb.min[1]) +
+                                    (bb.max[2] - bb.min[2]) * (bb.max[2] - bb.min[2])) : 10;
+            var plen = Math.max(1e-4, pd * 0.012 * lengthScale);
+            var np = layer.data.positions;
+            var nCount = Math.min(g.count, Math.floor(np.length / 3));
+            var pout = new Float32Array(nCount * 12);
+            for (var pf = 0; pf < nCount; pf++)
+            {
+                var s = pf * 3, d = pf * 12;
+                var nx = pn[s], ny = pn[s + 1], nz = pn[s + 2];
+                var nr = nx * 0.5 + 0.5, ng = ny * 0.5 + 0.5, nb = nz * 0.5 + 0.5;
+                pout[d] = np[s]; pout[d + 1] = np[s + 1]; pout[d + 2] = np[s + 2];
+                pout[d + 3] = nr; pout[d + 4] = ng; pout[d + 5] = nb;
+                pout[d + 6] = np[s] + nx * plen;
+                pout[d + 7] = np[s + 1] + ny * plen;
+                pout[d + 8] = np[s + 2] + nz * plen;
+                pout[d + 9] = nr; pout[d + 10] = ng; pout[d + 11] = nb;
+            }
+            var pgl = this.gl;
+            var pvao = pgl.createVertexArray();
+            pgl.bindVertexArray(pvao);
+            var pbuf = pgl.createBuffer();
+            pgl.bindBuffer(pgl.ARRAY_BUFFER, pbuf);
+            pgl.bufferData(pgl.ARRAY_BUFFER, pout, pgl.STATIC_DRAW);
+            pgl.enableVertexAttribArray(0);
+            pgl.vertexAttribPointer(0, 3, pgl.FLOAT, false, 24, 0);
+            pgl.enableVertexAttribArray(1);
+            pgl.vertexAttribPointer(1, 3, pgl.FLOAT, false, 24, 12);
+            pgl.bindVertexArray(null);
+            g.normalVao = pvao;
+            g.normalBuffer = pbuf;
+            g.normalCount = nCount;
+            g.normalKey = pkey;
+            return;
+        }
+
+        if (layer.data.kind !== 'mesh') { return; }
         var key = String(lengthScale);
         if (g.normalVao && g.normalKey === key) { return; }
         if (g.normalVao)
@@ -1553,8 +1607,8 @@
             return;
         }
 
-        var verts = d.preVerts || d.uniqVerts || null;
-        var triIdx = d.preIdx || d.remap || null;
+        var verts = d.uniqVerts || null;
+        var triIdx = d.remap || null;
         if (!verts || !triIdx || verts.length < 3 || triIdx.length < g.triCount * 3)
         {
             var built = buildIndexed(d.positions, false);
@@ -1719,8 +1773,8 @@
 
         /* 边界是唯一需要全局去重的拓扑量，单独按需计算（computeTopo 已不再算它）。 */
         var d = layer.data;
-        var verts = d.preVerts || d.uniqVerts || null;
-        var triIdx = d.preIdx || d.remap || null;
+        var verts = d.uniqVerts || null;
+        var triIdx = d.remap || null;
         if ((!verts || !triIdx || triIdx.length < g.triCount * 3) ||
             !global.MV.topology || !global.MV.topology.computeBoundaryAsync)
         {
@@ -2394,6 +2448,13 @@
                 else
                 {
                     this.drawPoints(lay, mvp, viewM, ps, lay.opacity, 1);
+                    /* 点云法向线段：与 mesh 一致，由 ensureNormals 从 data.normals 构造 VAO。
+                     * ghost 副本不画，避免双视图叠加时重复。 */
+                    if (lay.showNormals)
+                    {
+                        this.ensureNormals(lay, lay.normalLen);
+                        this.drawNormals(lay, mvp, Math.min(1, lay.opacity + 0.15));
+                    }
                 }
             }
         }

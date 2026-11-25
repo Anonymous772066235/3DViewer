@@ -3056,72 +3056,10 @@
      * STL 这类无索引格式先焊接成唯一顶点表 + 重映射索引，再走同一条路径。
      * 线框/边界 EBO 必须直接写顶点表下标，焊接 id 只用于去重键。
      */
-    /* 快速线框 + 面法向：逐面独立计算，零全局 Map。
+    /* 线框 + 面法向：逐面独立计算，零全局 Map。
      * 线框直接输出每面 3 条边（共享边重复画在同位置，视觉无差别），
-     * 避免为「边界统计」让所有线框/法向都承担千万级 Map 开销。 */
-    function computeTopo(positions, triangles, tri)
-    {
-        var nTri = triangles ? Math.floor(triangles.length / 3)
-                             : Math.floor(positions.length / 9);
-        if (tri > nTri) { tri = nTri; }
-        var faces = new Float32Array(tri * 6);
-        var edges = new Uint32Array(tri * 6);      // tri*3 边 * 2 顶点
-        var nf = 0, ne = 0;
-        var sumEdge = 0, cntEdge = 0;
-        var probe = Math.max(1, Math.floor(tri / 512));
-
-        for (var i = 0; i < tri; i++)
-        {
-            var t3 = i * 3;
-            var v0 = triangles ? triangles[t3] : t3;
-            var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
-            var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
-            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
-
-            var o0 = v0 * 3, o1 = v1 * 3, o2 = v2 * 3;
-            var x0 = positions[o0], y0 = positions[o0 + 1], z0 = positions[o0 + 2];
-            var x1 = positions[o1], y1 = positions[o1 + 1], z1 = positions[o1 + 2];
-            var x2 = positions[o2], y2 = positions[o2 + 1], z2 = positions[o2 + 2];
-
-            var ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
-            var bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
-            var nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-            var nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (nl >= 1e-12)
-            {
-                nx /= nl; ny /= nl; nz /= nl;
-                var q = nf * 6;
-                faces[q] = (x0 + x1 + x2) / 3;
-                faces[q + 1] = (y0 + y1 + y2) / 3;
-                faces[q + 2] = (z0 + z1 + z2) / 3;
-                faces[q + 3] = nx; faces[q + 4] = ny; faces[q + 5] = nz;
-                nf++;
-            }
-            if ((i % probe) === 0)
-            {
-                var ex = x2 - x1, ey = y2 - y1, ez = z2 - z1;
-                sumEdge += (Math.sqrt(ax * ax + ay * ay + az * az) +
-                            Math.sqrt(bx * bx + by * by + bz * bz) +
-                            Math.sqrt(ex * ex + ey * ey + ez * ez)) / 3;
-                cntEdge++;
-            }
-            /* 线框：每面 3 条边顺序写出，不去重（零 Map）。 */
-            edges[ne++] = v0; edges[ne++] = v1;
-            edges[ne++] = v1; edges[ne++] = v2;
-            edges[ne++] = v2; edges[ne++] = v0;
-        }
-        return {
-            edges: edges.subarray(0, ne),           // 零拷贝视图，省去 slice 复制
-            faces: faces.subarray(0, nf * 6),
-            faceCount: nf, edgeCount: ne / 2,
-            /* 边界留空：由 computeBoundary 单独按需计算 */
-            boundary: new Uint32Array(0), boundaryEdges: 0,
-            avgEdge: cntEdge > 0 ? sumEdge / cntEdge : 1
-        };
-    }
-
-    /* computeTopo 的分帧异步版：与 computeTopo 同算法（零 Map），
-     * 每 CHUNK 面让出主线程一次，供进度条刷新。线框与法向共用这一次计算。 */
+     * 避免为「边界统计」让所有线框/法向都承担千万级 Map 开销。
+     * 每 CHUNK 面让出主线程一次，供进度条刷新；线框与法向共用这一次计算。 */
     function computeTopoAsync(positions, triangles, tri, onProgress, onDone)
     {
         var nTri = triangles ? Math.floor(triangles.length / 3)
@@ -3194,55 +3132,6 @@
             }
         }
         global.setTimeout(step, 0);
-    }
-
-    /* 边界边：只被一个面使用的边 —— 唯一需要全局去重的拓扑量。
-     * 仅在用户勾选「边界」时调用，避免拖慢线框/法向。 */
-    function computeBoundary(positions, triangles, tri)
-    {
-        var LIM = 16777216;
-        var edgeMap = new Map();                   // key -> 该边首次出现的索引
-        var eA = [], eB = [], eUse = [];
-        var nTri = triangles ? Math.floor(triangles.length / 3)
-                             : Math.floor(positions.length / 9);
-        if (tri > nTri) { tri = nTri; }
-        function addEdge(va, vb)
-        {
-            if (va === vb) { return; }
-            var key = (va < LIM && vb < LIM)
-                ? (va < vb ? va * LIM + vb : vb * LIM + va)
-                : (va < vb ? va + '|' + vb : vb + '|' + va);
-            var u = edgeMap.get(key);
-            if (u === undefined)
-            {
-                edgeMap.set(key, eA.length);
-                eA.push(va); eB.push(vb); eUse.push(1);
-            }
-            else if (eUse[u] < 2) { eUse[u]++; }
-        }
-        for (var i = 0; i < tri; i++)
-        {
-            var t3 = i * 3;
-            var v0 = triangles ? triangles[t3] : t3;
-            var v1 = triangles ? triangles[t3 + 1] : t3 + 1;
-            var v2 = triangles ? triangles[t3 + 2] : t3 + 2;
-            if (v0 === v1 || v1 === v2 || v2 === v0) { continue; }
-            addEdge(v0, v1); addEdge(v1, v2); addEdge(v2, v0);
-        }
-        var bCount = 0;
-        for (var k = 0; k < eUse.length; k++) { if (eUse[k] === 1) { bCount++; } }
-        var boundary = new Uint32Array(bCount * 2);
-        var bw = 0;
-        for (var k2 = 0; k2 < eUse.length; k2++)
-        {
-            if (eUse[k2] === 1)
-            {
-                boundary[bw++] = eA[k2]; boundary[bw++] = eB[k2];
-            }
-        }
-        eA.length = eB.length = eUse.length = 0;
-        edgeMap.clear();
-        return { boundary: boundary, boundaryEdges: bCount };
     }
 
     /* 边界计算的分帧异步版 —— 排序法（零 Map）：
@@ -3470,9 +3359,7 @@
     }
 
     global.MV.topology = {
-        computeTopo: computeTopo,
         computeTopoAsync: computeTopoAsync,
-        computeBoundary: computeBoundary,
         computeBoundaryAsync: computeBoundaryAsync,
         buildSpaceChunks: buildSpaceChunks,
         buildClusterLods: buildClusterLods
@@ -3483,17 +3370,15 @@
 
 /* ==================== Worker 专属：预处理 / 拾取网格 / 消息协议 ====================
  * 仅当在 Worker 中运行时注册（主线程加载 worker_io.js 时不执行）。
- * 由 worker_icp.js 同一手法保证 core.js 的 window IIFE 可用。
+ * 由 worker_align.js 同一手法保证 core.js 的 window IIFE 可用。
  */
 if (typeof importScripts === 'function')
 {
     self.window = self;
     var __QS = location.search || '';
-    importScripts('core.js' + __QS);
+    importScripts('core.js' + __QS, 'algo.js' + __QS);
 
-    /* 拓扑计算已上移到双环境共享的 MV.topology.computeTopo。
-     * 这里直接复用，保证 Worker 与 file:// 主线程兜底走同一套顶点表+面索引口径。 */
-    var computeTopo = self.MV.topology.computeTopo;
+    /* 分块/LOD 计算复用双环境共享的 MV.topology，Worker 与主线程口径一致。 */
     var buildSpaceChunks = self.MV.topology.buildSpaceChunks;
     var buildClusterLods = self.MV.topology.buildClusterLods;
 
@@ -3703,9 +3588,11 @@ if (typeof importScripts === 'function')
 
                     data.vertCount = an.vertCount;
                     data.bbox = an.bbox;
-                    data.preVerts = ix.verts;
-                    data.preIdx = ix.idx;
-                    data.preVcount = ix.vcount;
+                    /* 唯一顶点表字段：positions 保留解析器的原始 soup 语义（STL 导出保真），
+                     * uniqVerts/remap 是焊接后唯一顶点 + 面索引（渲染/拓扑/导出共用）。
+                     * 已废弃 preVerts/preIdx/preVcount 三个同值别名字段。 */
+                    data.uniqVerts = ix.verts;
+                    data.remap = ix.idx;
                     data.preChunks = sc.chunks;
                     data.preLods = buildClusterLods(ix, tri, sc.bbox, sc.n, sc.chunks);
                     data.preOrderedIdx = sc.idx;
@@ -3744,22 +3631,24 @@ if (typeof importScripts === 'function')
                 return;
             }
 
-            /* 拓扑按需计算：渲染首次需要线框/边界/法向时由主线程发此命令 */
-            if (m.cmd === 'topo')
+            /* 点云法向计算：k 近邻协方差最小特征向量，分帧回进度 */
+            if (m.cmd === 'pointNormals')
             {
-                var tp = computeTopo(m.verts || m.positions, m.idx || null, m.triCount | 0);
-                /* computeTopo 返回的是 subarray 视图；transfer 视图的底层 buffer 会
-                 * 让接收端拿到完整容量数组。这里 slice 成精确长度的独立 buffer 再传。 */
-                var edgesCopy = tp.edges.slice();
-                var facesCopy = tp.faces.slice();
-                var outTopo = {
-                    edges: edgesCopy, faces: facesCopy,
-                    faceCount: tp.faceCount, edgeCount: tp.edgeCount,
-                    boundary: new Uint32Array(0), boundaryEdges: 0,
-                    avgEdge: tp.avgEdge
+                var fn = self.MV.icp && self.MV.icp.computePointNormals;
+                if (!fn || !m.positions)
+                {
+                    self.postMessage({ id: m.id, cmd: 'error', message: '法向计算不可用' });
+                    return;
+                }
+                var opts = m.opts || {};
+                opts.onProgress = function (frac)
+                {
+                    self.postMessage({ id: m.id, cmd: 'progress',
+                        frac: frac, text: '法向计算 ' + Math.round(frac * 100) + '%' });
                 };
-                self.postMessage({ id: m.id, cmd: 'topo', topo: outTopo },
-                    [edgesCopy.buffer, facesCopy.buffer]);
+                var nrm = fn(m.positions, m.count || 0, opts);
+                self.postMessage({ id: m.id, cmd: 'pointNormals', normals: nrm },
+                    [nrm.buffer]);
                 return;
             }
 
